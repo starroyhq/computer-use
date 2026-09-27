@@ -21,11 +21,11 @@ Cua Driver supplies desktop capture, accessibility and input; Playwright supplie
 | Platform | Build and connection | Validation |
 |---|---|---|
 | macOS Apple Silicon | macOS 14+ build target; menu-bar app, local CLI / MCP | Previous identifier tested with AppKit Fixture and Codex; current identifier passes build and signature checks, desktop regression pending |
-| Windows 11 ARM64 | Portable tray development package; local CLI / MCP, Mac access over SSH | Previous identifier tested with Win32 / WinForms / WPF Fixture and Mac Codex in one VM; current source needs repackaging and regression |
+| Windows 11 ARM64 | Portable tray development package; local CLI / MCP, Mac access over SSH | Current build passed 66 fixture input cases, one Mac Codex model regression, authorization/disconnect/exit checks in one VM |
 | Windows 11 x64 | Separate x64 build target | Earlier package passed component checks under x64 emulation on ARM64; native x64 desktop acceptance pending |
 | macOS Intel / Linux | No host package provided by this project | Not validated |
 
-The current application identifier is `com.starroy.computeruse`. Desktop tests above used earlier development builds and do not establish acceptance for the renamed version. See the [validation record](docs/validation-results.md) (Chinese) for results and outstanding coverage.
+The current application identifier is `com.starroy.computeruse`. Windows ARM64 passed the limited acceptance above; earlier macOS and x64 evidence does not establish current-build acceptance. See the [validation record](docs/validation-results.md) (Chinese) for results and outstanding coverage.
 
 ## Quick start: build from source
 
@@ -120,6 +120,7 @@ Browser integration tests require matching Chromium; missing components cause sk
 - [Usage](docs/USAGE.md): CLI, action semantics, browser setup and troubleshooting
 - [Windows guide](docs/WINDOWS.en.md) / [Windows 接入](docs/WINDOWS.md)
 - [Architecture](docs/ARCHITECTURE.md), [packaging](scripts/README.md) (Chinese)
+- [GitHub CI and development artifacts](docs/CI.md) (Chinese): platform checks, downloads, checksums and acceptance limits
 - [Validation procedure](docs/VALIDATION.md), [results](docs/validation-results.md) (Chinese), [roadmap](docs/ROADMAP.md)
 
 ## License and acknowledgments

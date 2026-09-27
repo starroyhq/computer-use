@@ -16,7 +16,8 @@ internal sealed class HostApplication : ApplicationContext
     private bool _running;
     private bool _busy;
     private bool _exiting;
-    private bool _alertActive;
+    private ApprovalDialog? _approvalDialog;
+    private readonly HashSet<string> _pendingDecisions = new();
     private bool _httpEnabled;
     private string? _stopAfterStart;
     private string _status = "正在启动…";
@@ -165,7 +166,16 @@ internal sealed class HostApplication : ApplicationContext
             case "clients": RebuildClientMenu(message); break;
             case "pair_request":
             case "foreground_request":
+                _pendingDecisions.Add(String(message, String(message, "event") == "pair_request" ? "clientId" : "sessionId"));
                 _alerts.Enqueue(message);
+                PresentNextAlert();
+                break;
+            case "decision_finished":
+                var requestId = String(message, "requestId");
+                if (!_pendingDecisions.Remove(requestId)) break;
+                SetStatus(message.TryGetProperty("approved", out var approved) && approved.ValueKind == JsonValueKind.True
+                    ? "已批准请求" : "请求已拒绝、过期或失效；未授权");
+                if (_approvalDialog?.RequestId == requestId) _approvalDialog.Withdraw();
                 PresentNextAlert();
                 break;
             default: _ = StopAsync("运行时返回了未知事件"); break;
@@ -190,14 +200,17 @@ internal sealed class HostApplication : ApplicationContext
 
     private void PresentNextAlert()
     {
-        if (_alertActive || _alerts.Count == 0 || _runtime is null || !_running) return;
-        _alertActive = true;
+        if (_approvalDialog is not null || _runtime is null || !_running) return;
+        // Requests can expire while another dialog is being displayed.
+        while (_alerts.TryPeek(out var queued) && !_pendingDecisions.Contains(String(queued,
+            String(queued, "event") == "pair_request" ? "clientId" : "sessionId"))) _alerts.Dequeue();
+        if (_alerts.Count == 0) return;
         var request = _alerts.Dequeue();
         var source = _runtime;
         var kind = String(request, "event");
         var isPair = kind == "pair_request";
         var identifier = String(request, isPair ? "clientId" : "sessionId");
-        if (identifier.Length == 0) { _ = StopAsync("运行时请求缺少授权标识"); _alertActive = false; return; }
+        if (identifier.Length == 0) { _ = StopAsync("运行时请求缺少授权标识"); return; }
         string explanation;
         if (isPair)
         {
@@ -206,15 +219,26 @@ internal sealed class HostApplication : ApplicationContext
             explanation = $"客户端：{String(request, "name")}\n标识：{identifier}\n应用路径：\n{(apps.Length == 0 ? "无" : apps)}\n独立浏览器：{(request.TryGetProperty("browser", out var browser) && browser.ValueKind == JsonValueKind.True ? "允许" : "不允许")}\n\n默认使用后台操作；前台操作另行确认。";
         }
         else explanation = $"客户端：{String(request, "clientName")}\n目标：{String(request, "targetTitle")}\n会话：{identifier}\n\n此操作可能切换焦点并移动鼠标。授权仅适用于当前会话和目标。";
-        var answer = MessageBox.Show(_window, explanation, isPair ? "允许客户端操作这些应用？" : "允许当前会话使用前台操作？",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-        _alertActive = false;
-        if (ReferenceEquals(_runtime, source) && _running)
-            _ = ControlAsync(isPair ? (answer == DialogResult.Yes ? "pair_allow" : "pair_deny")
-                                   : (answer == DialogResult.Yes ? "foreground_allow" : "foreground_deny"),
-                answer == DialogResult.Yes ? "已批准请求" : "已拒绝请求",
-                clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier);
-        PresentNextAlert();
+        var dialog = new ApprovalDialog(identifier, isPair ? "允许客户端操作这些应用？" : "允许当前会话使用前台操作？", explanation);
+        _approvalDialog = dialog;
+        dialog.FormClosed += async (_, _) =>
+        {
+            _approvalDialog = null;
+            if (!dialog.Withdrawn && ReferenceEquals(_runtime, source) && _running && _pendingDecisions.Contains(identifier))
+            {
+                var allow = dialog.DialogResult == DialogResult.Yes;
+                // A successful pipe write is not an authorization result.
+                SetStatus("已提交决定，等待运行时确认…");
+                try
+                {
+                    await source.SendControlAsync(isPair ? (allow ? "pair_allow" : "pair_deny") : (allow ? "foreground_allow" : "foreground_deny"),
+                        clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier);
+                }
+                catch { if (ReferenceEquals(_runtime, source)) await StopAsync("无法向运行时发送授权决定"); }
+            }
+            PresentNextAlert();
+        };
+        dialog.Show(_window);
     }
 
     private static string String(JsonElement element, string name) =>
@@ -253,6 +277,8 @@ internal sealed class HostApplication : ApplicationContext
         _running = false;
         _httpEnabled = false;
         _alerts.Clear();
+        _pendingDecisions.Clear();
+        _approvalDialog?.Withdraw();
         SetStatus(status);
         var current = _runtime;
         _runtime = null;

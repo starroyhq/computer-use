@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_packages:
+        description: Build development packages after checks pass
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUA_DRIVER_RS_TELEMETRY_ENABLED: 'false'
+  CUA_DRIVER_RS_UPDATE_CHECK: 'false'
+  DO_NOT_TRACK: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
+jobs:
+  checks:
+    name: Check ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            arch: arm64
+            browser: true
+          - platform: windows-x64
+            os: windows-2025
+            arch: x64
+            browser: true
+          - platform: windows-arm64
+            os: windows-11-arm
+            arch: arm64
+            browser: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          architecture: ${{ matrix.arch }}
+          cache: pnpm
+      - uses: actions/setup-dotnet@v6
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: 10.0.x
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium for browser integration tests
+        if: matrix.browser
+        run: pnpm exec playwright install chromium
+      - name: Require working Chromium (do not silently skip browser tests)
+        if: matrix.browser
+        run: node --input-type=module -e "import { chromium } from 'playwright'; const browser = await chromium.launch({headless:true}); await browser.close();"
+      - name: Typecheck, test and build
+        run: pnpm check
+      - name: Test Swift host
+        if: runner.os == 'macOS'
+        run: pnpm native:test
+      - name: Build Windows host and regression fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          $projects = @(
+            'windows/ComputerUse.WindowsHost/ComputerUse.WindowsHost.csproj',
+            'validation/windows/ComputerUse.WindowsFixture/ComputerUse.WindowsFixture.csproj',
+            'validation/windows/ComputerUse.WindowsHostTests/ComputerUse.WindowsHostTests.csproj'
+          )
+          foreach ($project in $projects) {
+            dotnet build $project -c Release -r "win-$env:TARGET_ARCH"
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $project" }
+          }
+      - name: Record coverage boundaries
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          BROWSER_TESTS: ${{ matrix.browser }}
+        run: |
+          {
+            echo "### $PLATFORM checks"
+            echo "Chromium integration enabled: $BROWSER_TESTS."
+            echo 'Windows ARM64 browser tests and Windows Unix-IPC tests are platform skips, not passes.'
+            echo 'Desktop permissions, interactive authorization UI, real input and model acceptance require separate desktop validation.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  packages:
+    name: Development packages
+    needs: checks
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build_packages)
+    uses: ./.github/workflows/desktop-packages.yml

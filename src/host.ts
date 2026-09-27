@@ -14,7 +14,11 @@ const { values } = parseArgs({ options: { socket: { type: 'string' }, 'driver-so
 if (!values['data-dir'] || (values.windows ? process.platform !== 'win32' || !values['driver-binary'] : !values.socket || !values['driver-socket'])) {
   throw new Error('Launch this worker from the Computer Use host.');
 }
-const emit = (event: HostEvent): void => { process.stdout.write(JSON.stringify(event) + '\n'); };
+const emit = (event: HostEvent): void => {
+  // Decision lifecycle notifications are currently consumed by the Windows host.
+  if (event.event === 'decision_finished' && !values.windows) return;
+  process.stdout.write(JSON.stringify(event) + '\n');
+};
 const desktop = values.windows ? new CuaBackend(values['driver-binary']!, connectWindowsWorker, 'win32') : new CuaBackend(values['driver-socket']!);
 const runtime = new Runtime({ dataDir: values['data-dir'], backends: [desktop, new BrowserBackend(values['data-dir'])], emit });
 const rpcRequest = z.object({ command: z.literal('rpc_request'), id: z.string().min(1).max(100), token: z.string().max(512).optional(),

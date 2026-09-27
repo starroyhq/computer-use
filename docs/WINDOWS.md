@@ -2,7 +2,7 @@
 
 简体中文 | [English](WINDOWS.en.md) · [返回首页](../README.md)
 
-更名前的开发版本已在 Windows 11 ARM64 的**交互式登录桌面**完成限定范围实测；当前 `com.starroy.computeruse` 源码仍需重新打包回归，原生 x64 桌面未验收，见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。便携包是开发产物，不是已签名安装器；UAC 安全桌面和高完整性应用不在支持范围内。
+当前 `com.starroy.computeruse` 的 ARM64 包已在一台 Windows 11 ARM64 虚拟机的**交互式登录桌面**完成限定验收：66 个 Fixture 输入用例、一次真实 Mac Codex 模型回归及授权、断线与退出检查。原生 x64 桌面未验收，完整边界见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。便携包是开发产物，不是已签名安装器；UAC 安全桌面和高完整性应用不在支持范围内。
 
 ## Windows 构建与启动
 
@@ -28,6 +28,8 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 Set-Location '.\artifacts\Computer Use Windows x64' # 预构建 ZIP：直接在解压目录执行后续命令
 & .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
 ```
+
+配对和前台授权请求须在 60 秒内处理。过期或失效后弹窗自动关闭，排队的失效请求不会再次弹出。点击“是”仅提交决定，宿主收到运行时确认后才显示“已批准请求”；未授权时需由 Agent 发起新请求。关闭弹窗或按默认按钮均为拒绝。
 
 在托盘批准配对，然后运行：
 
@@ -95,5 +97,7 @@ tool_timeout_sec = 90
 - 配对程序不可见或动作拒绝：确认可执行文件路径、窗口所属进程及应用权限级别。后台动作不能送达时，需在托盘中批准显式前台会话；不会自动切换。
 
 自动化测试和真实 Windows 虚拟机结果分别记在 [验证记录](validation-results.md)；静态打包检查不代表截图和输入已通过实测。
+
+授权窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝及停止清理，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。
 
 Windows 元素定向输入与点击始终使用后台辅助功能路径，包括已批准的前台会话；拒绝或不确定时不自动切换或重发。无元素 ID 的前台长文本、画布和终端不在完整性保证范围内。具体动作语义见[使用说明](USAGE.md)。

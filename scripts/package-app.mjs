@@ -54,7 +54,7 @@ async function extract(archive, destination) {
   run('/usr/bin/tar', ['-xzf', archive, '-C', destination]);
 }
 
-async function verify(app) {
+export async function verify(app) {
   const resources = join(app, 'Contents', 'Resources');
   const receipt = JSON.parse(await readFile(join(resources, 'build-receipt.json'), 'utf8'));
   if (receipt.owner !== MARKER) throw new Error('Not a package created by this script.');

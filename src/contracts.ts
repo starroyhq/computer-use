@@ -54,6 +54,7 @@ export type Client = { id: string; name: string; tokenHash: string; grant: Grant
 export type HostEvent =
   | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; browser: boolean }
   | { event: 'foreground_request'; sessionId: string; clientName: string; targetTitle: string }
+  | { event: 'decision_finished'; requestId: string; approved: boolean }
   | { event: 'clients'; clients: Array<{ id: string; name: string }> }
   | { event: 'ready' }
   | { event: 'rpc_response'; id: string; result?: unknown; error?: { code: ErrorCode; message: string } }

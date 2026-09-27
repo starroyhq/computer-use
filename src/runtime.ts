@@ -95,6 +95,7 @@ export class Runtime implements RpcService {
       case 'stop':
         this.stopped = true;
         this.paused = true;
+        for (const pair of this.pairs.values()) pair.resolve(false);
         for (const item of this.work.values()) item.controller.abort();
         for (const id of this.sessions.keys()) this.removeSession(id);
         await Promise.allSettled(this.options.backends.map(b => b.cancel()));
@@ -131,16 +132,22 @@ export class Runtime implements RpcService {
     if (this.pairs.size >= 3) throw new CuError('busy', 'Too many pending pairing requests.');
     const token = randomBytes(32).toString('base64url');
     const client: Client = { id: randomUUID(), name: parsed.data.name, tokenHash: hash(token), grant: { appIds: [...new Set(parsed.data.appIds.map(id => canonicalAppId(id, this.options.platform)))], browser: parsed.data.browser } };
-    const approved = await this.requestDecision(resolve => {
-      this.pairs.set(client.id, { client, resolve });
-      this.options.emit({ event: 'pair_request', clientId: client.id, name: client.name, ...client.grant });
-    }, () => this.pairs.delete(client.id));
-    if (!approved || this.stopped) throw new CuError('permission_denied', 'Pairing was denied or expired.');
-    this.clients.clients.set(client.id, client);
-    try { await this.clients.save(); }
-    catch (error) { this.clients.clients.delete(client.id); throw error; }
-    this.emitClients();
-    return { clientId: client.id, token };
+    let granted = false;
+    try {
+      const approved = await this.requestDecision(resolve => {
+        this.pairs.set(client.id, { client, resolve });
+        this.options.emit({ event: 'pair_request', clientId: client.id, name: client.name, ...client.grant });
+      }, () => this.pairs.delete(client.id));
+      if (!approved || this.stopped) throw new CuError('permission_denied', 'Pairing was denied or expired.');
+      this.clients.clients.set(client.id, client);
+      try { await this.clients.save(); }
+      catch (error) { this.clients.clients.delete(client.id); throw error; }
+      this.emitClients();
+      granted = true;
+      return { clientId: client.id, token };
+    } finally {
+      this.options.emit({ event: 'decision_finished', requestId: client.id, approved: granted });
+    }
   }
   private async listTargets(client: Client): Promise<Target[]> {
     const results = await bounded(Promise.all(this.options.backends.map(b => b.targets(client.grant))), 25_000);
@@ -159,15 +166,19 @@ export class Runtime implements RpcService {
     if (session.exclusive && this.work.size > 0) throw new CuError('busy', 'Wait for pending actions before acquiring an exclusive session.');
     this.sessions.set(session.id, session);
     if (session.mode === 'foreground') {
-      const approved = await this.requestDecision(resolve => {
-        this.foreground.set(session.id, resolve);
-        this.options.emit({ event: 'foreground_request', sessionId: session.id, clientName: client.name, targetTitle: target.title });
-      }, () => this.foreground.delete(session.id));
-      if (!approved || !this.sessions.has(session.id) || !this.clients.clients.has(client.id) || this.stopped) {
-        this.removeSession(session.id);
-        throw new CuError('permission_denied', 'Foreground access was denied or expired.');
+      try {
+        const approved = await this.requestDecision(resolve => {
+          this.foreground.set(session.id, resolve);
+          this.options.emit({ event: 'foreground_request', sessionId: session.id, clientName: client.name, targetTitle: target.title });
+        }, () => this.foreground.delete(session.id));
+        if (!approved || !this.sessions.has(session.id) || !this.clients.clients.has(client.id) || this.stopped) {
+          this.removeSession(session.id);
+          throw new CuError('permission_denied', 'Foreground access was denied or expired.');
+        }
+        session.foregroundApproved = true;
+      } finally {
+        this.options.emit({ event: 'decision_finished', requestId: session.id, approved: session.foregroundApproved });
       }
-      session.foregroundApproved = true;
     }
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }

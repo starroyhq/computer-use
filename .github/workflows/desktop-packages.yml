@@ -1,0 +1,66 @@
+name: Desktop Package Artifacts
+
+# Called only after all platform checks succeed. This workflow publishes no Release.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            arch: arm64
+          - platform: windows-x64
+            os: windows-2025
+            arch: x64
+          - platform: windows-arm64
+            os: windows-11-arm
+            arch: arm64
+    env:
+      CUA_DRIVER_RS_TELEMETRY_ENABLED: 'false'
+      CUA_DRIVER_RS_UPDATE_CHECK: 'false'
+      DO_NOT_TRACK: '1'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          architecture: ${{ matrix.arch }}
+          cache: pnpm
+      - uses: actions/setup-dotnet@v6
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: 10.0.x
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build macOS development app
+        if: runner.os == 'macOS'
+        run: pnpm package:app
+      - name: Build Windows portable package
+        if: runner.os == 'Windows'
+        run: node scripts/package-windows.mjs --arch ${{ matrix.arch }}
+      - name: Archive, extract, verify and checksum
+        run: node .github/scripts/archive-package.mjs ${{ matrix.platform }}
+      - name: Upload verified development package
+        uses: actions/upload-artifact@v7
+        with:
+          name: computer-use-${{ matrix.platform }}-${{ github.sha }}
+          path: artifacts/ci/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

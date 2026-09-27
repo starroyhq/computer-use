@@ -121,7 +121,7 @@ export async function assertPeMachine(path, target) {
   } finally { await file.close(); }
 }
 
-async function verify(bundle, target) {
+export async function verify(bundle, target) {
   const receipt = JSON.parse(await readFile(join(bundle, 'build-receipt.json'), 'utf8'));
   if (receipt.owner !== target.marker || receipt.arch !== target.rid
     || receipt.node?.filename !== target.node.filename || receipt.node?.sha256 !== target.node.sha256

@@ -2,7 +2,7 @@
 
 [简体中文](WINDOWS.md) | English · [Home](../README.en.md)
 
-Earlier builds were tested on an **interactive Windows 11 ARM64 desktop**. Current source using `com.starroy.computeruse` still needs repackaging and regression; native x64 desktop acceptance is pending. See the [validation record](validation-results.md) (Chinese). A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. Packages are development artifacts, not signed installers. Elevated applications and the UAC secure desktop are unsupported.
+The current ARM64 package using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop**: 66 fixture input cases, one real Mac Codex model regression, and authorization, disconnect and exit checks. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. Packages are development artifacts, not signed installers. Elevated applications and the UAC secure desktop are unsupported.
 
 ## Build and start on Windows
 
@@ -98,6 +98,10 @@ Restart Codex and inspect `/mcp` or `codex mcp list`. Start with the README's re
 If noninteractive `codex exec` fails with `MCP tool call requires approval, but approval policy is never`, a **temporary configuration limited to a paired disposable fixture** can set `default_tools_approval_mode = "approve"` for this server. Do not change user-level configuration for that test. This only handles Codex tool approval; tray pairing and foreground approval still apply. In an interactive client, approve tools when prompted. See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## Troubleshooting
+
+Pairing and foreground requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Yes submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
+
+Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, and stop cleanup. This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
 
 - `doctor` cannot connect: check that the tray runs in the logged-in desktop and that host and driver versions match.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.

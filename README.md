@@ -21,11 +21,11 @@ Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright �
 | 平台 | 构建与接入 | 验证范围 |
 |---|---|---|
 | macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 旧标识版本完成 AppKit Fixture 与 Codex 桌面实测；新标识已通过构建、签名校验，桌面回归待完成 |
-| Windows 11 ARM64 | 托盘便携开发包；本机 CLI / MCP，Mac 可经 SSH 连接 | 旧标识版本在一台虚拟机完成 Win32 / WinForms / WPF Fixture 和 Mac Codex 实测；当前源码需重新打包回归 |
+| Windows 11 ARM64 | 托盘便携开发包；本机 CLI / MCP，Mac 可经 SSH 连接 | 当前版本在一台虚拟机通过 66 个 Fixture 输入用例、1 次 Mac Codex 模型回归及授权/断线/退出检查 |
 | Windows 11 x64 | 独立 x64 构建目标 | 旧开发包在 ARM64 系统的 x64 模拟环境通过组件校验；原生 x64 桌面未验收 |
 | macOS Intel / Linux | 暂无本项目宿主交付 | 未验证 |
 
-应用标识现为 `com.starroy.computeruse`。上述桌面实测来自更名前的开发版本，不能代替当前版本验收。测试方法、结果及未覆盖项见 [验证记录](docs/validation-results.md)。
+应用标识现为 `com.starroy.computeruse`。Windows ARM64 已完成上述限定验收；macOS 和 x64 的旧版证据不能代替当前版本验收。测试方法、结果及未覆盖项见 [验证记录](docs/validation-results.md)。
 
 ## 快速开始：从源码构建
 
@@ -120,6 +120,7 @@ pnpm native:test # 仅 macOS
 - [使用说明 / Usage](docs/USAGE.md)：CLI、动作语义、浏览器与排错
 - [Windows 接入](docs/WINDOWS.md) / [Windows guide](docs/WINDOWS.en.md)
 - [架构](docs/ARCHITECTURE.md)、[构建与打包](scripts/README.md)
+- [GitHub CI 与开发产物](docs/CI.md)：跨平台检查、下载、校验和验收边界
 - [验证方法](docs/VALIDATION.md)、[验证结果](docs/validation-results.md)、[路线图](docs/ROADMAP.md)
 
 ## 许可与致谢

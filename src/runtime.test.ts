@@ -50,7 +50,55 @@ describe('Runtime authorization and execution', () => {
     runtime = new Runtime({ dataDir: directory, backends: [backend], emit: event => events.push(event), now: () => clock, platform: 'darwin' });
     await runtime.start();
   });
-  afterEach(async () => { await runtime.close(); await rm(directory, { recursive: true, force: true }); });
+  afterEach(async () => { vi.useRealTimers(); await runtime.close(); await rm(directory, { recursive: true, force: true }); });
+
+  it('notifies the host when pairing expires and ignores a late approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = call(undefined, 'pair', { name: 'Expired', appIds: [target.appId], browser: false });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
+    const request = events.findLast(e => e.event === 'pair_request');
+    if (!request || request.event !== 'pair_request') throw new Error('Missing pair request');
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejected;
+    await runtime.control({ command: 'pair_allow', clientId: request.clientId });
+    expect(events.filter(e => e.event === 'decision_finished')).toEqual([
+      { event: 'decision_finished', requestId: request.clientId, approved: false },
+    ]);
+    expect(runtime.clients.clients.size).toBe(0);
+  });
+
+  it('confirms pairing only after credentials have been persisted', async () => {
+    const save = vi.spyOn(runtime.clients, 'save').mockRejectedValueOnce(new Error('disk failure'));
+    await expect(pair()).rejects.toThrow('disk failure');
+    expect(events.findLast(e => e.event === 'decision_finished')).toMatchObject({ approved: false });
+    expect(runtime.clients.clients.size).toBe(0);
+    save.mockRestore();
+    const client = await pair();
+    expect(events.findLast(e => e.event === 'decision_finished')).toEqual({ event: 'decision_finished', requestId: client.clientId, approved: true });
+    expect(JSON.parse(await readFile(join(directory, 'clients.json'), 'utf8'))).toEqual([
+      expect.objectContaining({ id: client.clientId, name: 'Test Agent' }),
+    ]);
+  });
+
+  it.each(['expire', 'revoke', 'stop', 'allow'] as const)('finishes a foreground prompt on %s without accepting a late response', async outcome => {
+    const client = await pair();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = call<{ sessionId: string }>(client.token, 'session_open', { targetId: target.id, mode: 'foreground' });
+    const settled = outcome === 'allow' ? pending : expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
+    await vi.waitFor(() => expect(events.some(e => e.event === 'foreground_request')).toBe(true));
+    const request = events.findLast(e => e.event === 'foreground_request');
+    if (!request || request.event !== 'foreground_request') throw new Error('Missing foreground request');
+    if (outcome === 'expire') await vi.advanceTimersByTimeAsync(60_000);
+    else if (outcome === 'revoke') await runtime.control({ command: 'revoke', clientId: client.clientId });
+    else if (outcome === 'stop') await runtime.control({ command: 'stop' });
+    else await runtime.control({ command: 'foreground_allow', sessionId: request.sessionId });
+    await settled;
+    await runtime.control({ command: 'foreground_allow', sessionId: request.sessionId });
+    expect(events.filter(e => e.event === 'decision_finished' && e.requestId === request.sessionId)).toEqual([
+      { event: 'decision_finished', requestId: request.sessionId, approved: outcome === 'allow' },
+    ]);
+    expect(backend.act).not.toHaveBeenCalled();
+  });
 
   it('requires local pairing approval and deduplicates the explicit application scope', async () => {
     await expect(pair('Denied', false)).rejects.toMatchObject({ code: 'permission_denied' });
