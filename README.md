@@ -1,106 +1,127 @@
 # Computer Use
 
-基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，为现有 AI Agent 提供带配对授权与会话管理的跨平台电脑操作运行时。macOS 提供菜单栏 App；Windows ARM64 / x64 开发版提供托盘宿主。两者复用 CLI＋Skill、stdio MCP、本机 HTTP MCP，以及权限、会话、调度与结果记录。
+简体中文 | [English](README.en.md)
 
-Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright 提供受控浏览器操作，MCP 通信使用官方 TypeScript SDK。本项目实现原生宿主、配对与撤销、会话和快照管理、动作去重与结果记录、CLI/MCP 接入、后端适配及打包；上游依赖及其许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
 
-**当前为开发预览。** 已实现的接口、自动化测试与真实软件验收分别列在 [验证说明](docs/VALIDATION.md)。构建成功不等于已通过 Blender、Final Cut Pro 或后台人机共存验收。
+**开发预览，当前从源码构建。** 尚未提供正式安装器或公开发布包，已验证范围见下表。
 
-## 构建与运行
+## 主要功能
 
-开发要求：Apple Silicon Mac、Xcode/Swift、Node 24+、pnpm 10。App 的构建目标为 macOS 14+；仅在实际验证过的系统上声明兼容。构建过程中下载固定版本的 Cua Driver 和 Node，核对 SHA-256。终端不需要系统桌面权限；权限应授予安装包中的 App。
+- **桌面操作**：窗口截图、辅助功能元素、点击、输入、快捷键、滚动和直线拖拽；支持程度取决于平台、应用和动作。
+- **Agent 接入**：stdio MCP、可选本机 HTTP MCP，以及可独立使用的 CLI。
+- **配对授权**：明确选择可控制的应用，前台会话单独批准；支持暂停、撤销和紧急停止。
+- **动作记录**：每次操作使用新快照，通过请求 ID 查询结果；不自动重放结果不确定的动作。
+- **独立浏览器**：通过 Playwright 操作单独的 headless Chromium，不继承日常浏览器的登录状态。
+
+Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright 提供浏览器操作，MCP 通信使用官方 TypeScript SDK。本项目实现宿主、授权、会话与快照管理、动作去重和结果记录、CLI/MCP 接入、后端适配与打包。上游许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
+## 平台状态
+
+| 平台 | 构建与接入 | 验证范围 |
+|---|---|---|
+| macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 旧标识版本完成 AppKit Fixture 与 Codex 桌面实测；新标识已通过构建、签名校验，桌面回归待完成 |
+| Windows 11 ARM64 | 托盘便携开发包；本机 CLI / MCP，Mac 可经 SSH 连接 | 旧标识版本在一台虚拟机完成 Win32 / WinForms / WPF Fixture 和 Mac Codex 实测；当前源码需重新打包回归 |
+| Windows 11 x64 | 独立 x64 构建目标 | 旧开发包在 ARM64 系统的 x64 模拟环境通过组件校验；原生 x64 桌面未验收 |
+| macOS Intel / Linux | 暂无本项目宿主交付 | 未验证 |
+
+应用标识现为 `com.starroy.computeruse`。上述桌面实测来自更名前的开发版本，不能代替当前版本验收。测试方法、结果及未覆盖项见 [验证记录](docs/validation-results.md)。
+
+## 快速开始：从源码构建
+
+先安装 Git、Node 24+ 和 pnpm 10，然后获取源码：
 
 ```sh
+git clone https://github.com/starroyhq/computer-use.git
+cd computer-use
 pnpm install --frozen-lockfile
-pnpm check
-pnpm native:test
+```
+
+### macOS
+
+另需 Apple Silicon Mac 和 Xcode/Swift 工具链。在仓库根目录运行：
+
+```sh
 pnpm package:app
 open 'artifacts/Computer Use.app'
 ```
 
-启动后会显示状态与权限窗口，选择“请求系统权限”，在系统设置中允许辅助功能和屏幕录制，再完全退出并重新打开 App。关闭窗口后仍驻留菜单栏，再次打开 App 可重新显示窗口。菜单栏中选择“安装 CLI”可在 `~/.local/bin` 建立链接，不覆盖已有命令；也可以直接使用 App 内的 CLI：
+在 App 中请求“辅助功能”和“屏幕录制”权限，授权给 Computer Use 后完全退出并重新打开。默认构建使用 ad-hoc 开发签名，未经公证；重新签名或更换应用标识后可能需要重新授权。运行中不要覆盖 App。
+
+从菜单栏选择“安装 CLI 到 ~/.local/bin”，然后在当前终端验证入口：
 
 ```sh
-'artifacts/Computer Use.app/Contents/Resources/bin/computer-use' --help
+export PATH="$HOME/.local/bin:$PATH"
+command -v computer-use
+computer-use --help
 ```
 
-默认打包使用 ad-hoc 开发签名，**不是经过公证的公众发行包**。Developer ID 签名、签名后实测和公证是独立分发门槛，见 [打包说明](scripts/README.md)。运行中不要覆盖 App；重新构建后应退出旧实例再打开。
+这条 `export` 只影响当前终端；新终端需要相同的 PATH 设置。也可直接调用 `artifacts/Computer Use.app/Contents/Resources/bin/computer-use`。
 
-## CLI：无需 MCP
-
-先打开目标应用。以下以专用 TextEdit 测试文档为例；本工具不自动取得所有应用权限：
-
-```sh
-computer-use pair --name 'My Agent' --app com.apple.TextEdit
-computer-use doctor
-computer-use targets
-computer-use schema act
-```
-
-配对会在菜单栏 App 中展示请求的应用清单。接受后，CLI 将凭据存入权限为 0600 的本地文件，不打印密钥。不同客户端使用不同 `--profile` 配对；授权可以在 App 中撤销。
-
-```sh
-computer-use session_open --json '{"targetId":"从 targets 返回的 ID"}'
-computer-use observe --json '{"sessionId":"从 session_open 返回的 ID"}'
-computer-use act --input request.json
-computer-use session_close --json '{"sessionId":"会话 ID"}'
-```
-
-`request.json` 使用 `schema act` 中的参数。CLI 可自动添加 `requestId`；连接中断时返回该 ID，以便查询 `action_status`。截图以私有文件路径返回。每次动作消费一个快照，下一次动作前重新 `observe`。`executed` 只表示执行阶段结束；只有显式结果条件通过才返回 `verified`。
-
-配套 [CLI Skill](skills/computer-use/SKILL.md) 随 App 打包，也可按 Agent 的安装方式放入其 skills 目录。Skill 是指导，不是权限执行层。
-
-## MCP
-
-Codex：先为这个 Agent 建立独立配对，在 App 中批准明确的应用清单，然后生成配置：
+打开 TextEdit 并新建一个空白测试文档，为 Agent 配对：
 
 ```sh
 computer-use pair --profile codex --name 'Codex' --app com.apple.TextEdit
+```
+
+在 App 中批准后，检查连接并生成配置：
+
+```sh
+computer-use doctor --profile codex
+computer-use targets --profile codex
 computer-use config codex --profile codex
 ```
 
-将输出的 TOML 片段添加到 Codex 的用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`，然后重启客户端并检查 MCP 工具。配置只含本机启动路径和 profile 名称；凭据仍由本机 CLI 私下读取，不写入 Agent 配置。Codex 的 [MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 列出这两种位置。项目不会自动编辑 Agent 配置。客户端通过 `doctor → targets → session_open → observe → act → observe → session_close` 使用工具；`act` 需要 UUID `requestId` 和当前快照 ID，截图作为 MCP 图片内容返回。遇到不确定结果时先查 `action_status` 并观察实际界面，不直接重放。
+`targets` 应包含已打开的测试窗口。未安装 Chromium 时，`doctor` 的浏览器项可以显示不可用；桌面接入应检查桌面后端。接着按下节导入配置。
 
-其他接受通用 JSON 配置的 Agent 可运行 `computer-use config stdio --profile <名称>`，或使用 App 的复制配置菜单。服务命令为 `computer-use mcp stdio`；不要把 Agent 指向底层 Cua 原始端口。
+### Windows 11
 
-HTTP：在 App 中主动开启，地址固定为 `http://127.0.0.1:47631/mcp`。使用 `computer-use config http --out private-mcp.json` 生成带凭据的私有文件；不要提交或分享该文件。服务器只监听 IPv4 回环地址，检查 Host、Origin 和独立客户端凭据；不支持云端直接连接，不提供公网监听选项。
+另需 .NET 10 SDK。在 Windows 仓库根目录的 PowerShell 中运行（ARM64 将 `x64` 改为 `arm64`，产物目录改为 `ARM64`）：
 
-两种 MCP 使用官方 SDK v2，返回结构化结果及图片内容。协议自动化测试和“真实 Agent 已接入”是不同验收项；实际客户端测试范围见验证记录。
-
-### 从 Mac 控制 Windows 虚拟机
-
-Windows ARM64 / x64 便携开发包在交互桌面运行，HTTP MCP 仍只监听 Windows 回环地址。Mac 通过 SSH 转发 `127.0.0.1:47631`，再以本地 Codex HTTP MCP 连接；Mac 的私有凭据由 `http_headers_helper` 读取，不写进 Codex 配置。构建、配对、凭据安全传输与隧道命令见 [Windows 接入说明](docs/WINDOWS.md)。ARM64 已完成桌面实测，x64 包已构建并校验，但截图与输入仍需在原生 x64 Windows 上验收。
-
-## 受控浏览器
-
-先显式安装匹配组件：
-
-```sh
-computer-use browser install
-computer-use pair --profile browser --name 'Browser Agent' --browser
-computer-use targets --profile browser
+```powershell
+node scripts/package-windows.mjs --arch x64
+& '.\artifacts\Computer Use Windows x64\ComputerUse.WindowsHost.exe'
 ```
 
-首次发现浏览器目标会创建一个独立、空白的 **headless Chromium**。通过截图反馈工作，不打开用户日常浏览器或继承登录状态。所有获准使用受控浏览器的客户端共享此运行时中的浏览器空间；该授权不适用于互不信任的用户。只支持 HTTP(S) 与 `about:blank` 导航，下载落在独立文件夹。
+宿主应在当前交互登录桌面运行。便携包包含 Node、驱动和 .NET 运行时；构建所需 SDK 与最终运行所需组件不同。
 
-## 能力与边界
+按 [Windows 指南](docs/WINDOWS.md)完成应用路径配对，再选择本机 Agent 的 stdio MCP，或 Mac 经 SSH 隧道连接 Windows HTTP MCP。**Windows 使用可执行文件完整路径配对，不能照抄 macOS 的 Bundle ID。**
 
-- 桌面固定 Cua Driver 0.28.2；观察同时提供 AX 元素和窗口截图。后台支持取决于实际应用与动作。
-- 坐标使用快照图片像素；窗口移动、几何变化或元素过期会拒绝旧引用，不能检测一切视觉变化。
-- 首版拖拽为两端点直线完整手势；桌面拖拽要求显式前台会话。滚动单位为行/页；浏览器一行定义为 40 CSS 像素。
-- `type` 插入文字；需要替换时先执行明确的全选动作。浏览器 JS 对话框自动取消，不代表确认或接受。
-- Windows 常规文本框若指定最新快照的 `elementId`，即使会话已批准前台操作，文字也走可读回的后台辅助功能路径；拒绝或不确定时不自动切换或重发。无 `elementId` 的前台长文本和画布、终端输入尚未获得完整性保证。
-- Windows 带 `elementId` 的点击也走后台辅助功能路径；截图坐标点击在前台会话仍走前台指针。驱动拒绝或结果不确定时不自动换路径或重发。
-- 会话默认独占，两分钟无活动后过期；快照有效期 30 秒。修改动作串行，完整手势不交错。
-- 暂停阻止新动作；紧急停止取消工作并关闭执行器。输入中断或超时导致的不确定结果会停止执行；驱动已完成派发但无法确认效果时，保留不确定状态并允许只读检查。重启后不重放动作。
-- 观察返回 `elementsComplete`。当前后端仅返回部分元素树，不能用“没列出”来验证元素不存在；此类负向条件会被明确拒绝。
-- 默认日志和动作记录不保存截图、输入、URL 或窗口标题。CLI 截图在本地保留，需主动清理。发给云端 Agent 的结果仍由用户选择的模型服务处理。
-- 本地授权不是针对同一系统用户的恶意进程隔离，也无法约束 Agent 自己拥有的终端或其他工具。
+## 接入 Agent 与首次观察
 
-## 维护与许可
+将 `config codex` 输出的 TOML 片段添加到 Codex 用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`。配置含绝对启动路径和 profile，不含凭据；项目不会自动修改 Agent 配置。详见 [Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
-运行 `pnpm check`、`pnpm native:test`；有匹配 Chromium 时会运行真实浏览器测试。源码分为原生宿主、运行时/接口、桌面/浏览器后端和验证工具；设计与实施状态见 [架构记录](docs/ARCHITECTURE.md) 和 [阶段清单](docs/ROADMAP.md)。
+重新加载客户端的 MCP 配置后，可以先给 Agent 一个只读任务：
 
-本项目原创源码和文档采用 [MIT](LICENSE)，版权署名为 Starroy，见 [NOTICE](NOTICE)。允许商业使用、修改和再分发，须在软件副本或实质性部分中保留版权及许可声明；完整条款以 LICENSE 为准。Cua Driver、Playwright、Node.js、.NET 等依赖保留各自许可证，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+> 使用 computer-use 检查连接，列出已授权窗口，打开测试窗口的会话，获取截图并描述看到的内容，然后关闭会话。此次不要点击或输入。
 
-English quick start: [README.en.md](README.en.md).
+正常结果应包括真实窗口截图及描述。先确认这一过程，再在一次性测试文档中尝试输入和点击。其他 Agent 可对已配对 profile 运行 `computer-use config stdio --profile codex` 获取通用 JSON 配置；其他客户端的真实模型接入尚待验证。
+
+需要手动调用 CLI、安装独立浏览器或理解动作参数时，见 [使用说明](docs/USAGE.md) 和配套 [CLI Skill](skills/computer-use/SKILL.md)。
+
+## 权限与限制
+
+- Agent 只能通过本项目接口访问已配对目标；前台会话需要本地 App 批准。后台能力依赖实际控件，不保证完全不影响焦点。
+- 不确定动作先查询 `action_status` 并观察，不直接重放。`executed` 不代表任务成功，仍需核对实际界面或输出文件。
+- HTTP 默认关闭，只监听 `127.0.0.1:47631`。跨机器接入通过手动 SSH 隧道，不直接开放 MCP 到局域网或公网。
+- 默认动作日志不保存截图、输入、URL 和窗口标题；CLI 截图会留在本机，需要自行清理。发给云端 Agent 的截图与结果由所选模型服务处理。
+- 所有获准使用独立浏览器的客户端共享浏览器空间；本地授权不隔离同一系统用户的恶意进程。
+- Windows 提权窗口、UAC 安全桌面、画布和终端长文本不在已验证范围内。平台动作差异及更多限制见 [使用说明](docs/USAGE.md)。
+
+## 开发与文档
+
+```sh
+pnpm check
+pnpm native:test # 仅 macOS
+```
+
+浏览器集成测试需要匹配的 Chromium；缺少时会跳过相应测试，不能计作通过。可用 `pnpm exec playwright install chromium` 安装开发测试所需组件。
+
+- [使用说明 / Usage](docs/USAGE.md)：CLI、动作语义、浏览器与排错
+- [Windows 接入](docs/WINDOWS.md) / [Windows guide](docs/WINDOWS.en.md)
+- [架构](docs/ARCHITECTURE.md)、[构建与打包](scripts/README.md)
+- [验证方法](docs/VALIDATION.md)、[验证结果](docs/validation-results.md)、[路线图](docs/ROADMAP.md)
+
+## 许可与致谢
+
+原创源码和文档采用 [MIT](LICENSE)，版权署名为 Starroy，见 [NOTICE](NOTICE)。感谢 Cua、Playwright、MCP SDK 及其他上游项目；依赖保留各自许可证，见 [第三方声明](THIRD_PARTY_NOTICES.md)。

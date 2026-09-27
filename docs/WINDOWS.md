@@ -1,6 +1,8 @@
-# Windows ARM64 / x64 开发包与 Mac Codex 接入
+# Windows ARM64 / x64 开发包与 Agent 接入
 
-已实测范围是 Windows 11 ARM64 的**交互式登录桌面**；x64 包可在 Windows 11 x64 上构建，但仍需独立桌面实测。Computer Use 在 Windows 内运行，HTTP MCP 只监听该机器的 `127.0.0.1:47631`；Mac 通过 SSH 本地转发访问它。Windows 的 47631 端口不需要开放到局域网。该便携包是开发产物，不是已签名安装器；UAC 安全桌面和高完整性应用不在支持范围内。
+简体中文 | [English](WINDOWS.en.md) · [返回首页](../README.md)
+
+更名前的开发版本已在 Windows 11 ARM64 的**交互式登录桌面**完成限定范围实测；当前 `com.starroy.computeruse` 源码仍需重新打包回归，原生 x64 桌面未验收，见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。便携包是开发产物，不是已签名安装器；UAC 安全桌面和高完整性应用不在支持范围内。
 
 ## Windows 构建与启动
 
@@ -18,7 +20,28 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 
 省略 `--arch` 时默认使用当前 Node 的架构。打包脚本从官方来源下载对应架构的固定 Node 24.21.0 与 Cua Driver 0.28.2 包，同时核对官方清单和固定 SHA-256；在隔离目录按锁文件安装该架构的生产依赖。它检查托盘程序、Node、驱动与原生 SDK 的架构，实际加载 SDK，并保留 Node、Cua 与项目的许可文件。包内 CLI 为 `bin\node.exe runtime\cli.js`，无需全局 Node。退出托盘会停止服务和输入；便携包运行时不要覆盖。x64 构建和静态校验通过后，还需在 x64 桌面验证配对、截图与输入，才能视作 x64 验收。
 
-打开希望控制的普通权限应用，用其**完整可执行文件路径**配对。以专用测试程序为例（实际路径以 Windows 文件属性为准）：
+## Windows 本机 Agent：stdio MCP
+
+打开希望控制的普通权限应用，用其**完整可执行文件路径**配对。以下测试程序路径是占位符，须替换为自己的测试应用路径。本节与后面的 Mac 远程接入是两种选择，无需都做。
+
+```powershell
+Set-Location '.\artifacts\Computer Use Windows x64' # 预构建 ZIP：直接在解压目录执行后续命令
+& .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
+```
+
+在托盘批准配对，然后运行：
+
+```powershell
+& .\bin\node.exe .\runtime\cli.js doctor --profile codex
+& .\bin\node.exe .\runtime\cli.js targets --profile codex
+& .\bin\node.exe .\runtime\cli.js config codex --profile codex
+```
+
+将输出添加到 Windows 用户的 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`，重新加载客户端配置后按[首页的只读任务](../README.md#接入-agent-与首次观察)验证。配置不含凭据，不需要启用 HTTP 或 SSH。本机 Windows Codex 的真实模型验证仍待完成；已有跨机器实测使用 Mac Codex。其他客户端可将 `config codex` 换为 `config stdio` 获取通用 JSON。
+
+## Mac 远程接入：Windows 配对与凭据
+
+以下从仓库根目录进入便携包目录；如果已在包目录中，跳过 `Set-Location`。另建远程客户端 profile，并在托盘批准：
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # 使用预构建 ZIP 时跳过此行，直接在解压目录执行
@@ -49,7 +72,7 @@ ssh -i "$HOME/.ssh/computer_use_windows_ed25519" \
 
 Mac 的 47631 端口若已被占用，请先关闭占用它的本机服务。隧道建立后，Mac 上 `http://127.0.0.1:47631/mcp` 才会到达 Windows。不要使用 `-g` 或将转发绑定到 `0.0.0.0`。
 
-将以下配置加入 Mac 的用户级 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`。预构建 ZIP 的 `helpers/windows-remote-auth.mjs` 可复制到 Mac 的 `~/.config/computer-use/`；源码构建也可直接使用仓库 `scripts/windows-remote-auth.mjs`。把 helper 命令中的两个绝对路径换成 Mac 的实际 Node、helper 脚本和私有 JSON 路径；`http_headers_helper` 是一条本地命令，输出 `{"Authorization":"Bearer …"}`，配置本身不含令牌。Codex 仅在**本地执行环境**支持该 helper，详见[官方 MCP 配置](https://learn.chatgpt.com/docs/extend/mcp)。
+将以下配置加入 Mac 的用户级 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`。预构建 ZIP 的 `helpers/windows-remote-auth.mjs` 可复制到 Mac 的 `~/.config/computer-use/`；源码构建也可直接使用仓库 `scripts/windows-remote-auth.mjs`。把 helper 命令中的三个绝对路径换成 Mac 的实际 Node、helper 脚本和私有 JSON 路径；`http_headers_helper` 是一条本地命令，输出 `{"Authorization":"Bearer …"}`，配置本身不含令牌。Codex 仅在**本地执行环境**支持该 helper，详见[官方 MCP 配置](https://learn.chatgpt.com/docs/extend/mcp)。
 
 ```toml
 [mcp_servers.computer-use-windows]
@@ -73,6 +96,4 @@ tool_timeout_sec = 90
 
 自动化测试和真实 Windows 虚拟机结果分别记在 [验证记录](validation-results.md)；静态打包检查不代表截图和输入已通过实测。
 
-Windows 常规文本框的 `type` 如带有最新快照中的 `elementId`，即使会话已批准前台操作，也使用驱动的后台辅助功能文本路径；控件支持读回时可核对结果。若驱动拒绝或结果无法确认，保留拒绝或 `unknown`，不改走前台输入，也不自动重发。无 `elementId` 的前台 `type` 仍使用原有键盘路径，长文本完整性尚无保证。已在测试程序的原生 Win32 `EDIT`、WinForms `TextBox` 和 WPF `TextBox` 实测；其他控件、画布和终端不在已验证范围内，详情见[验证记录](validation-results.md)。
-
-Windows 带 `elementId` 的 `click` 同样使用后台辅助功能路径，包括已批准的前台会话。前台会话中的截图坐标点击仍使用前台指针路径。元素点击被驱动拒绝时不会自动换成坐标点击；返回 `unknown` 时先查原请求状态，再独立观察效果，不要重放。该路径已在测试程序的 Win32、WinForms 和 WPF 按钮上验证，其他控件仍需逐项验证。
+Windows 元素定向输入与点击始终使用后台辅助功能路径，包括已批准的前台会话；拒绝或不确定时不自动切换或重发。无元素 ID 的前台长文本、画布和终端不在完整性保证范围内。具体动作语义见[使用说明](USAGE.md)。
