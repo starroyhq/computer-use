@@ -1,0 +1,39 @@
+{
+  "name": "computer-use",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local, agent-independent computer use for macOS and Windows",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.8.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "computer-use": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && vitest run",
+    "check": "pnpm typecheck && pnpm test && node --test scripts/package.test.mjs scripts/package-windows.test.mjs scripts/windows-remote-auth.test.mjs",
+    "native:test": "swift test --package-path native",
+    "native:build": "swift build --package-path native -c release",
+    "package:app": "node scripts/package-app.mjs",
+    "package:windows": "node scripts/package-windows.mjs",
+    "probe": "node dist/probe.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.1.0",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.1.0",
+    "@trycua/cua-driver": "0.28.2",
+    "playwright": "1.63.0",
+    "zod": "4"
+  },
+  "devDependencies": {
+    "@types/node": "24",
+    "typescript": "5",
+    "vitest": "3"
+  }
+}
