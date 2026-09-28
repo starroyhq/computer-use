@@ -32,6 +32,9 @@ type PendingPair = { client: Client; resolve: (allow: boolean) => void };
 type Work = { controller: AbortController; sessionId: string; started: boolean; promise: Promise<unknown>; admitted: Promise<void> };
 const SESSION_TTL = 120_000;
 const SNAPSHOT_TTL = 30_000;
+// 传输层约 65 秒超时：排队准入 15 秒 + 校验 10 秒 + 派发与验证共用 timeoutMs（最多 30 秒），合计不超过 55 秒。
+const QUEUE_ADMISSION_MS = 15_000;
+const VALIDATE_MS = 10_000;
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -349,11 +352,14 @@ export class Runtime implements RpcService {
     work.admitted = this.persistActions();
     // Attach immediately: queued work may be waiting behind a running gesture.
     void work.admitted.catch(() => {});
+    const submittedAt = this.now();
     work.promise = this.queue.then(async () => {
       let timer: NodeJS.Timeout | undefined;
       try {
         await work.admitted;
         if (controller.signal.aborted) throw new CuError('cancelled', 'Action cancelled before execution.');
+        if (this.now() - submittedAt > QUEUE_ADMISSION_MS)
+          throw new CuError('cancelled', 'Action waited too long behind earlier actions and was not executed; observe again.');
         this.checkRunning();
         if (!this.clients.clients.has(client.id)) throw new CuError('unauthorized', 'Client revoked.');
         this.getSession(client, session.id);
@@ -364,7 +370,7 @@ export class Runtime implements RpcService {
           this.now() - snapshot.createdAt > SNAPSHOT_TTL ||
           !(await bounded(
             this.backend(session.target.kind).validate(snapshot.observation),
-            Math.min(10_000, p.timeoutMs),
+            Math.min(VALIDATE_MS, p.timeoutMs),
             controller.signal,
           ))
         )
@@ -378,6 +384,7 @@ export class Runtime implements RpcService {
         this.getSession(client, session.id);
         this.checkLease(session);
         work.started = true;
+        const deadline = this.now() + p.timeoutMs;
         const aborted = new Promise<never>((_, reject) => {
           controller.signal.addEventListener(
             'abort',
@@ -397,7 +404,7 @@ export class Runtime implements RpcService {
         if (execution) record.effect = execution.effect;
         if (p.verify) {
           try {
-            await this.waitFor(session, p.verify, p.timeoutMs, controller.signal);
+            await this.waitFor(session, p.verify, Math.max(1, deadline - this.now()), controller.signal);
             record.state = 'verified';
             delete record.error;
           } catch (error) {

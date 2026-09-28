@@ -88,7 +88,7 @@ export const descriptions: Record<Method, string> = {
     'Bind a session to an authorized target. Background is the default; foreground is allowed for clients whose pairing included it and may move focus, pointer and keyboard. Exclusive sessions prevent other clients from changing the UI.',
   session_close: 'Release the session, its execution lease and screenshots.',
   observe: 'Return a fresh screenshot and semantic elements. Coordinates refer to this image; use its snapshotId for the next action.',
-  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. Execution alone does not imply task success.',
+  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; an action still queued after 15 seconds is cancelled without dispatch. Execution alone does not imply task success.',
   wait: 'Wait for an explicit observable condition, with a bounded timeout. No fixed sleep or implicit task planning.',
   action_status: 'Read the status of a previous request owned by this client, including uncertain outcomes after disconnects.',
   cancel: 'Cancel a queued or active request. Active cancellation may require a runtime restart to guarantee input has stopped.',

@@ -58,6 +58,7 @@ computer-use action_status --profile codex --json '{"requestId":"be9fefc8-ff22-4
 | 输入 / Type | Windows 元素定向输入即使在前台会话也走后台辅助功能路径；不确定或拒绝后不换路径、不重发。无元素 ID 的前台长文本未获完整性保证。 / Windows element-directed typing uses background accessibility even in foreground sessions, without fallback or retry. Long foreground text without an element ID is not guaranteed. |
 | 文本效果 / Text effects | 后端和控件决定具体文本行为，需读回完整内容；不要假定所有路径都追加或替换。浏览器路径使用 `insertText`。 / Read back the full value: do not assume all controls append or replace text identically. The browser uses `insertText`. |
 | 拖拽 / Drag | 仅两个端点的直线手势。macOS 拒绝后台拖拽；Windows 向驱动传递会话模式，实际支持仍需验证。 / Two-endpoint straight gestures only. macOS rejects background dragging; Windows passes the session mode to the driver, with actual support still requiring validation. |
+| 时限 / Deadlines | `timeoutMs`（默认 15 秒、最多 30 秒）同时限定派发和 `verify`；排队超过 15 秒仍未开始的动作直接取消、不派发。 / `timeoutMs` (default 15 s, max 30 s) bounds dispatch and `verify` together; an action still queued after 15 seconds is cancelled without dispatch. |
 | 滚动 / Scroll | 方向加 `line` / `page` 单位与 1–50 的数量；浏览器每行 40 CSS 像素。 / Direction, line/page unit and amount 1–50; browser lines are 40 CSS pixels. |
 
 暂停阻止新动作。紧急停止取消工作并关闭执行器；输入中断或超时引起的不确定结果会停止执行。`unknown` 只表示输入是否送达本身不确定；驱动已完成派发但效果无法确认时返回 `executed` 加 `effect: "unconfirmed"`，不停止执行。重启不重放动作。完整参数以 `computer-use schema <method>` 为准。

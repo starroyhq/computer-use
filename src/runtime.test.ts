@@ -516,6 +516,39 @@ describe('Runtime authorization and execution', () => {
     expect(await call(token, 'wait', { sessionId, timeoutMs: 100, condition })).toMatchObject({ state: 'verified' });
   });
 
+  it('cancels queued actions that wait past the admission limit without dispatching them', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const gate = deferred();
+    vi.mocked(backend.act).mockImplementationOnce(async () => {
+      await gate.promise;
+      return undefined;
+    });
+    const first = call(token, 'act', await actionInput(token, sessionId));
+    await vi.waitFor(() => expect(backend.act).toHaveBeenCalledTimes(1));
+    const second = call(token, 'act', await actionInput(token, sessionId));
+    clock += 15_001;
+    gate.resolve();
+    expect(await first).toMatchObject({ state: 'executed' });
+    expect(await second).toMatchObject({ state: 'cancelled', error: { code: 'cancelled' } });
+    expect(backend.act).toHaveBeenCalledTimes(1);
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+  });
+
+  it('gives verification only the time left in the action budget', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const request = { ...(await actionInput(token, sessionId)), verify: { type: 'title', includes: 'never' } };
+    vi.mocked(backend.act).mockImplementationOnce(async () => {
+      clock += 950;
+      return { effect: 'unconfirmed' };
+    });
+    const observe = vi.mocked(backend.observe);
+    observe.mockClear();
+    expect(await call(token, 'act', request)).toMatchObject({ state: 'executed', effect: 'unconfirmed', error: { code: 'timeout' } });
+    expect(observe).toHaveBeenCalledTimes(1);
+  });
+
   it('bounds waits by the injected clock rather than wall time', async () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
