@@ -392,13 +392,9 @@ export class Runtime implements RpcService {
         ]);
         clearTimeout(timer);
         work.started = false;
-        record.state = execution?.effect === 'unconfirmed' ? 'unknown' : 'executed';
-        if (execution?.effect === 'unconfirmed')
-          record.error = {
-            code: 'unknown_outcome',
-            message:
-              'Driver finished dispatch, but its effect is unconfirmed. Inspect or explicitly verify the target; do not replay blindly.',
-          };
+        // 派发已完成：effect 未确认只说明驱动无法证明效果，不属于结果不确定。
+        record.state = 'executed';
+        if (execution) record.effect = execution.effect;
         if (p.verify) {
           try {
             await this.waitFor(session, p.verify, p.timeoutMs, controller.signal);

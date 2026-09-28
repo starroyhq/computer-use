@@ -68,8 +68,12 @@ export type ActionRecord = {
   type: string;
   state: ActionState;
   updatedAt: number;
+  effect?: 'confirmed' | 'unconfirmed';
   error?: { code: string; message: string };
 };
+// 旧版把"已派发但效果未确认"记为 unknown，加载时按原文识别并迁移为 executed + effect。
+const LEGACY_UNCONFIRMED =
+  'Driver finished dispatch, but its effect is unconfirmed. Inspect or explicitly verify the target; do not replay blindly.';
 const recordSchema = z.object({
   requestId: z.string(),
   clientId: z.string(),
@@ -78,6 +82,7 @@ const recordSchema = z.object({
   type: z.string(),
   state: z.enum(['queued', 'running', 'executed', 'verified', 'failed', 'cancelled', 'unknown']),
   updatedAt: z.number(),
+  effect: z.enum(['confirmed', 'unconfirmed']).optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 });
 export class ActionStore {
@@ -91,8 +96,13 @@ export class ActionStore {
     const parsed = z.array(recordSchema).safeParse((await readJson(this.path)) ?? []);
     if (!parsed.success) throw new CuError('unavailable', 'Action journal is invalid.');
     for (const raw of parsed.data) {
-      const { error, ...rest } = raw;
-      const record: ActionRecord = error ? { ...rest, error } : rest;
+      const { error, effect, ...rest } = raw;
+      const record: ActionRecord = { ...rest, ...(effect ? { effect } : {}), ...(error ? { error } : {}) };
+      if (record.state === 'unknown' && record.error?.message === LEGACY_UNCONFIRMED) {
+        record.state = 'executed';
+        record.effect = 'unconfirmed';
+        delete record.error;
+      }
       if (record.state === 'running' || record.state === 'queued') {
         record.state = 'unknown';
         record.error = { code: 'unknown_outcome', message: 'Runtime restarted; inspect the target before taking another action.' };

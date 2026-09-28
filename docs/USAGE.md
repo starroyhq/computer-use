@@ -35,9 +35,9 @@ computer-use observe --profile codex --json '{"sessionId":"SESSION_ID"}'
 computer-use session_close --profile codex --json '{"sessionId":"SESSION_ID"}'
 ```
 
-CLI 返回截图的本机私有文件路径；MCP 返回图片内容。用新观察或目标程序独立输出确认结果。`executed` 只表示执行阶段结束，显式可观察条件通过才返回 `verified`；它也只证明所指定条件，不证明整个任务成功。
+CLI 返回截图的本机私有文件路径；MCP 返回图片内容。用新观察或目标程序独立输出确认结果。`executed` 只表示执行阶段结束；大多数桌面动作同时带 `effect: "unconfirmed"`，表示输入已派发但驱动无法证明效果，重新观察即可继续。显式可观察条件通过才返回 `verified`；它也只证明所指定条件，不证明整个任务成功。
 
-CLI returns a private local screenshot path; MCP returns image content. Confirm effects with a fresh observation or the application's independent output. `executed` means execution ended; `verified` requires an explicit observable condition and only establishes that condition.
+CLI returns a private local screenshot path; MCP returns image content. Confirm effects with a fresh observation or the application's independent output. `executed` means execution ended; most desktop actions also carry `effect: "unconfirmed"`, meaning input was dispatched but the driver could not prove its effect, so observe and continue. `verified` requires an explicit observable condition and only establishes that condition.
 
 若连接中断或结果不确定，保留原请求 ID，查询后再观察，不以新 ID 重发同一操作：
 
@@ -60,9 +60,9 @@ computer-use action_status --profile codex --json '{"requestId":"be9fefc8-ff22-4
 | 拖拽 / Drag | 仅两个端点的直线手势。macOS 拒绝后台拖拽；Windows 向驱动传递会话模式，实际支持仍需验证。 / Two-endpoint straight gestures only. macOS rejects background dragging; Windows passes the session mode to the driver, with actual support still requiring validation. |
 | 滚动 / Scroll | 方向加 `line` / `page` 单位与 1–50 的数量；浏览器每行 40 CSS 像素。 / Direction, line/page unit and amount 1–50; browser lines are 40 CSS pixels. |
 
-暂停阻止新动作。紧急停止取消工作并关闭执行器；输入中断或超时引起的不确定结果会停止执行。驱动已完成派发但效果无法确认时保留 `unknown`，可以继续只读检查；重启不重放动作。完整参数以 `computer-use schema <method>` 为准。
+暂停阻止新动作。紧急停止取消工作并关闭执行器；输入中断或超时引起的不确定结果会停止执行。`unknown` 只表示输入是否送达本身不确定；驱动已完成派发但效果无法确认时返回 `executed` 加 `effect: "unconfirmed"`，不停止执行。重启不重放动作。完整参数以 `computer-use schema <method>` 为准。
 
-Pause blocks new actions. Emergency stop cancels work and closes executors; uncertain interrupted or timed-out input stops execution. Completed dispatch with an unconfirmed effect remains `unknown` and allows read-only inspection. Restart never replays actions. Use `computer-use schema <method>` for full parameters.
+Pause blocks new actions. Emergency stop cancels work and closes executors; uncertain interrupted or timed-out input stops execution. `unknown` means delivery itself is uncertain; completed dispatch with an unconfirmed effect returns `executed` with `effect: "unconfirmed"` and does not stop execution. Restart never replays actions. Use `computer-use schema <method>` for full parameters.
 
 ## 独立浏览器 / Separate browser
 

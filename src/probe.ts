@@ -60,26 +60,19 @@ try {
     const observed = observationSchema.parse(await call('observe', { sessionId }));
     const element = observed.elements.find(e => e.label === label);
     if (!element) throw new CuError('not_found', `Fixture element unavailable: ${label}`);
-    const result = z
-      .object({ requestId: z.string(), state: z.string(), error: z.object({ code: z.string(), message: z.string() }).optional() })
-      .parse(
-        await call('act', {
-          sessionId,
-          snapshotId: observed.snapshotId,
-          requestId: randomUUID(),
-          action: text === undefined ? { type: 'click', elementId: element.id } : { type: 'type', elementId: element.id, text },
-        }),
-      );
-    // Completed-but-unconfirmed dispatch is followed by independent evidence,
-    // never replayed or silently upgraded to executed. Interrupted actions stop.
-    const dispatched =
-      result.state === 'unknown' &&
-      result.error?.code === 'unknown_outcome' &&
-      result.error.message ===
-        'Driver finished dispatch, but its effect is unconfirmed. Inspect or explicitly verify the target; do not replay blindly.';
-    if (result.state !== 'executed' && result.state !== 'verified' && !dispatched)
+    const result = z.object({ requestId: z.string(), state: z.string(), effect: z.enum(['confirmed', 'unconfirmed']).optional() }).parse(
+      await call('act', {
+        sessionId,
+        snapshotId: observed.snapshotId,
+        requestId: randomUUID(),
+        action: text === undefined ? { type: 'click', elementId: element.id } : { type: 'type', elementId: element.id, text },
+      }),
+    );
+    // An unconfirmed effect is followed by independent evidence and never replayed.
+    // Interrupted or uncertain actions stop the probe.
+    if (result.state !== 'executed' && result.state !== 'verified')
       throw new CuError('unknown_outcome', `Fixture action did not complete; inspect action_status for ${result.requestId}.`);
-    return { label, requestId: result.requestId, dispatchState: result.state };
+    return { label, requestId: result.requestId, dispatchState: result.state, effect: result.effect ?? 'confirmed' };
   };
   for (let index = 0; index < iterations; index++) {
     const text = `中文输入验证 ${index + 1}`;

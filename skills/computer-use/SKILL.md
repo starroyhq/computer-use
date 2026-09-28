@@ -19,9 +19,9 @@ Call `act` with `sessionId`, `snapshotId`, and an `action`. The CLI creates a re
 
 Each accepted action consumes its snapshot. Observe again before the next action; do not reuse old element references after another observation, window movement, navigation, or UI mutation. For predictable asynchronous transitions, use `wait` with an explicit element/title condition.
 
-An `executed` result only describes the input operation. Claim the task succeeded only after checking the intended UI state or output artifact. `verified` means the supplied observable condition passed, not that an entire creative task was judged correct.
+An `executed` result only describes the input operation. Most desktop actions return `effect: "unconfirmed"`: the input was dispatched but the driver could not prove its effect, so observe and continue. Claim the task succeeded only after checking the intended UI state or output artifact. `verified` means the supplied observable condition passed, not that an entire creative task was judged correct.
 
-On connection loss, query `action_status` with the original request UUID. Do not repeat uncertain actions with a new UUID. A stale snapshot requires a new observation. An unknown outcome or interrupted gesture may require the user to restart the local app, followed by inspection of the actual result.
+State `unknown` is different: delivery itself is uncertain. On connection loss or `unknown`, query `action_status` with the original request UUID. Do not repeat uncertain actions with a new UUID. A stale snapshot requires a new observation. An unknown outcome or interrupted gesture may require the user to restart the local app, followed by inspection of the actual result.
 
 ## Execution modes and limits
 

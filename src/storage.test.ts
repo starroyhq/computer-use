@@ -120,6 +120,20 @@ describe('private persisted state', () => {
     expect(JSON.parse(text)).toEqual([record]);
   });
 
+  it('migrates legacy unconfirmed dispatch records and keeps genuine unknown outcomes', async () => {
+    const base = { clientId: 'client', sessionId: 'session', fingerprint: hash('x'), type: 'key', updatedAt: 1 };
+    const legacy =
+      'Driver finished dispatch, but its effect is unconfirmed. Inspect or explicitly verify the target; do not replay blindly.';
+    await atomicJson(join(directory, 'actions.json'), [
+      { ...base, requestId: 'legacy', state: 'unknown', error: { code: 'unknown_outcome', message: legacy } },
+      { ...base, requestId: 'lost', state: 'unknown', error: { code: 'unknown_outcome', message: 'Connection lost.' } },
+    ]);
+    const store = new ActionStore(directory);
+    await store.load();
+    expect(store.records.get('legacy')).toEqual({ ...base, requestId: 'legacy', state: 'executed', effect: 'unconfirmed' });
+    expect(store.records.get('lost')).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
+  });
+
   it('rejects a malformed journal rather than silently discarding uncertain work', async () => {
     await atomicJson(join(directory, 'actions.json'), [{ requestId: 'r', state: 'nonsense' }]);
     await expect(new ActionStore(directory).load()).rejects.toMatchObject({ code: 'unavailable' });

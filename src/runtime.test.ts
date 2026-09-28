@@ -512,29 +512,33 @@ describe('Runtime authorization and execution', () => {
     expect(await call(token, 'wait', { sessionId, timeoutMs: 100, condition })).toMatchObject({ state: 'verified' });
   });
 
-  it('retains an unconfirmed dispatch as unknown without halting or repeating it', async () => {
+  it('reports an unconfirmed dispatch as executed without halting or repeating it', async () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
     vi.mocked(backend.act).mockResolvedValueOnce({ effect: 'unconfirmed' });
     const request = await actionInput(token, sessionId);
-    expect(await call(token, 'act', request)).toMatchObject({ state: 'unknown' });
-    expect(await call(token, 'act', request)).toMatchObject({ state: 'unknown' });
+    expect(await call(token, 'act', request)).toMatchObject({ state: 'executed', effect: 'unconfirmed' });
+    expect(await call(token, 'act', request)).toMatchObject({ state: 'executed', effect: 'unconfirmed' });
     expect(backend.act).toHaveBeenCalledTimes(1);
+    expect(await call(token, 'act', request)).not.toHaveProperty('error');
     expect(events.some(event => event.event === 'fatal')).toBe(false);
     expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({ state: 'executed' });
   });
 
-  it('opens a new foreground session after closing one with a completed unknown action', async () => {
+  it('opens a new foreground session after closing one with a completed unconfirmed action', async () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
     vi.mocked(backend.act).mockResolvedValueOnce({ effect: 'unconfirmed' });
     const request = await actionInput(token, sessionId);
-    expect(await call(token, 'act', request)).toMatchObject({ state: 'unknown' });
+    expect(await call(token, 'act', request)).toMatchObject({ state: 'executed', effect: 'unconfirmed' });
     expect(await call(token, 'session_close', { sessionId })).toEqual({ closed: true });
 
     const next = await call<{ sessionId: string }>(token, 'session_open', { targetId: target.id, mode: 'foreground', exclusive: true });
     expect(await observation(token, next.sessionId)).toHaveProperty('snapshotId');
-    expect(await call(token, 'action_status', { requestId: request.requestId })).toMatchObject({ state: 'unknown' });
+    expect(await call(token, 'action_status', { requestId: request.requestId })).toMatchObject({
+      state: 'executed',
+      effect: 'unconfirmed',
+    });
     expect(backend.act).toHaveBeenCalledTimes(1);
     expect(events.some(event => event.event === 'fatal')).toBe(false);
   });
@@ -548,7 +552,7 @@ describe('Runtime authorization and execution', () => {
     ).toMatchObject({ state: 'verified' });
     expect(
       await call(token, 'act', { ...(await actionInput(token, sessionId)), timeoutMs: 100, verify: { type: 'title', includes: 'never' } }),
-    ).toMatchObject({ state: 'unknown', error: { code: 'timeout' } });
+    ).toMatchObject({ state: 'executed', effect: 'unconfirmed', error: { code: 'timeout' } });
     expect(events.some(event => event.event === 'fatal')).toBe(false);
   });
 
