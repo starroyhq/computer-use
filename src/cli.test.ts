@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BrowserBackend } from './backends/browser.js';
@@ -115,7 +116,25 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     expect(targets).toHaveLength(1);
     const { sessionId } = await call<{ sessionId: string }>('session_open', { targetId: targets[0]!.id });
     const session = { sessionId };
+    const screenshots = join(directory, '.config', 'computer-use', 'screenshots');
+    await mkdir(screenshots, { recursive: true, mode: 0o700 });
+    const stale = join(screenshots, `${randomUUID()}.png`),
+      fresh = join(screenshots, `${randomUUID()}.png`),
+      unrelated = join(screenshots, 'notes.png');
+    for (const file of [stale, fresh, unrelated]) await writeFile(file, 'x');
+    const old = new Date(Date.now() - 25 * 60 * 60_000);
+    for (const file of [stale, unrelated]) await utimes(file, old, old);
     let observation = await call<Observation>('observe', session);
+    expect(
+      await Promise.all(
+        [stale, fresh, unrelated].map(file =>
+          stat(file).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ),
+    ).toEqual([false, true, true]);
     expect(isAbsolute(observation.screenshot.path)).toBe(true);
     expect(observation.screenshot.path.startsWith(join(directory, '.config', 'computer-use', 'screenshots'))).toBe(true);
     expect((await stat(observation.screenshot.path)).mode & 0o777).toBe(0o600);

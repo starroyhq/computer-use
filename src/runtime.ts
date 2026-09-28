@@ -35,6 +35,7 @@ const SNAPSHOT_TTL = 30_000;
 // 传输层约 65 秒超时：排队准入 15 秒 + 校验 10 秒 + 派发与验证共用 timeoutMs（最多 30 秒），合计不超过 55 秒。
 const QUEUE_ADMISSION_MS = 15_000;
 const VALIDATE_MS = 10_000;
+const REAP_INTERVAL_MS = 30_000;
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -68,6 +69,7 @@ export class Runtime implements RpcService {
   private queue: Promise<unknown> = Promise.resolve();
   private paused = false;
   private stopped = false;
+  private reaper: NodeJS.Timeout | undefined;
   constructor(
     private readonly options: {
       dataDir: string;
@@ -78,7 +80,7 @@ export class Runtime implements RpcService {
     },
   ) {
     this.clients = new ClientStore(join(options.dataDir, 'clients.json'));
-    this.actions = new ActionStore(options.dataDir);
+    this.actions = new ActionStore(options.dataDir, () => this.now());
   }
   private now(): number {
     return this.options.now?.() ?? Date.now();
@@ -88,6 +90,15 @@ export class Runtime implements RpcService {
     await this.clients.load();
     await this.actions.load();
     this.emitClients();
+    this.reaper = setInterval(() => this.reap(), REAP_INTERVAL_MS);
+    this.reaper.unref();
+  }
+  // 过期会话和快照原本只在被访问时清理；定时回收避免长期运行时持有截图和执行租约。
+  private reap(): void {
+    const now = this.now();
+    for (const [id, session] of this.sessions)
+      if (session.expiresAt < now && ![...this.work.values()].some(w => w.sessionId === id)) this.removeSession(id);
+    for (const [id, snapshot] of this.snapshots) if (now - snapshot.createdAt > SNAPSHOT_TTL) this.snapshots.delete(id);
   }
   private emitClients(): void {
     this.options.emit({ event: 'clients', clients: [...this.clients.clients.values()].map(({ id, name }) => ({ id, name })) });
@@ -522,6 +533,7 @@ export class Runtime implements RpcService {
     }
   }
   async close(): Promise<void> {
+    clearInterval(this.reaper);
     for (const pair of this.pairs.values()) pair.resolve(false);
     await this.control({ command: 'stop' });
     await Promise.allSettled(this.options.backends.map(b => b.close()));

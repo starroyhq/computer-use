@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, rm, realpath } from 'node:fs/promises';
+import { readFile, writeFile, rm, realpath, readdir, stat } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -11,6 +11,23 @@ import { CuError, errorResult } from './contracts.js';
 import { credentialDir, dataDir, defaultIpcPath } from './paths.js';
 import { atomicJson, privateDirectory, readJson } from './storage.js';
 import { schemas, type Method } from './schema.js';
+
+const SCREENSHOT_RETENTION_MS = 24 * 60 * 60_000;
+let pruned: Promise<void> | undefined;
+// 截图只由 CLI 写入且以 UUID 命名；清理只动这类文件，失败不影响本次输出。
+async function pruneScreenshots(directory: string): Promise<void> {
+  const cutoff = Date.now() - SCREENSHOT_RETENTION_MS;
+  const names = await readdir(directory).catch(() => []);
+  await Promise.all(
+    names
+      .filter(name => /^[0-9a-f-]{36}\.(png|jpg)$/.test(name))
+      .map(async name => {
+        const path = join(directory, name);
+        if ((await stat(path)).mtimeMs < cutoff) await rm(path, { force: true });
+      })
+      .map(task => task.catch(() => {})),
+  );
+}
 
 const help = `Computer Use 0.1.0 — local desktop runtime
 
@@ -173,6 +190,8 @@ async function main(): Promise<void> {
       if (image?.success) {
         const directory = join(credentialDir, 'screenshots');
         await privateDirectory(directory);
+        pruned ??= pruneScreenshots(directory);
+        await pruned;
         const path = join(directory, `${randomUUID()}.${image.data.mimeType === 'image/png' ? 'png' : 'jpg'}`);
         await writeFile(path, Buffer.from(image.data.data, 'base64'), { mode: 0o600, flag: 'wx' });
         output[key] = { mimeType: image.data.mimeType, path };

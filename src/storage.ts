@@ -85,12 +85,25 @@ const recordSchema = z.object({
   effect: z.enum(['confirmed', 'unconfirmed']).optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 });
+// 只淘汰终态记录；被淘汰的 requestId 不再去重，因此保留期要远长于任何客户端的重试窗口。
+const RETENTION_MS = 7 * 24 * 60 * 60_000;
+const RETAINED_RECORDS = 500;
 export class ActionStore {
   readonly records = new Map<string, ActionRecord>();
   private writeTail: Promise<void> = Promise.resolve();
   private readonly path: string;
-  constructor(dataDir: string) {
+  constructor(
+    dataDir: string,
+    private readonly now: () => number = Date.now,
+  ) {
     this.path = join(dataDir, 'actions.json');
+  }
+  private prune(): void {
+    const terminal = [...this.records.values()].filter(record => record.state !== 'queued' && record.state !== 'running');
+    const cutoff = this.now() - RETENTION_MS;
+    const excess = terminal.length - RETAINED_RECORDS;
+    const oldest = excess > 0 ? new Set(terminal.sort((a, b) => a.updatedAt - b.updatedAt).slice(0, excess)) : new Set<ActionRecord>();
+    for (const record of terminal) if (record.updatedAt < cutoff || oldest.has(record)) this.records.delete(record.requestId);
   }
   async load(): Promise<void> {
     const parsed = z.array(recordSchema).safeParse((await readJson(this.path)) ?? []);
@@ -113,6 +126,7 @@ export class ActionStore {
   }
   async save(): Promise<void> {
     // The journal deliberately excludes arguments, window titles and screenshot content.
+    this.prune();
     const snapshot = [...this.records.values()].map(v => structuredClone(v));
     const operation = this.writeTail.then(() => atomicJson(this.path, snapshot));
     this.writeTail = operation.catch(() => {});

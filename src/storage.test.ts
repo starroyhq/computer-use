@@ -76,7 +76,7 @@ describe('private persisted state', () => {
   });
 
   it('recovers queued and running work as unknown without replaying successful actions', async () => {
-    const original = new ActionStore(directory);
+    const original = new ActionStore(directory, () => 1);
     const states: ActionState[] = ['queued', 'running', 'executed', 'verified', 'failed', 'cancelled', 'unknown'];
     for (const state of states)
       original.records.set(state, {
@@ -89,7 +89,7 @@ describe('private persisted state', () => {
         updatedAt: 1,
       });
     await original.save();
-    const restored = new ActionStore(directory);
+    const restored = new ActionStore(directory, () => 1);
     await restored.load();
     for (const state of ['queued', 'running'])
       expect(restored.records.get(state)).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
@@ -99,7 +99,7 @@ describe('private persisted state', () => {
   });
 
   it('captures each action journal save and excludes action text and image content', async () => {
-    const store = new ActionStore(directory);
+    const store = new ActionStore(directory, () => 1);
     const record: ActionRecord = {
       requestId: 'request',
       clientId: 'client',
@@ -128,14 +128,43 @@ describe('private persisted state', () => {
       { ...base, requestId: 'legacy', state: 'unknown', error: { code: 'unknown_outcome', message: legacy } },
       { ...base, requestId: 'lost', state: 'unknown', error: { code: 'unknown_outcome', message: 'Connection lost.' } },
     ]);
-    const store = new ActionStore(directory);
+    const store = new ActionStore(directory, () => 1);
     await store.load();
     expect(store.records.get('legacy')).toEqual({ ...base, requestId: 'legacy', state: 'executed', effect: 'unconfirmed' });
     expect(store.records.get('lost')).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
   });
 
+  it('prunes expired and excess terminal records but never in-flight work', async () => {
+    const day = 24 * 60 * 60_000;
+    let now = 10 * day;
+    const store = new ActionStore(directory, () => now);
+    const add = (requestId: string, state: ActionState, updatedAt: number) =>
+      store.records.set(requestId, {
+        requestId,
+        clientId: 'c',
+        sessionId: 's',
+        fingerprint: hash(requestId),
+        type: 'key',
+        state,
+        updatedAt,
+      });
+    add('old-done', 'executed', 2 * day);
+    add('old-running', 'running', 2 * day);
+    add('recent', 'failed', 9 * day);
+    await store.save();
+    expect([...store.records.keys()].sort()).toEqual(['old-running', 'recent']);
+    for (let index = 0; index < 505; index++) add(`bulk-${index}`, 'executed', 9 * day + index + 1);
+    now = 10 * day + 1;
+    await store.save();
+    expect(store.records.size).toBe(501);
+    expect(store.records.has('old-running')).toBe(true);
+    expect(store.records.has('recent')).toBe(false);
+    expect(store.records.has('bulk-5')).toBe(true);
+    expect(store.records.has('bulk-4')).toBe(false);
+  });
+
   it('rejects a malformed journal rather than silently discarding uncertain work', async () => {
     await atomicJson(join(directory, 'actions.json'), [{ requestId: 'r', state: 'nonsense' }]);
-    await expect(new ActionStore(directory).load()).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(new ActionStore(directory, () => 1).load()).rejects.toMatchObject({ code: 'unavailable' });
   });
 });

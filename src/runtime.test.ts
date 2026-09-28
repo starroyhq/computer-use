@@ -549,6 +549,27 @@ describe('Runtime authorization and execution', () => {
     expect(observe).toHaveBeenCalledTimes(1);
   });
 
+  it('reaps expired sessions in the background instead of only on access', async () => {
+    await runtime.close();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    runtime = new Runtime({
+      dataDir: directory,
+      backends: [backend],
+      emit: event => events.push(event),
+      now: () => clock,
+      platform: 'darwin',
+    });
+    await runtime.start();
+    const { token } = await pair(),
+      { sessionId } = await session(token, true);
+    clock += 120_001;
+    await expect(observation(token, sessionId)).rejects.toMatchObject({ message: expect.stringContaining('expired') });
+    const next = await session(token, true);
+    clock += 120_001;
+    vi.advanceTimersByTime(30_000);
+    await expect(observation(token, next.sessionId)).rejects.toMatchObject({ code: 'not_found', message: 'Session not found.' });
+  });
+
   it('bounds waits by the injected clock rather than wall time', async () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
