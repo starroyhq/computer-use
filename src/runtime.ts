@@ -36,6 +36,8 @@ const SNAPSHOT_TTL = 30_000;
 const QUEUE_ADMISSION_MS = 15_000;
 const VALIDATE_MS = 10_000;
 const REAP_INTERVAL_MS = 30_000;
+// 宿主马上回执；没有回执时会话仍然打开，避免标记失败挡住操作。
+const CONTROL_ACK_MS = 2_000;
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -66,6 +68,8 @@ export class Runtime implements RpcService {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly pairs = new Map<string, PendingPair>();
   private readonly work = new Map<string, Work>();
+  private readonly controlCounts = new Map<number, number>();
+  private readonly controlReady = new Map<number, () => void>();
   private queue: Promise<unknown> = Promise.resolve();
   private paused = false;
   private stopped = false;
@@ -84,6 +88,47 @@ export class Runtime implements RpcService {
   }
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+  private platform(): NodeJS.Platform {
+    return this.options.platform ?? process.platform;
+  }
+  private controlPid(target: Target): number | undefined {
+    if (this.platform() !== 'darwin' || target.kind !== 'desktop') return undefined;
+    const pid = target.pid;
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return undefined;
+    return pid;
+  }
+  private async acquireControl(target: Target): Promise<void> {
+    const pid = this.controlPid(target);
+    if (pid === undefined) return;
+    const next = (this.controlCounts.get(pid) ?? 0) + 1;
+    this.controlCounts.set(pid, next);
+    if (next > 1) return;
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(() => {
+        this.controlReady.delete(pid);
+        resolve();
+      }, CONTROL_ACK_MS);
+      this.controlReady.set(pid, () => {
+        clearTimeout(timer);
+        this.controlReady.delete(pid);
+        resolve();
+      });
+      this.options.emit({ event: 'control_begin', pid });
+    });
+  }
+  private releaseControl(target: Target): void {
+    const pid = this.controlPid(target);
+    if (pid === undefined) return;
+    const count = this.controlCounts.get(pid);
+    if (!count) return;
+    if (count > 1) {
+      this.controlCounts.set(pid, count - 1);
+      return;
+    }
+    this.controlCounts.delete(pid);
+    this.controlReady.get(pid)?.();
+    this.options.emit({ event: 'control_end', pid });
   }
   async start(): Promise<void> {
     await privateDirectory(this.options.dataDir);
@@ -137,7 +182,10 @@ export class Runtime implements RpcService {
     }
   }
   private removeSession(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
     this.sessions.delete(id);
+    this.releaseControl(session.target);
     for (const [key, value] of this.snapshots) if (value.sessionId === id) this.snapshots.delete(key);
     for (const [requestId, work] of this.work)
       if (work.sessionId === id) {
@@ -178,6 +226,9 @@ export class Runtime implements RpcService {
       case 'http_enable':
       case 'http_disable':
         break; // The host transport owns the listener.
+      case 'control_ready':
+        this.controlReady.get(command.pid)?.();
+        break;
     }
   }
   private haltUncertainInput(message: string): void {
@@ -276,6 +327,11 @@ export class Runtime implements RpcService {
     this.checkLease(session);
     if (session.exclusive && this.work.size > 0)
       throw new CuError('busy', 'Wait for pending actions before acquiring an exclusive session.');
+    await this.acquireControl(session.target);
+    if (this.stopped) {
+      this.releaseControl(session.target);
+      throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
+    }
     this.sessions.set(session.id, session);
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }

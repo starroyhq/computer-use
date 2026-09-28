@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import HostCore
 
 final class HostApplication: NSObject, NSApplicationDelegate {
@@ -25,6 +26,7 @@ final class HostApplication: NSObject, NSApplicationDelegate {
     private var statusWindow: NSWindow?
     private var statusDetails: NSTextField?
     private let readerQueue = DispatchQueue(label: "com.starroy.computeruse.events")
+    private var controlLease = ControlLease()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -209,6 +211,13 @@ final class HostApplication: NSObject, NSApplicationDelegate {
         case "pair_request", "foreground_request":
             pendingAlerts.append(event)
             presentNextAlert()
+        case "control_begin":
+            guard let pid = event.pid else { return }
+            if controlLease.begin(pid) { registerComputerControl(Int32(pid), true) }
+            send("control_ready", pid: pid)
+        case "control_end":
+            guard let pid = event.pid else { return }
+            if controlLease.end(pid) { registerComputerControl(Int32(pid), false) }
         default: break
         }
     }
@@ -241,9 +250,9 @@ final class HostApplication: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil) {
+    private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil) {
         guard let input else { return }
-        do { try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID)) }
+        do { try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid)) }
         catch { if !stopping { fail("无法向运行时发送控制指令。") } }
     }
 
@@ -263,6 +272,7 @@ final class HostApplication: NSObject, NSApplicationDelegate {
     private func stopServices(message: String, completion: (() -> Void)? = nil) {
         guard !stopping else { return }
         stopping = true; running = false
+        for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
         startupTimer?.invalidate(); startupTimer = nil
         pendingAlerts.removeAll()
         if alertActive { NSApp.abortModal() }
@@ -403,8 +413,20 @@ final class HostApplication: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
-    func applicationWillTerminate(_ notification: Notification) { terminateChildren() }
+    func applicationWillTerminate(_ notification: Notification) {
+        for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
+        terminateChildren()
+    }
 }
+
+// 向系统登记该进程正在被控制。1 为登记，其它值撤销。符号缺失时标记失败，会话仍然继续。
+private let registerComputerControl: (Int32, Bool) -> Void = {
+    let path = "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices"
+    guard let handle = dlopen(path, RTLD_LAZY),
+          let symbol = dlsym(handle, "_AXRegisterControlComputerAccess") else { return { _, _ in } }
+    let register = unsafeBitCast(symbol, to: (@convention(c) (Int32, Int32) -> Void).self)
+    return { pid, enabled in register(pid, enabled ? 1 : 0) }
+}()
 
 let application = NSApplication.shared
 let delegate = HostApplication()

@@ -66,6 +66,30 @@ final class HostCoreTests: XCTestCase {
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"pair_request","name":"Agent"}"#.utf8)))
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"foreground_request","sessionId":"s","clientName":"a"}"#.utf8)))
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"unknown"}"#.utf8)))
+        XCTAssertEqual(try HostEvent.parse(Data(#"{"event":"control_begin","pid":4242}"#.utf8)).pid, 4242)
+        XCTAssertEqual(try HostEvent.parse(Data(#"{"event":"control_end","pid":4242}"#.utf8)).event, "control_end")
+        XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"control_begin"}"#.utf8)))
+        XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"control_begin","pid":0}"#.utf8)))
+    }
+
+    func testControlLeaseAppliesOnlyOnTheFirstBeginAndLastEnd() {
+        var lease = ControlLease()
+        XCTAssertTrue(lease.begin(7))
+        XCTAssertFalse(lease.begin(7))
+        XCTAssertFalse(lease.end(7))
+        XCTAssertTrue(lease.end(7))
+        XCTAssertFalse(lease.end(7))
+        XCTAssertTrue(lease.begin(7))
+        XCTAssertEqual(lease.endAll(), [7])
+        XCTAssertTrue(lease.counts.isEmpty)
+    }
+
+    func testControlReadyFrameCarriesTheProcessId() throws {
+        let frame = try HostControl.encode("control_ready", pid: 4242)
+        XCTAssertEqual(frame.last, 10)
+        let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any]
+        XCTAssertEqual(object?["command"] as? String, "control_ready")
+        XCTAssertEqual(object?["pid"] as? Int, 4242)
     }
 
     func testControlFramesEscapeUntrustedStrings() throws {

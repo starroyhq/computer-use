@@ -96,6 +96,7 @@ public struct HostEvent: Decodable {
     public let targetTitle: String?
     public let message: String?
     public let clients: [ClientRecord]?
+    public let pid: Int?
 
     public static func parse(_ data: Data) throws -> HostEvent {
         let item = try JSONDecoder().decode(Self.self, from: data)
@@ -109,6 +110,8 @@ public struct HostEvent: Decodable {
         case "clients": guard item.clients != nil else { throw HostFailure.invalidEvent }
         case "fatal", "status": guard item.message != nil else { throw HostFailure.invalidEvent }
         case "ready": break
+        case "control_begin", "control_end":
+            guard let pid = item.pid, pid > 0, pid <= Int(Int32.max) else { throw HostFailure.invalidEvent }
         default: throw HostFailure.invalidEvent
         }
         return item
@@ -151,13 +154,39 @@ public struct LineFramer {
 }
 
 public enum HostControl {
-    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil) throws -> Data {
-        var object = ["command": command]
+    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil) throws -> Data {
+        var object: [String: Any] = ["command": command]
         if let clientID { object["clientId"] = clientID }
         if let sessionID { object["sessionId"] = sessionID }
-        var result = try JSONEncoder().encode(object)
+        if let pid { object["pid"] = pid }
+        var result = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         result.append(10)
         return result
+    }
+}
+
+/// Reference count for the macOS controlled-window mark. The first begin and the last end are the transitions the host applies.
+public struct ControlLease {
+    public private(set) var counts: [Int: Int] = [:]
+    public init() {}
+    public mutating func begin(_ pid: Int) -> Bool {
+        let next = (counts[pid] ?? 0) + 1
+        counts[pid] = next
+        return next == 1
+    }
+    public mutating func end(_ pid: Int) -> Bool {
+        guard let count = counts[pid] else { return false }
+        if count > 1 {
+            counts[pid] = count - 1
+            return false
+        }
+        counts[pid] = nil
+        return true
+    }
+    public mutating func endAll() -> [Int] {
+        let pids = Array(counts.keys)
+        counts.removeAll()
+        return pids
     }
 }
 

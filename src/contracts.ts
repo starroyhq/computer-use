@@ -74,13 +74,15 @@ export type HostEvent =
   | { event: 'decision_finished'; requestId: string; approved: boolean }
   | { event: 'clients'; clients: Array<{ id: string; name: string }> }
   | { event: 'ready' }
+  | { event: 'control_begin' | 'control_end'; pid: number }
   | { event: 'rpc_response'; id: string; result?: unknown; error?: { code: ErrorCode; message: string } }
   | { event: 'status' | 'fatal'; message: string };
 export type HostCommand =
   | { command: 'pair_allow' | 'pair_deny'; clientId: string }
   | { command: 'foreground_allow' | 'foreground_deny'; sessionId: string }
   | { command: 'revoke'; clientId: string }
-  | { command: 'pause' | 'resume' | 'stop' | 'http_enable' | 'http_disable' };
+  | { command: 'pause' | 'resume' | 'stop' | 'http_enable' | 'http_disable' }
+  | { command: 'control_ready'; pid: number };
 export interface RpcService {
   call(token: string | undefined, method: string, params: unknown): Promise<unknown>;
 }

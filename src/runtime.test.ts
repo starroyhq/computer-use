@@ -45,6 +45,7 @@ describe('Runtime authorization and execution', () => {
   let backend: Backend;
   let events: HostEvent[];
   let clock: number;
+  let ackControl: boolean;
   const call = <T = Record<string, unknown>>(token: string | undefined, method: string, params: unknown = {}) =>
     runtime.call(token, method, params) as Promise<T>;
   async function pair(name = 'Test Agent', allow = true) {
@@ -76,10 +77,14 @@ describe('Runtime authorization and execution', () => {
     });
     events = [];
     clock = 1_000;
+    ackControl = true;
     runtime = new Runtime({
       dataDir: directory,
       backends: [backend],
-      emit: event => events.push(event),
+      emit: event => {
+        events.push(event);
+        if (ackControl && event.event === 'control_begin') void runtime.control({ command: 'control_ready', pid: event.pid });
+      },
       now: () => clock,
       platform: 'darwin',
     });
@@ -166,6 +171,70 @@ describe('Runtime authorization and execution', () => {
     await expect(call(legacy.token, 'session_open', { targetId: target.id })).resolves.toMatchObject({ mode: 'background' });
     expect(events.some(e => e.event === 'foreground_request')).toBe(false);
     expect(backend.act).not.toHaveBeenCalled();
+  });
+
+  it('marks a macOS desktop process controlled while any of its sessions remain open', async () => {
+    const desktop = { ...target, id: 'marked', pid: 4242 };
+    const page = { id: 'page', kind: 'browser' as const, appId: 'browser', title: 'Page' };
+    backend.targets = vi.fn(async () => [desktop, page]);
+    const client = await pair();
+    runtime.clients.clients.get(client.clientId)!.grant.browser = true;
+    const first = await call<{ sessionId: string }>(client.token, 'session_open', { targetId: desktop.id, exclusive: false });
+    const second = await call<{ sessionId: string }>(client.token, 'session_open', { targetId: desktop.id, exclusive: false });
+    await call(client.token, 'session_open', { targetId: page.id, exclusive: false });
+    expect(events.filter(event => event.event === 'control_begin')).toEqual([{ event: 'control_begin', pid: 4242 }]);
+    await call(client.token, 'session_close', { sessionId: first.sessionId });
+    expect(events.some(event => event.event === 'control_end')).toBe(false);
+    await call(client.token, 'session_close', { sessionId: second.sessionId });
+    expect(events.filter(event => event.event === 'control_end')).toEqual([{ event: 'control_end', pid: 4242 }]);
+  });
+
+  it('clears the control mark when the desktop session expires and skips it on Windows', async () => {
+    const desktop = { ...target, id: 'expire', pid: 99 };
+    backend.targets = vi.fn(async () => [desktop]);
+    const { token } = await pair();
+    const { sessionId } = await call<{ sessionId: string }>(token, 'session_open', { targetId: desktop.id, exclusive: false });
+    clock += 120_000 + 1;
+    await expect(call(token, 'observe', { sessionId })).rejects.toMatchObject({ code: 'not_found' });
+    expect(events.filter(event => event.event === 'control_end')).toEqual([{ event: 'control_end', pid: 99 }]);
+
+    const windowsTarget = { ...desktop, appId: 'win32:c:\\windows\\system32\\notepad.exe' };
+    backend.targets = vi.fn(async () => [windowsTarget]);
+    const windowsEvents: HostEvent[] = [];
+    const windows = new Runtime({
+      dataDir: join(directory, 'windows'),
+      backends: [backend],
+      emit: event => windowsEvents.push(event),
+      now: () => clock,
+      platform: 'win32',
+    });
+    await windows.start();
+    const windowsClient = await (async () => {
+      const pending = windows.call(undefined, 'pair', {
+        name: 'Win',
+        appIds: ['C:\\Windows\\System32\\notepad.exe'],
+        browser: false,
+      }) as Promise<{ token: string }>;
+      const request = windowsEvents.findLast(event => event.event === 'pair_request');
+      if (request?.event !== 'pair_request') throw new Error('Missing pair request');
+      await windows.control({ command: 'pair_allow', clientId: request.clientId });
+      return pending;
+    })();
+    await windows.call(windowsClient.token, 'session_open', { targetId: windowsTarget.id, exclusive: false });
+    expect(windowsEvents.some(event => event.event === 'control_begin')).toBe(false);
+    await windows.close();
+  });
+
+  it('still opens a desktop session when the host does not acknowledge the control mark', async () => {
+    const desktop = { ...target, id: 'unacked', pid: 77 };
+    backend.targets = vi.fn(async () => [desktop]);
+    const { token } = await pair();
+    ackControl = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = call<{ sessionId: string }>(token, 'session_open', { targetId: desktop.id, exclusive: false });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(pending).resolves.toHaveProperty('sessionId');
+    expect(events.filter(event => event.event === 'control_begin')).toEqual([{ event: 'control_begin', pid: 77 }]);
   });
 
   it('requires local pairing approval and deduplicates the explicit application scope', async () => {
