@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
-import type { CuaDriverLike, ToolResult, WindowStateOutput } from '@trycua/cua-driver';
+import type { CuaDriverLike, ToolResult, WindowElement, WindowStateOutput } from '@trycua/cua-driver';
 import { CuError, type Action, type Backend, type BackendExecution, type BackendObservation, type Bounds, type Doctor, type ErrorCode, type Grant, type Mode, type Point, type Target } from '../contracts.js';
 import { windowsAppId } from '../app-identity.js';
 
 export type CuaConnection = Pick<CuaDriverLike, 'metadata' | 'listApps' | 'listWindows' | 'getWindowState' | 'callTool' | 'endSession' | 'shutdown'>;
-type State = { snapshot: WindowStateOutput; consumed: boolean };
+type State = { snapshot: WindowStateOutput; session: string; consumed: boolean };
 const VERSION = '0.28.2';
 // The SDK's implicit transport session expires after five minutes of inactivity.
 const CONNECTION_IDLE_MS = 4 * 60_000;
@@ -21,12 +21,22 @@ function failure(code: unknown, mutation = false): CuError {
     permission_denied: 'permission_denied', accessibility_permission_denied: 'permission_denied',
     screen_recording_permission_denied: 'permission_denied', stale_element_token: 'stale_snapshot',
     stale_snapshot: 'stale_snapshot', snapshot_id_required: 'stale_snapshot',
-    window_not_found: 'not_found', app_not_found: 'not_found', invalid_arguments: 'invalid_request',
+    window_not_found: 'not_found', window_id_not_found: 'not_found', app_not_found: 'not_found', invalid_arguments: 'invalid_request',
+    // 以下均为驱动在派发前的明确拒绝（驱动文案："refused" / "Refusing to dispatch"），输入未发出。
+    same_pid_keyboard_ambiguity: 'background_unavailable', off_space_or_ax_unresolved: 'background_unavailable',
+    minimized_or_hidden_window: 'background_unavailable',
+    px_capture_unavailable: 'stale_snapshot', px_frame_mismatch: 'stale_snapshot', px_window_not_found: 'stale_snapshot',
+  };
+  const hints: Record<string, string> = {
+    same_pid_keyboard_ambiguity: ' Key input cannot be proven to reach this window among sibling windows; use an element action or a foreground session.',
+    off_space_or_ax_unresolved: ' The window is on another Space or its accessibility surface is unresolved.',
+    minimized_or_hidden_window: ' The window is minimized or hidden; use an element action.',
+    px_capture_unavailable: ' No provable pixel frame was available; observe again before a coordinate action.',
   };
   const mapped = typeof code === 'string' ? known[code] : undefined;
   const driverCode = typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : undefined;
   return new CuError(mapped ?? (mutation ? 'unknown_outcome' : 'unavailable'), mapped
-    ? `Desktop backend refused the operation (${mapped}).`
+    ? `Desktop backend refused the operation (${mapped}).${hints[code as string] ?? ''}`
     : mutation ? `Desktop action outcome is unknown${driverCode ? ` (driver code ${driverCode})` : ''}. Observe before retrying.` : 'Desktop backend is unavailable. Check the native host and permissions.');
 }
 
@@ -50,6 +60,33 @@ function exactTarget(target: Target): { pid: number; windowId: bigint } {
 
 function sameBounds(a: Bounds, b: Bounds): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
+function captured(state: WindowStateOutput): boolean {
+  const image = state.images[0];
+  return Boolean(image && ['image/png', 'image/jpeg'].includes(image.mimeType) && state.windowBounds
+    && state.screenshotWidth && state.screenshotHeight && state.windowBounds.width > 0 && state.windowBounds.height > 0
+    && state.screenshotFrameValid !== false);
+}
+
+// macOS 的 AX 树会附带菜单栏：
+// - 系统级 Apple 菜单（菜单栏第一项）含最近使用的文件/应用及关机、重启等系统命令，整棵子树都不暴露；
+// - 应用菜单中未展开（没有屏幕坐标）的内容，例如 Safari 的历史记录，属于隐私数据且当前不可见，也不暴露。
+function withoutHiddenMenus(elements: WindowElement[]): WindowElement[] {
+  const excluded = new Set<bigint>();
+  const inMenu = new Set(elements.filter(element => element.role === 'AXMenuBar').map(element => element.elementIndex));
+  for (const bar of [...inMenu]) {
+    const first = elements.filter(element => element.role === 'AXMenuBarItem' && element.parentIndex === bar)
+      .reduce<WindowElement | undefined>((min, element) => !min || element.elementIndex < min.elementIndex ? element : min, undefined);
+    if (first) excluded.add(first.elementIndex);
+  }
+  // 驱动按先序遍历输出，父节点总在子节点之前。
+  for (const element of [...elements].sort((a, b) => (a.elementIndex < b.elementIndex ? -1 : 1))) {
+    if (element.parentIndex === undefined || !inMenu.has(element.parentIndex)) continue;
+    inMenu.add(element.elementIndex);
+    if (excluded.has(element.parentIndex) || !element.frame) excluded.add(element.elementIndex);
+  }
+  return elements.filter(element => !excluded.has(element.elementIndex));
 }
 
 function point(point: Point, observation: BackendObservation): Point {
@@ -112,7 +149,9 @@ export class CuaBackend implements Backend {
   readonly kind = 'desktop' as const;
   private connection: Promise<CuaConnection> | undefined;
   private lastConnectionUse = 0;
-  private readonly session = `computer-use-${randomUUID()}`;
+  // 驱动会话一旦结束（空闲过期或连接关闭），同名后续调用会被永久拒绝；
+  // 因此每个新连接都使用新的会话名，旧会话的快照随之失效。
+  private session = `computer-use-${randomUUID()}`;
   private readonly states = new WeakMap<BackendObservation, State>();
   private readonly latest = new Map<string, BackendObservation>();
   private readonly active = new Set<AbortController>();
@@ -133,6 +172,7 @@ export class CuaBackend implements Backend {
       if (this.active.size === 0) void stale.then(client => client.shutdown(readOptions())).catch(() => {});
     }
     this.lastConnectionUse = now;
+    if (!this.connection) this.session = `computer-use-${randomUUID()}`;
     this.connection ??= this.connector(this.socketPath).then(async client => {
       const metadata = await client.metadata(readOptions());
       if (metadata.driverVersion !== VERSION) throw new CuError('unavailable', `Desktop driver must be version ${VERSION}.`);
@@ -233,19 +273,26 @@ export class CuaBackend implements Backend {
 
   async observe(target: Target): Promise<BackendObservation> {
     if (!await this.owner(target)) throw new CuError('not_found', 'Desktop target is no longer owned by the authorized application.');
-    const state = await this.read(client => client.getWindowState({ ...exactTarget(target), session: this.session,
-      includeAccessibilityTree: true, includeScreenshot: true }, { signal: AbortSignal.timeout(15_000) }));
+    let session = this.session;
+    const capture = () => this.read(client => {
+      session = this.session;
+      return client.getWindowState({ ...exactTarget(target), session, includeAccessibilityTree: true, includeScreenshot: true }, { signal: AbortSignal.timeout(15_000) });
+    });
+    let state = await capture();
+    // 新 SDK 连接上的首次抓取可能不带截图和几何信息；只读观察可以安全地重试一次。
+    if (!captured(state)) state = await capture();
     const image = state.images[0];
     if (state.pid !== target.pid || state.windowId !== BigInt(target.windowId!)) throw new CuError('stale_snapshot', 'Desktop observation did not match the requested window.');
-    if (!image || !['image/png', 'image/jpeg'].includes(image.mimeType) || !state.windowBounds
-        || !state.screenshotWidth || !state.screenshotHeight || state.windowBounds.width <= 0 || state.windowBounds.height <= 0 || state.screenshotFrameValid === false) {
+    if (!image || !captured(state) || !state.windowBounds || !state.screenshotWidth || !state.screenshotHeight) {
       throw new CuError('unavailable', 'Desktop observation did not contain a valid window screenshot and geometry.');
     }
+    const elements = this.platform === 'darwin' ? withoutHiddenMenus(state.elements ?? []) : state.elements ?? [];
     const observation: BackendObservation = { target: { ...target, title: state.windowTitle ?? target.title }, bounds: state.windowBounds,
       imageWidth: state.screenshotWidth, imageHeight: state.screenshotHeight,
-      elementsComplete: state.elementsComplete === true,
+      // 过滤后的树不能再用于证明元素不存在。
+      elementsComplete: state.elementsComplete === true && elements.length === (state.elements ?? []).length,
       screenshot: { mimeType: image.mimeType as 'image/png' | 'image/jpeg', data: image.dataBase64 },
-      elements: (state.elements ?? []).filter(element => element.elementToken).map(element => ({
+      elements: elements.filter(element => element.elementToken).map(element => ({
         id: element.elementToken!, role: element.role, label: element.label ?? '',
         // AX frames are global logical screen points. Actions and public element
         // bounds use window-local pixels of this particular (possibly scaled) image.
@@ -256,14 +303,14 @@ export class CuaBackend implements Backend {
           height: element.frame.h * state.screenshotHeight! / state.windowBounds!.height,
         } } : {}),
       })) };
-    this.states.set(observation, { snapshot: state, consumed: false });
+    this.states.set(observation, { snapshot: state, session, consumed: false });
     this.latest.set(`${target.pid}:${target.windowId}`, observation);
     return observation;
   }
 
   async validate(observation: BackendObservation): Promise<boolean> {
     const state = this.states.get(observation);
-    if (!state || state.consumed || this.latest.get(`${observation.target.pid}:${observation.target.windowId}`) !== observation
+    if (!state || state.consumed || state.session !== this.session || this.latest.get(`${observation.target.pid}:${observation.target.windowId}`) !== observation
         || !await this.owner(observation.target)) return false;
     const target = exactTarget(observation.target);
     // Re-observing AX would mint new tokens. Geometry-only discovery leaves the
@@ -279,7 +326,8 @@ export class CuaBackend implements Backend {
     if (mode !== 'background' && mode !== 'foreground') throw new CuError('invalid_request', 'Explicit delivery mode is required.');
     if (!await this.validate(observation)) throw new CuError('stale_snapshot', 'Observe the desktop target again before acting.');
     const { pid, windowId } = exactTarget(observation.target);
-    const args: Record<string, unknown> = { pid, window_id: Number(windowId), session: this.session, delivery_mode: mode };
+    const state = this.states.get(observation)!;
+    const args: Record<string, unknown> = { pid, window_id: Number(windowId), session: state.session, delivery_mode: mode };
     const element = (id: string): string => {
       if (!observation.elements.some(element => element.id === id)) throw new CuError('stale_snapshot', 'Element does not belong to this observation.');
       return id;
@@ -333,7 +381,15 @@ export class CuaBackend implements Backend {
     try {
       const client = await this.client();
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
-      this.states.get(observation)!.consumed = true;
+      // 连接轮换会更换驱动会话；旧会话的元素 token 不能在新会话里派发。
+      if (state.session !== this.session) throw new CuError('stale_snapshot', 'Desktop driver session changed; observe the target again.');
+      // 驱动空闲约 1 秒后的首次窗口抓取会失败，坐标动作因此被拒为 px_capture_unavailable。
+      // 派发前紧挨着做一次只读抓取预热；失败无妨，只影响随后派发是否被驱动拒绝。
+      if (tool === 'drag' || tool === 'scroll' || (tool === 'click' && !args.element_token)) {
+        await client.getWindowState({ pid, windowId, session: state.session, includeAccessibilityTree: false, includeScreenshot: true }, readOptions()).catch(() => undefined);
+        if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
+      }
+      state.consumed = true;
       dispatched = true;
       const result = await client.callTool(tool, JSON.stringify(args), { signal: combined });
       return checkResult(result, true);

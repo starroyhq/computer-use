@@ -288,6 +288,105 @@ describe('Cua socket adapter', () => {
     expect((await backend.observe(target)).elements[0]?.bounds).toEqual({ x: 25, y: 15, width: 10, height: 5 });
   });
 
+  it.each([
+    ['same_pid_keyboard_ambiguity', 'background_unavailable'], ['off_space_or_ax_unresolved', 'background_unavailable'],
+    ['minimized_or_hidden_window', 'background_unavailable'], ['px_capture_unavailable', 'stale_snapshot'],
+    ['px_frame_mismatch', 'stale_snapshot'], ['px_window_not_found', 'stale_snapshot'], ['window_id_not_found', 'not_found'],
+  ])('maps the pre-dispatch driver refusal %s to %s instead of an unknown outcome', async (driverCode, code) => {
+    const { client, backend } = fixture();
+    client.callTool.mockResolvedValueOnce({ ...success(), isError: true, errorCode: driverCode });
+    await expect(backend.act(await backend.observe(target), { type: 'key', keys: ['return'] }, 'background', new AbortController().signal)).rejects.toMatchObject({ code });
+    await expect(backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', new AbortController().signal)).resolves.toEqual({ effect: 'confirmed' });
+  });
+
+  it('warms the capture pipeline immediately before pointer actions only', async () => {
+    const { client, backend } = fixture();
+    const order: string[] = [];
+    client.getWindowState.mockImplementation(async input => { order.push(input.includeAccessibilityTree ? 'observe' : 'warm'); return fixture().state; });
+    client.callTool.mockImplementation(async tool => { order.push(tool); return success(); });
+    await backend.act(await backend.observe(target), { type: 'click', point: { x: 25, y: 50 } }, 'foreground', new AbortController().signal);
+    await backend.act(await backend.observe(target), { type: 'scroll', direction: 'down', amount: 1, unit: 'line' }, 'background', new AbortController().signal);
+    await backend.act(await backend.observe(target), { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal);
+    await backend.act(await backend.observe(target), { type: 'key', keys: ['return'] }, 'foreground', new AbortController().signal);
+    expect(order).toEqual(['observe', 'warm', 'click', 'observe', 'warm', 'scroll', 'observe', 'click', 'observe', 'hotkey']);
+    expect(client.getWindowState.mock.calls.filter(([input]) => !input.includeAccessibilityTree).every(([input]) => input.includeScreenshot && input.pid === 42 && input.windowId === 19n)).toBe(true);
+  });
+
+  it('omits off-screen application menu contents such as browsing history but keeps visible menu titles', async () => {
+    const { backend, state } = fixture();
+    const item = (elementIndex: bigint, role: string, label: string, parentIndex: bigint | undefined, frame?: { x: number; y: number; w: number; h: number }) =>
+      ({ elementIndex, role, label, depth: 0, elementToken: `s1:${elementIndex}`, ...(parentIndex === undefined ? {} : { parentIndex }), ...(frame ? { frame } : {}) });
+    state.elements = [state.elements![0]!,
+      item(6n, 'AXMenuBar', '', undefined, { x: 0, y: -30, w: 300, h: 30 }), item(7n, 'AXMenuBarItem', 'Apple', 6n, { x: 10, y: -30, w: 20, h: 30 }),
+      item(20n, 'AXMenuBarItem', '历史记录', 6n, { x: 40, y: -30, w: 60, h: 30 }), item(21n, 'AXMenu', '', 20n),
+      item(22n, 'AXMenuItem', 'secret - Google 搜索', 21n), item(30n, 'AXMenuBarItem', '文件', 6n, { x: 110, y: -30, w: 40, h: 30 }),
+      item(31n, 'AXMenu', '', 30n, { x: 110, y: 0, w: 200, h: 100 }), item(32n, 'AXMenuItem', '新建窗口', 31n, { x: 110, y: 5, w: 200, h: 20 })];
+    expect((await backend.observe(target)).elements.map(element => element.label)).toEqual(['Save', '', '历史记录', '文件', '', '新建窗口']);
+  });
+
+  it('uses a new driver session after reconnecting because an ended session id rejects every later call', async () => {
+    const { client, backend, connector } = fixture();
+    const replacement = fixture().client;
+    connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
+    await backend.observe(target);
+    const first = client.getWindowState.mock.calls[0]![0].session;
+    client.getWindowState.mockRejectedValue(new Error(`session '${first}' has ended`));
+    replacement.getWindowState.mockImplementation(async input => {
+      if (input.session === first) throw new Error(`session '${first}' has ended`);
+      return fixture().state;
+    });
+    const observation = await backend.observe(target);
+    const renewed = replacement.getWindowState.mock.calls[0]![0].session;
+    expect(renewed).not.toBe(first);
+    await backend.act(observation, { type: 'key', keys: ['tab'] }, 'background', new AbortController().signal);
+    expect(JSON.parse(replacement.callTool.mock.calls[0]![1]).session).toBe(renewed);
+  });
+
+  it('refuses to dispatch old-session element tokens after an idle connection rotation', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, backend, connector } = fixture();
+      const replacement = fixture().client;
+      connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
+      const observation = await backend.observe(target);
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await expect(backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal)).rejects.toMatchObject({ code: 'stale_snapshot' });
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(replacement.callTool).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('retries one read-only capture when a fresh driver connection returns no screenshot', async () => {
+    const { client, backend, state } = fixture();
+    const { windowBounds: _, screenshotWidth: __, screenshotHeight: ___, ...rest } = state;
+    const uncaptured = { ...rest, images: [] };
+    client.getWindowState.mockResolvedValueOnce({ ...uncaptured, screenshotFrameValid: false });
+    await expect(backend.observe(target)).resolves.toMatchObject({ imageWidth: 600, screenshot: { data: 'fixture-image' } });
+    expect(client.getWindowState).toHaveBeenCalledTimes(2);
+    client.getWindowState.mockResolvedValueOnce({ ...uncaptured, screenshotFrameValid: false }).mockResolvedValueOnce({ ...uncaptured, screenshotFrameValid: false });
+    await expect(backend.observe(target)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(client.getWindowState).toHaveBeenCalledTimes(4);
+  });
+
+  it('omits the system Apple menu subtree but keeps the application menus', async () => {
+    const { client, backend, state } = fixture();
+    const menu = (elementIndex: bigint, role: string, label: string, depth: number, parentIndex?: bigint) =>
+      ({ elementIndex, role, label, depth, elementToken: `s1:${elementIndex}`, ...(parentIndex === undefined ? {} : { parentIndex }) });
+    state.elementsComplete = true;
+    state.elements = [state.elements![0]!,
+      menu(6n, 'AXMenuBar', '', 0), menu(7n, 'AXMenuBarItem', 'Apple', 1, 6n), menu(8n, 'AXMenu', '', 2, 7n),
+      menu(9n, 'AXMenuItem', '关机', 3, 8n), menu(13n, 'AXMenuItem', '最近使用的项目', 3, 8n), menu(14n, 'AXMenu', '', 4, 13n),
+      menu(15n, 'AXMenuItem', 'secret-project', 5, 14n), { ...menu(73n, 'AXMenuBarItem', 'Fixture', 1, 6n), frame: { x: 43, y: 0, w: 162, h: 39 } },
+      { ...menu(74n, 'AXMenuItem', 'Save', 2, 73n), frame: { x: 43, y: 40, w: 162, h: 20 } }];
+    const observation = await backend.observe(target);
+    expect(observation.elements.map(element => element.id)).toEqual(['s1:1', 's1:6', 's1:73', 's1:74']);
+    expect(observation.elementsComplete).toBe(false);
+    await expect(backend.act(observation, { type: 'click', elementId: 's1:9' }, 'background', new AbortController().signal)).rejects.toMatchObject({ code: 'stale_snapshot' });
+    expect(client.callTool).not.toHaveBeenCalled();
+    const windows = new CuaBackend('C:\\Computer Use\\cua-driver.exe', async () => client, 'win32', async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]));
+    expect((await windows.observe({ ...target, appId: 'win32:c:\\fixtures\\fixture.exe' })).elements).toHaveLength(10);
+  });
+
   it('refreshes the window title from the live observation', async () => {
     const { backend, state } = fixture();
     state.windowTitle = 'Saved document';
