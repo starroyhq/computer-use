@@ -42,7 +42,7 @@ function failure(code: unknown, mutation = false): CuError {
 
 function checkResult(result: ToolResult): void;
 function checkResult(result: ToolResult, mutation: true): BackendExecution;
-function checkResult(result: ToolResult, mutation = false): void | BackendExecution {
+function checkResult(result: ToolResult, mutation = false): BackendExecution | undefined {
   if (result.isError) throw failure(result.errorCode, mutation);
   // UniFFI's ActionEffect enum: Confirmed=0; Partial=1; Unverifiable=2;
   // SuspectedNoop=3; Refused=4. A successful transport is not an effect proof.

@@ -35,7 +35,7 @@ export interface Backend {
   targets(grant: Grant): Promise<Target[]>;
   observe(target: Target): Promise<BackendObservation>;
   validate(observation: BackendObservation): Promise<boolean>;
-  act(observation: BackendObservation, action: Action, mode: Mode, signal: AbortSignal): Promise<void | BackendExecution>;
+  act(observation: BackendObservation, action: Action, mode: Mode, signal: AbortSignal): Promise<BackendExecution | undefined>;
   cancel(): Promise<void>;
   close(): Promise<void>;
 }

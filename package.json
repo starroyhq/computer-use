@@ -16,7 +16,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && vitest run",
-    "check": "pnpm typecheck && pnpm test && node --test scripts/package.test.mjs scripts/package-windows.test.mjs scripts/windows-remote-auth.test.mjs",
+    "lint": "biome ci .",
+    "format": "biome format --write .",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && node --test scripts/package.test.mjs scripts/package-windows.test.mjs scripts/windows-remote-auth.test.mjs",
     "native:test": "swift test --package-path native",
     "native:build": "swift build --package-path native -c release",
     "package:app": "node scripts/package-app.mjs",
@@ -32,6 +34,7 @@
     "zod": "4"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@types/node": "24",
     "typescript": "5",
     "vitest": "3"

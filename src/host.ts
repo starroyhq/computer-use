@@ -6,7 +6,7 @@ import { Runtime } from './runtime.js';
 import { listenIpc } from './ipc.js';
 import { listenHttp } from './mcp.js';
 import { hostCommandSchema } from './schema.js';
-import { type HostEvent } from './contracts.js';
+import type { HostEvent } from './contracts.js';
 import { errorResult } from './contracts.js';
 import { z } from 'zod';
 

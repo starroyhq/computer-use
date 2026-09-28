@@ -180,7 +180,7 @@ export class BrowserBackend implements Backend {
     } catch { return false; }
   }
 
-  async act(observation: BackendObservation, action: Action, _mode: Mode, signal: AbortSignal): Promise<void> {
+  async act(observation: BackendObservation, action: Action, _mode: Mode, signal: AbortSignal): Promise<undefined> {
     if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled.');
     if (!await this.validate(observation)) throw new CuError('stale_snapshot', 'Page or elements changed; observe again.');
     const state = this.observations.get(observation)!;

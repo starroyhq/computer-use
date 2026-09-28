@@ -30,7 +30,7 @@ describe('Runtime authorization and execution', () => {
   async function pair(name = 'Test Agent', allow = true) {
     const pending = call<{ token: string; clientId: string }>(undefined, 'pair', { name, appIds: [target.appId, target.appId], browser: false });
     const event = events.findLast(e => e.event === 'pair_request');
-    if (!event || event.event !== 'pair_request') throw new Error('Pair request not emitted');
+    if (event?.event !== 'pair_request') throw new Error('Pair request not emitted');
     await runtime.control({ command: allow ? 'pair_allow' : 'pair_deny', clientId: event.clientId });
     return pending;
   }
@@ -57,7 +57,7 @@ describe('Runtime authorization and execution', () => {
     const pending = call(undefined, 'pair', { name: 'Expired', appIds: [target.appId], browser: false });
     const rejected = expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
     const request = events.findLast(e => e.event === 'pair_request');
-    if (!request || request.event !== 'pair_request') throw new Error('Missing pair request');
+    if (request?.event !== 'pair_request') throw new Error('Missing pair request');
     await vi.advanceTimersByTimeAsync(60_000);
     await rejected;
     await runtime.control({ command: 'pair_allow', clientId: request.clientId });
