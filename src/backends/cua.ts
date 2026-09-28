@@ -24,9 +24,14 @@ export type CuaConnection = Pick<
   'metadata' | 'listApps' | 'listWindows' | 'getWindowState' | 'callTool' | 'endSession' | 'shutdown'
 >;
 type State = { snapshot: WindowStateOutput; session: string; consumed: boolean };
+type AppList = Awaited<ReturnType<CuaConnection['listApps']>>['apps'];
 const VERSION = '0.28.2';
 // The SDK's implicit transport session expires after five minutes of inactivity.
 const CONNECTION_IDLE_MS = 4 * 60_000;
+// listApps 在这台机器上大约要 1.7 秒。一秒内的重复校验复用同一份结果。
+const APPS_CACHE_MS = 1000;
+// 一次有效截图会给驱动的坐标派发预热，但这次预热撑不过下一次大约 1.7 秒的 listApps。
+const CAPTURE_FRESH_MS = 1000;
 const readOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const execFileAsync = promisify(execFile);
 const record = (value: unknown): Record<string, unknown> | undefined =>
@@ -223,6 +228,9 @@ export class CuaBackend implements Backend {
   private readonly states = new WeakMap<BackendObservation, State>();
   private readonly latest = new Map<string, BackendObservation>();
   private readonly active = new Set<AbortController>();
+  private appsCache: { at: number; apps: AppList } | undefined;
+  // darwin 上，有效截图完成后的短时间内，坐标动作可以直接派发。
+  private readonly freshCaptures = new Map<string, number>();
   private closed = false;
   private interrupted = false;
 
@@ -243,7 +251,10 @@ export class CuaBackend implements Backend {
       if (this.active.size === 0) void stale.then(client => client.shutdown(readOptions())).catch(() => {});
     }
     this.lastConnectionUse = now;
-    if (!this.connection) this.session = `computer-use-${randomUUID()}`;
+    if (!this.connection) {
+      this.session = `computer-use-${randomUUID()}`;
+      this.freshCaptures.clear();
+    }
     this.connection ??= this.connector(this.socketPath)
       .then(async client => {
         const metadata = await client.metadata(readOptions());
@@ -358,10 +369,41 @@ export class CuaBackend implements Backend {
     return { available: checks.every(check => check.ok), checks };
   }
 
+  private cachedApps(): AppList | undefined {
+    if (!this.appsCache || Date.now() - this.appsCache.at >= APPS_CACHE_MS) return undefined;
+    return this.appsCache.apps;
+  }
+
+  private rememberApps(apps: AppList): void {
+    this.appsCache = { at: Date.now(), apps };
+  }
+
+  private async apps(): Promise<AppList> {
+    const cached = this.cachedApps();
+    if (cached) return cached;
+    const { apps } = await this.read(client => client.listApps({}, readOptions()));
+    this.rememberApps(apps);
+    return apps;
+  }
+
+  private captureKey(target: Target): string {
+    return `${target.pid}:${target.windowId}`;
+  }
+
+  /** 有效截图已经预热过坐标派发时返回 true，并消费这次预热。 */
+  private takeFreshCapture(target: Target): boolean {
+    const key = this.captureKey(target);
+    const at = this.freshCaptures.get(key);
+    this.freshCaptures.delete(key);
+    return this.platform === 'darwin' && at !== undefined && Date.now() - at < CAPTURE_FRESH_MS;
+  }
+
   async targets(grant: Grant): Promise<Target[]> {
     if (grant.appIds.length === 0) return [];
+    const cached = this.cachedApps();
     return this.read(async client => {
-      const { apps } = await client.listApps({}, readOptions());
+      const apps = cached ?? (await client.listApps({}, readOptions())).apps;
+      if (!cached) this.rememberApps(apps);
       const nativePaths =
         this.platform === 'win32' ? await this.processPaths(apps.filter(app => app.running).map(app => app.pid)) : undefined;
       const targets: Target[] = [];
@@ -390,7 +432,7 @@ export class CuaBackend implements Backend {
 
   private async owner(target: Target): Promise<boolean> {
     const { pid } = exactTarget(target);
-    const { apps } = await this.read(client => client.listApps({}, readOptions()));
+    const apps = await this.apps();
     const nativePath = this.platform === 'win32' ? (await this.processPaths([pid])).get(pid) : undefined;
     return apps.some(
       app =>
@@ -414,7 +456,8 @@ export class CuaBackend implements Backend {
         );
       });
     let state = await capture();
-    // 新 SDK 连接上的首次抓取可能不带截图和几何信息；只读观察可以安全地重试一次。
+    // 合并请求树和截图时，驱动经常先花大约 5 秒返回一帧没有图像的结果，紧接着的一次才带上截图。
+    // 只读观察可以重试一次。不能中途取消第一次：取消后后续抓取会一直空着。
     if (!captured(state)) state = await capture();
     const image = state.images[0];
     if (state.pid !== target.pid || state.windowId !== BigInt(target.windowId!))
@@ -452,7 +495,13 @@ export class CuaBackend implements Backend {
         })),
     };
     this.states.set(observation, { snapshot: state, session, consumed: false });
-    this.latest.set(`${target.pid}:${target.windowId}`, observation);
+    this.latest.set(this.captureKey(target), observation);
+    // 抓取本身要数秒。把应用列表的缓存时间挪到抓取结束，这样紧接着的动作不必再花 1.7 秒枚举进程，
+    // 也不会把刚刚完成的截图预热拖过期。列表内容仍是这次观察开始时核对过的那一份。
+    if (this.platform === 'darwin') {
+      if (this.appsCache) this.appsCache = { ...this.appsCache, at: Date.now() };
+      this.freshCaptures.set(this.captureKey(target), Date.now());
+    }
     return observation;
   }
 
@@ -568,9 +617,10 @@ export class CuaBackend implements Backend {
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
       // 连接轮换会更换驱动会话；旧会话的元素 token 不能在新会话里派发。
       if (state.session !== this.session) throw new CuError('stale_snapshot', 'Desktop driver session changed; observe the target again.');
-      // 驱动空闲约 1 秒后的首次窗口抓取会失败，坐标动作因此被拒为 px_capture_unavailable。
-      // 派发前紧挨着做一次只读抓取预热；失败无妨，只影响随后派发是否被驱动拒绝。
-      if (tool === 'drag' || tool === 'scroll' || (tool === 'click' && !args.element_token)) {
+      // 有效截图后大约 1 秒内，坐标动作可以直接派发（约 3 秒）。再插入一次抓取反而会先空转约 4 秒。
+      // 超过这个窗口后，不预热的派发会以 px_capture_unavailable 失败，所以仍要紧挨着抓一次。
+      const pointer = tool === 'drag' || tool === 'scroll' || (tool === 'click' && !args.element_token);
+      if (pointer && !this.takeFreshCapture(observation.target)) {
         await client
           .getWindowState(
             { pid, windowId, session: state.session, includeAccessibilityTree: false, includeScreenshot: true },

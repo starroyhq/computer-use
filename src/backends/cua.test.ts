@@ -56,39 +56,45 @@ function fixture() {
 
 describe('Cua socket adapter', () => {
   it('uses a verified executable identity and Windows health checks', async () => {
-    const { client } = fixture();
-    const processPaths = vi.fn(async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]));
-    const backend = new CuaBackend('C:\\Computer Use\\cua-driver.exe', async () => client, 'win32', processPaths);
-    client.listApps.mockResolvedValue({
-      apps: [
-        { pid: 42, name: 'Fixture', running: true, active: false },
-        { pid: 99, name: 'Unidentified', running: true, active: true },
-      ],
-    });
-    const appId = 'win32:c:\\fixtures\\fixture.exe';
-    const windowsTarget: Target = { ...target, appId };
-    expect(await backend.targets({ appIds: [appId], browser: false })).toEqual([windowsTarget]);
-    await expect(backend.observe(windowsTarget)).resolves.toMatchObject({ target: windowsTarget });
-    client.listApps.mockResolvedValueOnce({
-      apps: [{ pid: 42, name: 'Other', running: true, active: true, launchPath: 'C:\\Other\\Fixture.exe' }],
-    });
-    await expect(backend.observe(windowsTarget)).rejects.toMatchObject({ code: 'not_found' });
-    expect(processPaths).toHaveBeenCalledWith([42]);
-    client.callTool.mockImplementation(async () => ({
-      ...success(),
-      structuredJson: JSON.stringify({
-        schema_version: '1',
-        platform: 'win32',
-        checks: [
-          { name: 'session_active', status: 'pass' },
-          { name: 'ax_capability', status: 'pass' },
-          { name: 'screen_capture_capability', status: 'pass' },
+    vi.useFakeTimers();
+    try {
+      const { client } = fixture();
+      const processPaths = vi.fn(async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]));
+      const backend = new CuaBackend('C:\\Computer Use\\cua-driver.exe', async () => client, 'win32', processPaths);
+      client.listApps.mockResolvedValue({
+        apps: [
+          { pid: 42, name: 'Fixture', running: true, active: false },
+          { pid: 99, name: 'Unidentified', running: true, active: true },
         ],
-      }),
-    }));
-    expect((await backend.doctor()).available).toBe(true);
-    expect(client.callTool).toHaveBeenCalledTimes(1);
-    expect(client.callTool.mock.calls[0]?.[0]).toBe('health_report');
+      });
+      const appId = 'win32:c:\\fixtures\\fixture.exe';
+      const windowsTarget: Target = { ...target, appId };
+      expect(await backend.targets({ appIds: [appId], browser: false })).toEqual([windowsTarget]);
+      await expect(backend.observe(windowsTarget)).resolves.toMatchObject({ target: windowsTarget });
+      await vi.advanceTimersByTimeAsync(1_000);
+      client.listApps.mockResolvedValueOnce({
+        apps: [{ pid: 42, name: 'Other', running: true, active: true, launchPath: 'C:\\Other\\Fixture.exe' }],
+      });
+      await expect(backend.observe(windowsTarget)).rejects.toMatchObject({ code: 'not_found' });
+      expect(processPaths).toHaveBeenCalledWith([42]);
+      client.callTool.mockImplementation(async () => ({
+        ...success(),
+        structuredJson: JSON.stringify({
+          schema_version: '1',
+          platform: 'win32',
+          checks: [
+            { name: 'session_active', status: 'pass' },
+            { name: 'ax_capability', status: 'pass' },
+            { name: 'screen_capture_capability', status: 'pass' },
+          ],
+        }),
+      }));
+      expect((await backend.doctor()).available).toBe(true);
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(client.callTool.mock.calls[0]?.[0]).toBe('health_report');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('filters before enumerating windows and never launches apps', async () => {
@@ -496,7 +502,7 @@ describe('Cua socket adapter', () => {
     ).resolves.toEqual({ effect: 'confirmed' });
   });
 
-  it('warms the capture pipeline immediately before pointer actions only', async () => {
+  it('skips the pointer warm-up while the observation frame is fresh, and never warms element or key actions', async () => {
     const { client, backend } = fixture();
     const order: string[] = [];
     client.getWindowState.mockImplementation(async input => {
@@ -521,12 +527,39 @@ describe('Cua socket adapter', () => {
     );
     await backend.act(await backend.observe(target), { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal);
     await backend.act(await backend.observe(target), { type: 'key', keys: ['return'] }, 'foreground', new AbortController().signal);
-    expect(order).toEqual(['observe', 'warm', 'click', 'observe', 'warm', 'scroll', 'observe', 'click', 'observe', 'hotkey']);
-    expect(
-      client.getWindowState.mock.calls
-        .filter(([input]) => !input.includeAccessibilityTree)
-        .every(([input]) => input.includeScreenshot && input.pid === 42 && input.windowId === 19n),
-    ).toBe(true);
+    expect(order).toEqual(['observe', 'click', 'observe', 'scroll', 'observe', 'click', 'observe', 'hotkey']);
+    expect(client.getWindowState.mock.calls.filter(([input]) => !input.includeAccessibilityTree)).toHaveLength(0);
+  });
+
+  it('warms a pointer action once the observation frame is a second old', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, backend } = fixture();
+      const observation = await backend.observe(target);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await backend.act(observation, { type: 'click', point: { x: 25, y: 50 } }, 'foreground', new AbortController().signal);
+      const warm = client.getWindowState.mock.calls.filter(([input]) => !input.includeAccessibilityTree);
+      expect(warm).toHaveLength(1);
+      expect(warm[0]?.[0]).toMatchObject({ includeScreenshot: true, pid: 42, windowId: 19n });
+      expect(client.listApps).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reuses the application list for one second across observe and act', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, backend } = fixture();
+      const observation = await backend.observe(target);
+      await backend.act(observation, { type: 'click', point: { x: 25, y: 50 } }, 'background', new AbortController().signal);
+      expect(client.listApps).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await backend.observe(target);
+      expect(client.listApps).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('omits off-screen application menu contents such as browsing history but keeps visible menu titles', async () => {
