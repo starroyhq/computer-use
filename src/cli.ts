@@ -34,15 +34,27 @@ CLI operation does not depend on MCP. Images are written to private files.
 `;
 const credentialSchema = z.object({ clientId: z.string(), token: z.string().min(20) });
 const pairResultSchema = credentialSchema;
-const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-  help: { type: 'boolean', short: 'h' }, socket: { type: 'string' }, profile: { type: 'string', default: 'default' },
-  name: { type: 'string' }, app: { type: 'string', multiple: true }, browser: { type: 'boolean' },
-  json: { type: 'string' }, input: { type: 'string' }, out: { type: 'string' },
-} });
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    help: { type: 'boolean', short: 'h' },
+    socket: { type: 'string' },
+    profile: { type: 'string', default: 'default' },
+    name: { type: 'string' },
+    app: { type: 'string', multiple: true },
+    browser: { type: 'boolean' },
+    json: { type: 'string' },
+    input: { type: 'string' },
+    out: { type: 'string' },
+  },
+});
 let submittedRequestId: string | undefined;
 
 async function main(): Promise<void> {
-  if (values.help || positionals.length === 0) { process.stdout.write(help); return; }
+  if (values.help || positionals.length === 0) {
+    process.stdout.write(help);
+    return;
+  }
   const profile = values.profile!;
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(profile)) throw new CuError('invalid_request', 'Invalid profile name.');
   const credentialsPath = join(credentialDir, `${profile}.json`);
@@ -50,42 +62,60 @@ async function main(): Promise<void> {
   if (command === 'schema') {
     const method = positionals[1];
     if (!method || !Object.hasOwn(schemas, method)) throw new CuError('invalid_request', 'Unknown method.');
-    process.stdout.write(JSON.stringify(z.toJSONSchema(schemas[method as Method]), null, 2) + '\n'); return;
+    process.stdout.write(JSON.stringify(z.toJSONSchema(schemas[method as Method]), null, 2) + '\n');
+    return;
   }
   if (command === 'browser' && positionals[1] === 'install') {
     const modulePath = fileURLToPath(import.meta.resolve('playwright/package.json'));
     const status = await new Promise<number>((resolveStatus, reject) => {
-      const child = spawn(process.execPath, [join(dirname(modulePath), 'cli.js'), 'install', 'chromium'], { stdio: ['ignore', 'inherit', 'inherit'] });
-      child.on('error', reject); child.on('exit', code => resolveStatus(code ?? 1));
+      const child = spawn(process.execPath, [join(dirname(modulePath), 'cli.js'), 'install', 'chromium'], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+      });
+      child.on('error', reject);
+      child.on('exit', code => resolveStatus(code ?? 1));
     });
-    process.exitCode = status; return;
+    process.exitCode = status;
+    return;
   }
   if (command === 'credentials' && positionals[1] === 'remove') {
     await rm(credentialsPath, { force: true });
-    process.stdout.write(JSON.stringify({ removed: profile, note: 'Revoke the client in the local app to invalidate copied credentials.' }) + '\n'); return;
+    process.stdout.write(
+      JSON.stringify({ removed: profile, note: 'Revoke the client in the local app to invalidate copied credentials.' }) + '\n',
+    );
+    return;
   }
-  const client = new IpcClient(values.socket ?? await defaultIpcPath());
+  const client = new IpcClient(values.socket ?? (await defaultIpcPath()));
   if (command === 'pair') {
-    if (await readJson(credentialsPath) !== undefined) throw new CuError('invalid_request', 'Profile already exists; choose another profile or remove it explicitly.');
-    const result = pairResultSchema.parse(await client.call(undefined, 'pair', { name: values.name ?? profile, appIds: values.app ?? [], browser: values.browser ?? false }));
+    if ((await readJson(credentialsPath)) !== undefined)
+      throw new CuError('invalid_request', 'Profile already exists; choose another profile or remove it explicitly.');
+    const result = pairResultSchema.parse(
+      await client.call(undefined, 'pair', { name: values.name ?? profile, appIds: values.app ?? [], browser: values.browser ?? false }),
+    );
     await privateDirectory(credentialDir);
     await atomicJson(credentialsPath, result);
-    process.stdout.write(JSON.stringify({ clientId: result.clientId, profile, paired: true }) + '\n'); return;
+    process.stdout.write(JSON.stringify({ clientId: result.clientId, profile, paired: true }) + '\n');
+    return;
   }
   const credential = credentialSchema.safeParse(await readJson(credentialsPath));
   if (!credential.success) throw new CuError('unauthorized', 'No valid credential profile. Run computer-use pair first.');
   if (command === 'mcp' && positionals[1] === 'stdio') {
     const { runStdio } = await import('./mcp.js');
-    await runStdio(client, credential.data.token); return;
+    await runStdio(client, credential.data.token);
+    return;
   }
   if (command === 'config') {
     if (positionals[1] === 'stdio' || positionals[1] === 'codex') {
       const entrypoint = resolve(process.argv[1]!);
       // Source builds use Node; installed wrappers can use this equally portable configuration.
-      const settings = { command: process.execPath, args: [entrypoint, 'mcp', 'stdio', '--profile', profile, ...(values.socket ? ['--socket', values.socket] : [])] };
+      const settings = {
+        command: process.execPath,
+        args: [entrypoint, 'mcp', 'stdio', '--profile', profile, ...(values.socket ? ['--socket', values.socket] : [])],
+      };
       if (positionals[1] === 'codex') {
         // JSON string literals are also valid TOML basic strings for these paths and arguments.
-        process.stdout.write(`[mcp_servers.computer-use]\ncommand = ${JSON.stringify(settings.command)}\nargs = [${settings.args.map(arg => JSON.stringify(arg)).join(', ')}]\n`);
+        process.stdout.write(
+          `[mcp_servers.computer-use]\ncommand = ${JSON.stringify(settings.command)}\nargs = [${settings.args.map(arg => JSON.stringify(arg)).join(', ')}]\n`,
+        );
       } else process.stdout.write(JSON.stringify({ mcpServers: { 'computer-use': settings } }, null, 2) + '\n');
       return;
     }
@@ -95,21 +125,38 @@ async function main(): Promise<void> {
         // chmod is not a Windows access-control boundary. The tray host protects
         // its data directory with a current-user ACL before publishing the pipe.
         const parent = await realpath(dirname(path));
-        if (parent !== await realpath(dataDir)) {
+        if (parent !== (await realpath(dataDir))) {
           throw new CuError('invalid_request', 'On Windows, export HTTP credentials only into the host private data directory.');
         }
       }
-      await writeFile(path, JSON.stringify({ mcpServers: { 'computer-use': { url: 'http://127.0.0.1:47631/mcp', headers: { Authorization: `Bearer ${credential.data.token}` } } } }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-      process.stdout.write(JSON.stringify({ configFile: path, containsCredential: true }) + '\n'); return;
+      await writeFile(
+        path,
+        JSON.stringify(
+          {
+            mcpServers: {
+              'computer-use': { url: 'http://127.0.0.1:47631/mcp', headers: { Authorization: `Bearer ${credential.data.token}` } },
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+        { flag: 'wx', mode: 0o600 },
+      );
+      process.stdout.write(JSON.stringify({ configFile: path, containsCredential: true }) + '\n');
+      return;
     }
     throw new CuError('invalid_request', 'Use config stdio, config codex, or config http --out <new-private-file>.');
   }
   const method = command === 'call' ? positionals[1] : command;
   if (!method || !Object.hasOwn(schemas, method)) throw new CuError('invalid_request', 'Unknown command; use --help.');
   if (values.json && values.input) throw new CuError('invalid_request', 'Choose --json or --input.');
-  const raw = values.input ? await readFile(resolve(values.input), 'utf8') : values.json ?? '{}';
+  const raw = values.input ? await readFile(resolve(values.input), 'utf8') : (values.json ?? '{}');
   let params: unknown;
-  try { params = JSON.parse(raw) as unknown; } catch { throw new CuError('invalid_request', 'Input is not valid JSON.'); }
+  try {
+    params = JSON.parse(raw) as unknown;
+  } catch {
+    throw new CuError('invalid_request', 'Input is not valid JSON.');
+  }
   if (method === 'act' && params !== null && typeof params === 'object' && !Array.isArray(params)) {
     const object = params as Record<string, unknown>;
     object.requestId ??= randomUUID();
@@ -121,7 +168,8 @@ async function main(): Promise<void> {
     if (!input || typeof input !== 'object') return input;
     const output: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input)) {
-      const image = key === 'screenshot' ? z.object({ data: z.string(), mimeType: z.enum(['image/png', 'image/jpeg']) }).safeParse(value) : undefined;
+      const image =
+        key === 'screenshot' ? z.object({ data: z.string(), mimeType: z.enum(['image/png', 'image/jpeg']) }).safeParse(value) : undefined;
       if (image?.success) {
         const directory = join(credentialDir, 'screenshots');
         await privateDirectory(directory);
@@ -134,8 +182,11 @@ async function main(): Promise<void> {
   }
   process.stdout.write(JSON.stringify(await materialize(result)) + '\n');
 }
-try { await main(); }
-catch (error) {
-  process.stderr.write(JSON.stringify({ error: errorResult(error), ...(submittedRequestId ? { requestId: submittedRequestId } : {}) }) + '\n');
+try {
+  await main();
+} catch (error) {
+  process.stderr.write(
+    JSON.stringify({ error: errorResult(error), ...(submittedRequestId ? { requestId: submittedRequestId } : {}) }) + '\n',
+  );
   process.exitCode = 1;
 }

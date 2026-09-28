@@ -13,10 +13,15 @@ test('signing identity comes from --identity, then the ignored local env file, t
     assert.equal(await signingIdentity([], file), '-');
     await writeFile(file, 'OTHER_SECRET=ignored\nCOMPUTER_USE_SIGNING_IDENTITY="Developer ID Application: Local (TEAM)"\n');
     assert.equal(await signingIdentity([], file), 'Developer ID Application: Local (TEAM)');
-    assert.equal(await signingIdentity(['--identity', 'Developer ID Application: Explicit (X)'], file), 'Developer ID Application: Explicit (X)');
+    assert.equal(
+      await signingIdentity(['--identity', 'Developer ID Application: Explicit (X)'], file),
+      'Developer ID Application: Explicit (X)',
+    );
     assert.equal(process.env.OTHER_SECRET, undefined);
     await assert.rejects(signingIdentity(['--unknown'], file), /Usage/);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('archive checksum reads actual bytes', async () => {
@@ -27,7 +32,9 @@ test('archive checksum reads actual bytes', async () => {
     assert.equal(await sha256(path), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     await writeFile(path, 'modified');
     assert.notEqual(await sha256(path), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('bundle accepts internal dependency links and rejects escaped and broken links', async () => {
@@ -44,5 +51,7 @@ test('bundle accepts internal dependency links and rejects escaped and broken li
     await rm(join(bundle, 'escape.js'));
     await symlink('missing.js', join(bundle, 'broken.js'));
     await assert.rejects(assertInternalLinks(bundle));
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

@@ -41,5 +41,7 @@ test('Windows PE verification rejects the other architecture', async () => {
     await writeFile(path, pe);
     await assertPeMachine(path, targetForArch('x64'));
     await assert.rejects(assertPeMachine(path, targetForArch('arm64')), /not Windows ARM64/);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

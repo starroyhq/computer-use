@@ -19,6 +19,9 @@ export function canonicalAppId(value: string, platform: NodeJS.Platform = proces
 
 export function windowsAppId(launchPath: string | undefined): string | undefined {
   if (!launchPath) return undefined;
-  try { return canonicalAppId(launchPath, 'win32'); }
-  catch { return undefined; }
+  try {
+    return canonicalAppId(launchPath, 'win32');
+  } catch {
+    return undefined;
+  }
 }

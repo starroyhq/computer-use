@@ -14,7 +14,9 @@ test('Mac HTTP helper reads only an owner-only regular credential file', { skip:
   const dir = await mkdtemp(join(tmpdir(), 'cu-http-helper-'));
   try {
     const file = join(dir, 'credential.json');
-    await writeFile(file, JSON.stringify({ mcpServers: { 'computer-use': { headers: { Authorization: `Bearer ${token}` } } } }), { mode: 0o600 });
+    await writeFile(file, JSON.stringify({ mcpServers: { 'computer-use': { headers: { Authorization: `Bearer ${token}` } } } }), {
+      mode: 0o600,
+    });
     const valid = invoke(file);
     assert.equal(valid.status, 0);
     assert.deepEqual(JSON.parse(valid.stdout), { Authorization: `Bearer ${token}` });
@@ -24,11 +26,16 @@ test('Mac HTTP helper reads only an owner-only regular credential file', { skip:
     assert.equal(publicFile.stdout, '');
     assert.equal(publicFile.stderr.includes(token), false);
     await chmod(file, 0o600);
-    await writeFile(file, JSON.stringify({ mcpServers: { 'computer-use': { headers: { Authorization: `Bearer ${token}\r\nX-Leak: yes` } } } }));
+    await writeFile(
+      file,
+      JSON.stringify({ mcpServers: { 'computer-use': { headers: { Authorization: `Bearer ${token}\r\nX-Leak: yes` } } } }),
+    );
     assert.notEqual(invoke(file).status, 0);
     await writeFile(file, JSON.stringify({ mcpServers: { 'computer-use': { headers: { Authorization: `Bearer ${token}` } } } }));
     const link = join(dir, 'credential-link.json');
     await symlink(file, link);
     assert.notEqual(invoke(link).status, 0);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

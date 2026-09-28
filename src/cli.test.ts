@@ -9,7 +9,12 @@ import { listenIpc } from './ipc.js';
 import type { Target } from './contracts.js';
 
 type CliResult = { code: number | null; stdout: string; stderr: string };
-type Observation = { snapshotId: string; target: Target; screenshot: { path: string; mimeType: string }; elements: Array<{ id: string; label: string }> };
+type Observation = {
+  snapshotId: string;
+  target: Target;
+  screenshot: { path: string; mimeType: string };
+  elements: Array<{ id: string; label: string }>;
+};
 let directory: string;
 let socketPath: string;
 let runtime: Runtime;
@@ -22,15 +27,25 @@ beforeEach(async () => {
   // Short private paths work with the macOS AF_UNIX socket limit.
   directory = await mkdtemp('/tmp/cu-cli-');
   socketPath = join(directory, 'runtime.sock');
-  runtime = new Runtime({ dataDir: join(directory, 'runtime'), backends: [new BrowserBackend(join(directory, 'browser'))], emit: event => {
-    // Automatic approval is confined to this test runtime and browser-only grants.
-    if (event.event === 'pair_request') void runtime.control({ command: event.browser && event.appIds.length === 0 ? 'pair_allow' : 'pair_deny', clientId: event.clientId });
-  } });
+  runtime = new Runtime({
+    dataDir: join(directory, 'runtime'),
+    backends: [new BrowserBackend(join(directory, 'browser'))],
+    emit: event => {
+      // Automatic approval is confined to this test runtime and browser-only grants.
+      if (event.event === 'pair_request')
+        void runtime.control({
+          command: event.browser && event.appIds.length === 0 ? 'pair_allow' : 'pair_deny',
+          clientId: event.clientId,
+        });
+    },
+  });
   await runtime.start();
   listener = await listenIpc(socketPath, runtime);
   fixture = createServer((_request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    response.end('<!doctype html><title>CLI Fixture</title><label>姓名<input id="name"></label><button onclick="document.title=\'Saved \'+document.querySelector(\'#name\').value">Save</button>');
+    response.end(
+      '<!doctype html><title>CLI Fixture</title><label>姓名<input id="name"></label><button onclick="document.title=\'Saved \'+document.querySelector(\'#name\').value">Save</button>',
+    );
   });
   await new Promise<void>(resolveServer => fixture.listen(0, '127.0.0.1', resolveServer));
   const address = fixture.address();
@@ -48,14 +63,29 @@ function cli(args: string[]): Promise<CliResult> {
   return new Promise((resolveResult, reject) => {
     // HOME is overridden only inside the isolated child; user profiles are never read or written.
     const child = spawn(process.execPath, [entrypoint, ...args, '--socket', socketPath], {
-      env: { ...process.env, HOME: directory }, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: directory },
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '', stderr = '';
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('CLI test subprocess timed out.')); }, 10_000);
-    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', code => { clearTimeout(timer); resolveResult({ code, stdout, stderr }); });
+    let stdout = '',
+      stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('CLI test subprocess timed out.'));
+    }, 10_000);
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+    child.on('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolveResult({ code, stdout, stderr });
+    });
   });
 }
 async function command<T>(args: string[]): Promise<T> {
@@ -91,19 +121,36 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     expect((await stat(observation.screenshot.path)).mode & 0o777).toBe(0o600);
     const png = await readFile(observation.screenshot.path);
     expect(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))).toBe(true);
-    const navigation = await call<{ requestId: string; state: string }>('act', { ...session, snapshotId: observation.snapshotId, action: { type: 'navigate', url: fixtureUrl } });
+    const navigation = await call<{ requestId: string; state: string }>('act', {
+      ...session,
+      snapshotId: observation.snapshotId,
+      action: { type: 'navigate', url: fixtureUrl },
+    });
     expect(navigation.state).toBe('executed');
     expect(navigation.requestId).toMatch(/^[a-f0-9-]{36}$/);
     observation = await call<Observation>('observe', session);
     const name = observation.elements.find(element => element.label === '姓名');
     expect(name).toBeDefined();
-    const typed = await call<{ state: string }>('act', { ...session, snapshotId: observation.snapshotId, action: { type: 'type', elementId: name!.id, text: '中文端到端' } });
+    const typed = await call<{ state: string }>('act', {
+      ...session,
+      snapshotId: observation.snapshotId,
+      action: { type: 'type', elementId: name!.id, text: '中文端到端' },
+    });
     expect(typed.state).toBe('executed');
     observation = await call<Observation>('observe', session);
     const save = observation.elements.find(element => element.label === 'Save')!;
-    const saved = await call<{ requestId: string; state: string }>('act', { ...session, snapshotId: observation.snapshotId, action: { type: 'click', elementId: save.id }, verify: { type: 'title', includes: 'Saved 中文端到端' } });
+    const saved = await call<{ requestId: string; state: string }>('act', {
+      ...session,
+      snapshotId: observation.snapshotId,
+      action: { type: 'click', elementId: save.id },
+      verify: { type: 'title', includes: 'Saved 中文端到端' },
+    });
     expect(saved.state).toBe('verified');
-    const waited = await call<{ state: string; observation: Observation }>('wait', { ...session, condition: { type: 'title', includes: 'Saved 中文端到端' }, timeoutMs: 2000 });
+    const waited = await call<{ state: string; observation: Observation }>('wait', {
+      ...session,
+      condition: { type: 'title', includes: 'Saved 中文端到端' },
+      timeoutMs: 2000,
+    });
     expect(waited.state).toBe('verified');
     expect(waited.observation.target.title).toBe('Saved 中文端到端');
     expect(runtime.actions.records.get(saved.requestId)?.state).toBe('verified');
@@ -128,7 +175,9 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     const probeCredential = await pair('probe');
     const codex = await cli(['config', 'codex', '--profile', 'probe']);
     expect(codex.code).toBe(0);
-    expect(codex.stdout).toBe(`[mcp_servers.computer-use]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${[entrypoint, 'mcp', 'stdio', '--profile', 'probe', '--socket', socketPath].map(JSON.stringify).join(', ')}]\n`);
+    expect(codex.stdout).toBe(
+      `[mcp_servers.computer-use]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${[entrypoint, 'mcp', 'stdio', '--profile', 'probe', '--socket', socketPath].map(JSON.stringify).join(', ')}]\n`,
+    );
     expect(codex.stdout.includes(credential.token)).toBe(false);
     expect(codex.stdout.includes(probeCredential.token)).toBe(false);
     expect(codex.stderr.includes(credential.token)).toBe(false);
@@ -147,6 +196,6 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     expect(repeated.code).toBe(1);
     expect(repeated.stdout.includes(credential.token)).toBe(false);
     expect(repeated.stderr.includes(credential.token)).toBe(false);
-    expect(await readFile(configPath, 'utf8') === original).toBe(true);
+    expect((await readFile(configPath, 'utf8')) === original).toBe(true);
   }, 30_000);
 });

@@ -29,7 +29,9 @@ function rawRequest(input: string | Buffer): Promise<string> {
     const output: Buffer[] = [];
     socket.on('connect', () => socket.write(input));
     socket.on('data', chunk => output.push(chunk));
-    socket.on('error', error => { if ((error as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(error); });
+    socket.on('error', error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(error);
+    });
     socket.on('close', () => resolve(Buffer.concat(output).toString('utf8')));
   });
 }
@@ -62,7 +64,9 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
         socket.write(request.slice(0, 10));
         setImmediate(() => socket.write(request.slice(10) + envelope('second')));
       });
-      socket.on('data', chunk => { result += chunk.toString(); });
+      socket.on('data', chunk => {
+        result += chunk.toString();
+      });
       socket.on('close', () => resolve(result));
     });
     expect(JSON.parse(response)).toEqual({ id: 'first', result: { state: 'ready' } });
@@ -73,7 +77,14 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
     const gate = Promise.withResolvers<void>();
     const dispatched = Promise.withResolvers<void>();
     let completed = false;
-    listener = await listenIpc(path, { async call() { dispatched.resolve(); await gate.promise; completed = true; return {}; } });
+    listener = await listenIpc(path, {
+      async call() {
+        dispatched.resolve();
+        await gate.promise;
+        completed = true;
+        return {};
+      },
+    });
     const socket = createConnection(path);
     socket.on('error', () => {});
     socket.on('connect', () => socket.write(envelope('disconnected', 'act')));
@@ -86,7 +97,11 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
   it('rejects malformed, unsupported-version and oversized requests without dispatching', async () => {
     const call = vi.fn(async () => ({}));
     listener = await listenIpc(path, { call });
-    for (const request of ['{broken\n', '{"version":2,"id":"x","method":"doctor","params":{}}\n', '{"version":1,"id":"x","method":"doctor","params":{},"unexpected":true}\n']) {
+    for (const request of [
+      '{broken\n',
+      '{"version":2,"id":"x","method":"doctor","params":{}}\n',
+      '{"version":1,"id":"x","method":"doctor","params":{},"unexpected":true}\n',
+    ]) {
       expect(JSON.parse(await rawRequest(request))).toMatchObject({ error: { code: 'invalid_request' } });
     }
     expect(await rawRequest(Buffer.alloc(512 * 1024 + 1, 65))).toBe('');
@@ -94,10 +109,12 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
   });
 
   it('sanitizes unexpected service exceptions and caps response size', async () => {
-    listener = await listenIpc(path, { async call(_token, method) {
-      if (method === 'large') return { data: 'x'.repeat(32 * 1024 * 1024) };
-      throw new Error('fixture-sensitive-value');
-    } });
+    listener = await listenIpc(path, {
+      async call(_token, method) {
+        if (method === 'large') return { data: 'x'.repeat(32 * 1024 * 1024) };
+        throw new Error('fixture-sensitive-value');
+      },
+    });
     const response = await rawRequest(envelope('error'));
     expect(response.includes('fixture-sensitive-value')).toBe(false);
     expect(JSON.parse(response)).toMatchObject({ error: { code: 'internal' } });
@@ -117,7 +134,12 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
       });
     });
     await new Promise<void>(resolve => server.listen(path, resolve));
-    listener = { async close() { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    listener = {
+      async close() {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      },
+    };
     const client = new IpcClient(path);
     await expect(client.call(token, 'act', {})).rejects.toMatchObject({ code: 'unknown_outcome' });
     await expect(client.call(token, 'doctor', {})).rejects.toMatchObject({ code: 'unavailable' });

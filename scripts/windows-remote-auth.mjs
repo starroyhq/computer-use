@@ -24,4 +24,7 @@ async function main() {
   process.stdout.write(JSON.stringify({ Authorization: authorization }) + '\n');
 }
 
-main().catch(() => { process.stderr.write('Computer Use MCP credential unavailable.\n'); process.exitCode = 1; });
+main().catch(() => {
+  process.stderr.write('Computer Use MCP credential unavailable.\n');
+  process.exitCode = 1;
+});

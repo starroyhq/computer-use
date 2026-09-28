@@ -40,11 +40,27 @@ export interface Backend {
   close(): Promise<void>;
 }
 export type ErrorCode =
-  | 'invalid_request' | 'unauthorized' | 'permission_denied' | 'not_found'
-  | 'background_unavailable' | 'unavailable' | 'stale_snapshot' | 'busy'
-  | 'cancelled' | 'timeout' | 'paused' | 'unknown_outcome' | 'internal';
+  | 'invalid_request'
+  | 'unauthorized'
+  | 'permission_denied'
+  | 'not_found'
+  | 'background_unavailable'
+  | 'unavailable'
+  | 'stale_snapshot'
+  | 'busy'
+  | 'cancelled'
+  | 'timeout'
+  | 'paused'
+  | 'unknown_outcome'
+  | 'internal';
 export class CuError extends Error {
-  constructor(public readonly code: ErrorCode, message: string) { super(message); this.name = 'CuError'; }
+  constructor(
+    public readonly code: ErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'CuError';
+  }
 }
 export function errorResult(error: unknown): { code: ErrorCode; message: string } {
   if (error instanceof CuError) return { code: error.code, message: error.message };

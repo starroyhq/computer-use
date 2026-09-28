@@ -35,15 +35,37 @@ export class BrowserBackend implements Backend {
   private closed = false;
   private closing: Promise<void> | undefined;
 
-  constructor(private readonly dataDir: string, private readonly options: { headless?: boolean } = {}) {}
+  constructor(
+    private readonly dataDir: string,
+    private readonly options: { headless?: boolean } = {},
+  ) {}
 
   async doctor(): Promise<Doctor> {
     let installed = true;
-    try { await access(chromium.executablePath(), constants.X_OK); } catch { installed = false; }
-    return { available: installed, checks: [
-      { name: 'chromium', ok: installed, detail: installed ? 'Bundled-compatible Chromium is installed; no browser was launched.' : 'Chromium is missing. Install the matching Playwright browser explicitly.' },
-      { name: 'downloads', ok: !this.downloadFailure, detail: this.downloadFailure ? 'A controlled browser download failed to save.' : 'Downloads use a private, unique directory under the application data directory.' },
-    ] };
+    try {
+      await access(chromium.executablePath(), constants.X_OK);
+    } catch {
+      installed = false;
+    }
+    return {
+      available: installed,
+      checks: [
+        {
+          name: 'chromium',
+          ok: installed,
+          detail: installed
+            ? 'Bundled-compatible Chromium is installed; no browser was launched.'
+            : 'Chromium is missing. Install the matching Playwright browser explicitly.',
+        },
+        {
+          name: 'downloads',
+          ok: !this.downloadFailure,
+          detail: this.downloadFailure
+            ? 'A controlled browser download failed to save.'
+            : 'Downloads use a private, unique directory under the application data directory.',
+        },
+      ],
+    };
   }
 
   async targets(grant: Grant): Promise<Target[]> {
@@ -63,7 +85,9 @@ export class BrowserBackend implements Backend {
   private async ensureStarted(): Promise<void> {
     this.checkOpen();
     if (this.context) return;
-    this.starting ??= this.start().finally(() => { this.starting = undefined; });
+    this.starting ??= this.start().finally(() => {
+      this.starting = undefined;
+    });
     await this.starting;
   }
 
@@ -74,7 +98,12 @@ export class BrowserBackend implements Backend {
       // A private, ephemeral browser: no user profile and no implicit network navigation.
       this.browser = await chromium.launch({ headless: this.options.headless ?? true, args: ['--no-startup-window'] });
       this.checkOpen();
-      this.context = await this.browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, acceptDownloads: true, serviceWorkers: 'block' });
+      this.context = await this.browser.newContext({
+        viewport: { width: 1280, height: 800 },
+        deviceScaleFactor: 1,
+        acceptDownloads: true,
+        serviceWorkers: 'block',
+      });
       this.checkOpen();
       this.context.setDefaultTimeout(5_000);
       this.context.setDefaultNavigationTimeout(15_000);
@@ -90,7 +119,10 @@ export class BrowserBackend implements Backend {
     } catch {
       // Do not call close() here: it awaits this startup promise and would deadlock.
       await this.release();
-      throw new CuError('unavailable', this.closed ? 'Controlled browser startup was cancelled.' : 'Unable to launch the isolated Chromium component.');
+      throw new CuError(
+        'unavailable',
+        this.closed ? 'Controlled browser startup was cancelled.' : 'Unable to launch the isolated Chromium component.',
+      );
     }
   }
 
@@ -102,14 +134,18 @@ export class BrowserBackend implements Backend {
       if (frame === page.mainFrame()) this.epochs.set(page, (this.epochs.get(page) ?? 0) + 1);
     });
     // Native JS dialogs have no snapshot representation; dismiss instead of hanging the action queue.
-    page.on('dialog', dialog => { void dialog.dismiss().catch(() => {}); });
+    page.on('dialog', dialog => {
+      void dialog.dismiss().catch(() => {});
+    });
     page.on('download', download => {
       const task = (async () => {
         const directory = join(this.dataDir, 'downloads', randomUUID());
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const name = basename(download.suggestedFilename()).replace(/[^\p{L}\p{N}._ -]/gu, '_');
         await download.saveAs(join(directory, name && name !== '.' && name !== '..' ? name : 'download'));
-      })().catch(() => { this.downloadFailure = true; });
+      })().catch(() => {
+        this.downloadFailure = true;
+      });
       this.downloads.add(task);
       void task.finally(() => this.downloads.delete(task));
     });
@@ -132,13 +168,19 @@ export class BrowserBackend implements Backend {
     if (previous) await this.dispose(previous);
     const monitor = await page.evaluateHandle(() => {
       const state = { revision: 0, observer: undefined as unknown as MutationObserver, document };
-      state.observer = new MutationObserver(() => { state.revision++; });
+      state.observer = new MutationObserver(() => {
+        state.revision++;
+      });
       state.observer.observe(document, { subtree: true, attributes: true, childList: true, characterData: true });
       return state;
     });
     const state: Snapshot = {
-      page, url: page.url(), epoch: this.epochs.get(page) ?? 0,
-      scroll: await page.evaluate(() => ({ x: scrollX, y: scrollY })), monitor, elements: new Map(),
+      page,
+      url: page.url(),
+      epoch: this.epochs.get(page) ?? 0,
+      scroll: await page.evaluate(() => ({ x: scrollX, y: scrollY })),
+      monitor,
+      elements: new Map(),
     };
     this.snapshots.set(page, state);
     try {
@@ -146,7 +188,10 @@ export class BrowserBackend implements Backend {
       const handles = await page.locator(SELECTOR).elementHandles();
       for (const handle of handles) {
         const value = await describe(handle);
-        if (!value) { await handle.dispose(); continue; }
+        if (!value) {
+          await handle.dispose();
+          continue;
+        }
         const id = `e${elements.length + 1}`;
         state.elements.set(id, { handle, signature: JSON.stringify(value) });
         elements.push({ id, role: value.role, label: value.label, bounds: value.bounds });
@@ -154,12 +199,16 @@ export class BrowserBackend implements Backend {
       const viewport = page.viewportSize()!;
       const png = await page.screenshot({ type: 'png', fullPage: false, scale: 'css', caret: 'initial', timeout: 5_000 });
       const observation: BackendObservation = {
-        target: await this.target(target.id, page), bounds: { x: 0, y: 0, ...viewport },
-        imageWidth: viewport.width, imageHeight: viewport.height, elements, elementsComplete: false,
+        target: await this.target(target.id, page),
+        bounds: { x: 0, y: 0, ...viewport },
+        imageWidth: viewport.width,
+        imageHeight: viewport.height,
+        elements,
+        elementsComplete: false,
         screenshot: { mimeType: 'image/png', data: png.toString('base64') },
       };
       this.observations.set(observation, state);
-      if (!await this.validate(observation)) throw new CuError('stale_snapshot', 'Page changed while observing; observe again.');
+      if (!(await this.validate(observation))) throw new CuError('stale_snapshot', 'Page changed while observing; observe again.');
       return observation;
     } catch (error) {
       await this.dispose(state);
@@ -172,29 +221,52 @@ export class BrowserBackend implements Backend {
     const state = this.observations.get(observation);
     if (!state || state.page.isClosed() || this.snapshots.get(state.page) !== state) return false;
     const viewport = state.page.viewportSize();
-    if (state.url !== state.page.url() || state.epoch !== this.epochs.get(state.page) || viewport?.width !== observation.imageWidth || viewport?.height !== observation.imageHeight) return false;
+    if (
+      state.url !== state.page.url() ||
+      state.epoch !== this.epochs.get(state.page) ||
+      viewport?.width !== observation.imageWidth ||
+      viewport?.height !== observation.imageHeight
+    )
+      return false;
     try {
-      if (!await state.monitor.evaluate((value, scroll) => value.document === document && value.revision === 0 && scrollX === scroll.x && scrollY === scroll.y, state.scroll)) return false;
+      if (
+        !(await state.monitor.evaluate(
+          (value, scroll) => value.document === document && value.revision === 0 && scrollX === scroll.x && scrollY === scroll.y,
+          state.scroll,
+        ))
+      )
+        return false;
       for (const element of state.elements.values()) if (JSON.stringify(await describe(element.handle)) !== element.signature) return false;
       return true;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
 
   async act(observation: BackendObservation, action: Action, _mode: Mode, signal: AbortSignal): Promise<undefined> {
     if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled.');
-    if (!await this.validate(observation)) throw new CuError('stale_snapshot', 'Page or elements changed; observe again.');
+    if (!(await this.validate(observation))) throw new CuError('stale_snapshot', 'Page or elements changed; observe again.');
     const state = this.observations.get(observation)!;
     const page = state.page;
-    const abort = () => { void page.close().catch(() => {}); };
+    const abort = () => {
+      void page.close().catch(() => {});
+    };
     signal.addEventListener('abort', abort, { once: true });
-    const check = () => { if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled.'); };
+    const check = () => {
+      if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled.');
+    };
     try {
       check();
       switch (action.type) {
         case 'navigate': {
           let url: URL;
-          try { url = new URL(action.url); } catch { throw new CuError('invalid_request', 'Navigation requires an absolute HTTP(S) URL or about:blank.'); }
-          if (!['http:', 'https:'].includes(url.protocol) && action.url !== 'about:blank') throw new CuError('invalid_request', 'Only HTTP(S) URLs and about:blank are allowed.');
+          try {
+            url = new URL(action.url);
+          } catch {
+            throw new CuError('invalid_request', 'Navigation requires an absolute HTTP(S) URL or about:blank.');
+          }
+          if (!['http:', 'https:'].includes(url.protocol) && action.url !== 'about:blank')
+            throw new CuError('invalid_request', 'Only HTTP(S) URLs and about:blank are allowed.');
           if (url.username || url.password) throw new CuError('invalid_request', 'Navigation URLs cannot contain credentials.');
           await page.goto(action.url, { waitUntil: 'domcontentloaded' });
           break;
@@ -213,7 +285,10 @@ export class BrowserBackend implements Backend {
             const element = state.elements.get(action.elementId);
             if (!element) throw new CuError('stale_snapshot', 'Unknown snapshot element.');
             const editable = await element.handle.evaluate(node => {
-              if (node instanceof HTMLInputElement) return ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(node.type) && !node.disabled && !node.readOnly;
+              if (node instanceof HTMLInputElement)
+                return (
+                  ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(node.type) && !node.disabled && !node.readOnly
+                );
               if (node instanceof HTMLTextAreaElement) return !node.disabled && !node.readOnly;
               return node instanceof HTMLElement && node.isContentEditable;
             });
@@ -223,7 +298,9 @@ export class BrowserBackend implements Backend {
           } else await page.keyboard.insertText(action.text);
           break;
         }
-        case 'key': await page.keyboard.press(action.keys.map(normalizeKey).join('+')); break;
+        case 'key':
+          await page.keyboard.press(action.keys.map(normalizeKey).join('+'));
+          break;
         case 'scroll':
           if (action.point) await page.mouse.move(action.point.x, action.point.y);
           {
@@ -239,7 +316,12 @@ export class BrowserBackend implements Backend {
           const first = action.path[0]!;
           const held: string[] = [];
           try {
-            for (const rawKey of action.modifiers ?? []) { const key = normalizeKey(rawKey); check(); await page.keyboard.down(key); held.push(key); }
+            for (const rawKey of action.modifiers ?? []) {
+              const key = normalizeKey(rawKey);
+              check();
+              await page.keyboard.down(key);
+              held.push(key);
+            }
             await page.mouse.move(first.x, first.y);
             await page.mouse.down({ button: action.button ?? 'left' });
             const interval = action.durationMs / (action.path.length - 1);
@@ -251,7 +333,10 @@ export class BrowserBackend implements Backend {
                 check();
                 await delay(interval / steps, undefined, { signal });
                 check();
-                await page.mouse.move(previous.x + (point.x - previous.x) * step / steps, previous.y + (point.y - previous.y) * step / steps);
+                await page.mouse.move(
+                  previous.x + ((point.x - previous.x) * step) / steps,
+                  previous.y + ((point.y - previous.y) * step) / steps,
+                );
               }
               previous = point;
             }
@@ -268,12 +353,17 @@ export class BrowserBackend implements Backend {
     } catch (error) {
       if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled; its page was closed.');
       if (error instanceof CuError) throw error;
-      if (error instanceof errors.TimeoutError) throw new CuError('unknown_outcome', 'Browser action timed out after possible input; inspect the target before retrying.');
+      if (error instanceof errors.TimeoutError)
+        throw new CuError('unknown_outcome', 'Browser action timed out after possible input; inspect the target before retrying.');
       throw new CuError('unknown_outcome', 'Browser action did not finish normally; observe before retrying.');
-    } finally { signal.removeEventListener('abort', abort); }
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
   }
 
-  async cancel(): Promise<void> { await this.close(); }
+  async cancel(): Promise<void> {
+    await this.close();
+  }
 
   async close(): Promise<void> {
     this.closed = true;
@@ -310,16 +400,76 @@ async function describe(handle: ElementHandle) {
     if (!(element instanceof Element)) return null;
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
-    if (!element.isConnected || rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth || style.visibility === 'hidden' || style.display === 'none') return null;
+    if (
+      !element.isConnected ||
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      rect.bottom <= 0 ||
+      rect.right <= 0 ||
+      rect.top >= innerHeight ||
+      rect.left >= innerWidth ||
+      style.visibility === 'hidden' ||
+      style.display === 'none'
+    )
+      return null;
     const tag = element.tagName.toLowerCase();
-    const inputRole = ({ checkbox: 'checkbox', radio: 'radio', range: 'slider', number: 'spinbutton', button: 'button', submit: 'button', reset: 'button', image: 'button' } as Record<string, string>)[element.getAttribute('type') ?? 'text'] ?? 'textbox';
-    const role = element.getAttribute('role') ?? (tag === 'input' ? inputRole : ({ button: 'button', a: 'link', textarea: 'textbox', select: element.hasAttribute('multiple') ? 'listbox' : 'combobox' } as Record<string, string>)[tag] ?? tag);
-    const labelledBy = element.getAttribute('aria-labelledby')?.split(/\s+/).map(id => document.getElementById(id)?.textContent ?? '').join(' ');
-    const nativeLabels = 'labels' in element ? Array.from((element as HTMLInputElement).labels ?? []).map(label => label.textContent ?? '').join(' ') : '';
-    const label = (element.getAttribute('aria-label') || labelledBy || nativeLabels || element.getAttribute('placeholder') || (['input', 'textarea', 'select'].includes(tag) ? '' : element.textContent) || element.getAttribute('title') || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+    const inputRole =
+      (
+        {
+          checkbox: 'checkbox',
+          radio: 'radio',
+          range: 'slider',
+          number: 'spinbutton',
+          button: 'button',
+          submit: 'button',
+          reset: 'button',
+          image: 'button',
+        } as Record<string, string>
+      )[element.getAttribute('type') ?? 'text'] ?? 'textbox';
+    const role =
+      element.getAttribute('role') ??
+      (tag === 'input'
+        ? inputRole
+        : ((
+            {
+              button: 'button',
+              a: 'link',
+              textarea: 'textbox',
+              select: element.hasAttribute('multiple') ? 'listbox' : 'combobox',
+            } as Record<string, string>
+          )[tag] ?? tag));
+    const labelledBy = element
+      .getAttribute('aria-labelledby')
+      ?.split(/\s+/)
+      .map(id => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+    const nativeLabels =
+      'labels' in element
+        ? Array.from((element as HTMLInputElement).labels ?? [])
+            .map(label => label.textContent ?? '')
+            .join(' ')
+        : '';
+    const label = (
+      element.getAttribute('aria-label') ||
+      labelledBy ||
+      nativeLabels ||
+      element.getAttribute('placeholder') ||
+      (['input', 'textarea', 'select'].includes(tag) ? '' : element.textContent) ||
+      element.getAttribute('title') ||
+      ''
+    )
+      .trim()
+      .replace(/\s+/g, ' ')
+      .slice(0, 500);
     return {
-      role, label,
-      bounds: { x: Math.max(0, rect.x), y: Math.max(0, rect.y), width: Math.min(innerWidth, rect.right) - Math.max(0, rect.left), height: Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top) },
+      role,
+      label,
+      bounds: {
+        x: Math.max(0, rect.x),
+        y: Math.max(0, rect.y),
+        width: Math.min(innerWidth, rect.right) - Math.max(0, rect.left),
+        height: Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top),
+      },
       value: 'value' in element ? String((element as HTMLInputElement).value) : '',
       disabled: 'disabled' in element && Boolean((element as HTMLInputElement).disabled),
     };
@@ -327,5 +477,30 @@ async function describe(handle: ElementHandle) {
 }
 
 function normalizeKey(key: string): string {
-  return ({ command: 'Meta', cmd: 'Meta', meta: 'Meta', control: 'Control', ctrl: 'Control', option: 'Alt', alt: 'Alt', shift: 'Shift', return: 'Enter', enter: 'Enter', escape: 'Escape', esc: 'Escape', space: 'Space', tab: 'Tab', backspace: 'Backspace', delete: 'Delete', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' } as Record<string, string>)[key.toLowerCase()] ?? key;
+  return (
+    (
+      {
+        command: 'Meta',
+        cmd: 'Meta',
+        meta: 'Meta',
+        control: 'Control',
+        ctrl: 'Control',
+        option: 'Alt',
+        alt: 'Alt',
+        shift: 'Shift',
+        return: 'Enter',
+        enter: 'Enter',
+        escape: 'Escape',
+        esc: 'Escape',
+        space: 'Space',
+        tab: 'Tab',
+        backspace: 'Backspace',
+        delete: 'Delete',
+        up: 'ArrowUp',
+        down: 'ArrowDown',
+        left: 'ArrowLeft',
+        right: 'ArrowRight',
+      } as Record<string, string>
+    )[key.toLowerCase()] ?? key
+  );
 }

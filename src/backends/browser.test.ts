@@ -40,7 +40,13 @@ beforeAll(async () => {
       response.end('private fixture download');
     } else {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      response.end(request.url === '/popup' ? '<title>Popup page</title><button>Popup button</button>' : request.url === '/loading' ? `<title>Loading</title><p id=progress>Loading</p><script>const timer=setInterval(()=>document.querySelector('#progress').textContent=String(Date.now()),5);setTimeout(()=>{clearInterval(timer);document.title='Loaded';document.querySelector('#progress').textContent='Ready'},500)</script>` : fixture);
+      response.end(
+        request.url === '/popup'
+          ? '<title>Popup page</title><button>Popup button</button>'
+          : request.url === '/loading'
+            ? `<title>Loading</title><p id=progress>Loading</p><script>const timer=setInterval(()=>document.querySelector('#progress').textContent=String(Date.now()),5);setTimeout(()=>{clearInterval(timer);document.title='Loaded';document.querySelector('#progress').textContent='Ready'},500)</script>`
+            : fixture,
+      );
     }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -48,7 +54,9 @@ beforeAll(async () => {
   if (!address || typeof address === 'string') throw new Error('Missing fixture port');
   url = `http://127.0.0.1:${address.port}`;
 });
-afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
+afterAll(async () => {
+  await new Promise<void>(resolve => server.close(() => resolve()));
+});
 beforeEach(async context => {
   if (!chromiumInstalled) context.skip();
   directory = await mkdtemp(join(tmpdir(), 'computer-use-browser-'));
@@ -60,7 +68,8 @@ afterEach(async () => {
   await backend?.close();
   if (directory) await rm(directory, { recursive: true, force: true });
 });
-const act = (observation: BackendObservation, action: Action, signal = new AbortController().signal) => backend.act(observation, action, 'background', signal);
+const act = (observation: BackendObservation, action: Action, signal = new AbortController().signal) =>
+  backend.act(observation, action, 'background', signal);
 const element = (observation: BackendObservation, label: string) => observation.elements.find(item => item.label === label)!.id;
 
 // These cases only launch a dedicated headless browser and a loopback fixture server.
@@ -72,19 +81,34 @@ describe('isolated Chromium backend', () => {
       await startingBackend.cancel();
       await expect(pendingTargets).rejects.toMatchObject({ code: expect.stringMatching(/cancelled|unavailable/) });
       await expect(startingBackend.targets(grant)).rejects.toMatchObject({ code: 'unavailable' });
-    } finally { await startingBackend.close(); }
+    } finally {
+      await startingBackend.close();
+    }
   });
 
   it('wait retries transient stale snapshots while a loading page settles', async () => {
     const runtime = new Runtime({ dataDir: join(directory, 'runtime'), backends: [backend], emit: () => {} });
     await runtime.start();
     const credential = randomUUID();
-    runtime.clients.clients.set('browser-test-client', { id: 'browser-test-client', name: 'Browser test', tokenHash: hash(credential), grant });
+    runtime.clients.clients.set('browser-test-client', {
+      id: 'browser-test-client',
+      name: 'Browser test',
+      tokenHash: hash(credential),
+      grant,
+    });
     try {
-      const session = await runtime.call(credential, 'session_open', { targetId: target.id }) as { sessionId: string };
+      const session = (await runtime.call(credential, 'session_open', { targetId: target.id })) as { sessionId: string };
       await act(await backend.observe(target), { type: 'navigate', url: `${url}/loading` });
-      await expect(runtime.call(credential, 'wait', { sessionId: session.sessionId, condition: { type: 'title', includes: 'Loaded' }, timeoutMs: 2000 })).resolves.toMatchObject({ state: 'verified' });
-    } finally { await runtime.close(); }
+      await expect(
+        runtime.call(credential, 'wait', {
+          sessionId: session.sessionId,
+          condition: { type: 'title', includes: 'Loaded' },
+          timeoutMs: 2000,
+        }),
+      ).resolves.toMatchObject({ state: 'verified' });
+    } finally {
+      await runtime.close();
+    }
   });
 
   it('keeps discovery gated, reports viewport coordinates and enters Chinese text', async () => {
@@ -110,7 +134,9 @@ describe('isolated Chromium backend', () => {
     const observation = await backend.observe(target);
     await act(observation, { type: 'click', elementId: element(observation, 'Replace') });
     expect(await backend.validate(observation)).toBe(false);
-    await expect(act(observation, { type: 'click', elementId: element(observation, 'Save') })).rejects.toMatchObject({ code: 'stale_snapshot' });
+    await expect(act(observation, { type: 'click', elementId: element(observation, 'Save') })).rejects.toMatchObject({
+      code: 'stale_snapshot',
+    });
     const replacement = await backend.observe(target);
     expect(replacement.elements.some(item => item.label === 'Replacement')).toBe(true);
     await act(replacement, { type: 'navigate', url: `${url}/popup` });
@@ -119,7 +145,9 @@ describe('isolated Chromium backend', () => {
 
   it('rejects arbitrary scripts, local files and credential-bearing navigation', async () => {
     for (const unsafeUrl of ['file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,test', 'https://user:password@example.com']) {
-      await expect(act(await backend.observe(target), { type: 'navigate', url: unsafeUrl })).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(act(await backend.observe(target), { type: 'navigate', url: unsafeUrl })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
     }
     expect((await backend.targets(grant))[0]?.url).toBe(`${url}/`);
   });
@@ -142,7 +170,8 @@ describe('isolated Chromium backend', () => {
     await vi.waitFor(async () => {
       const folders = await readdir(join(directory, 'downloads'));
       expect(folders).toHaveLength(2);
-      for (const folder of folders) expect(await readFile(join(directory, 'downloads', folder, 'sample.txt'), 'utf8')).toBe('private fixture download');
+      for (const folder of folders)
+        expect(await readFile(join(directory, 'downloads', folder, 'sample.txt'), 'utf8')).toBe('private fixture download');
     });
     expect((await backend.doctor()).checks.find(check => check.name === 'downloads')?.ok).toBe(true);
   });
@@ -150,12 +179,26 @@ describe('isolated Chromium backend', () => {
   it('executes a pointer drag then invalidates snapshots after scroll', async () => {
     let observation = await backend.observe(target);
     const bounds = observation.elements.find(item => item.label === 'Drag surface')!.bounds!;
-    await act(observation, { type: 'drag', path: [{ x: bounds.x + 10, y: bounds.y + 10 }, { x: bounds.x + 150, y: bounds.y + 10 }], durationMs: 50 });
+    await act(observation, {
+      type: 'drag',
+      path: [
+        { x: bounds.x + 10, y: bounds.y + 10 },
+        { x: bounds.x + 150, y: bounds.y + 10 },
+      ],
+      durationMs: 50,
+    });
     expect((await backend.targets(grant))[0]?.title).toBe(`Dragged ${Math.round(bounds.x + 150)}`);
     observation = await backend.observe(target);
     const source = observation.elements.find(item => item.label === 'Drag item')!.bounds!;
     const destination = observation.elements.find(item => item.label === 'Drop zone')!.bounds!;
-    await act(observation, { type: 'drag', path: [{ x: source.x + 20, y: source.y + 20 }, { x: destination.x + 150, y: destination.y + 40 }], durationMs: 200 });
+    await act(observation, {
+      type: 'drag',
+      path: [
+        { x: source.x + 20, y: source.y + 20 },
+        { x: destination.x + 150, y: destination.y + 40 },
+      ],
+      durationMs: 200,
+    });
     expect((await backend.targets(grant))[0]?.title).toBe('Dropped fixture');
     observation = await backend.observe(target);
     await act(observation, { type: 'scroll', direction: 'down', amount: 2, unit: 'line' });
@@ -165,7 +208,18 @@ describe('isolated Chromium backend', () => {
   it('cancels an in-flight drag by closing only its controlled page', async () => {
     const observation = await backend.observe(target);
     const controller = new AbortController();
-    const result = act(observation, { type: 'drag', path: [{ x: 10, y: 100 }, { x: 100, y: 100 }], durationMs: 1000 }, controller.signal);
+    const result = act(
+      observation,
+      {
+        type: 'drag',
+        path: [
+          { x: 10, y: 100 },
+          { x: 100, y: 100 },
+        ],
+        durationMs: 1000,
+      },
+      controller.signal,
+    );
     setTimeout(() => controller.abort(), 75);
     await expect(result).rejects.toMatchObject({ code: 'cancelled' });
     await vi.waitFor(async () => expect(await backend.validate(observation)).toBe(false));

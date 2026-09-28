@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { CuError, type Client } from './contracts.js';
 
-export function hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+export function hash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 export function matchesHash(value: string, expected: string): boolean {
   const actual = Buffer.from(hash(value), 'hex');
   const stored = Buffer.from(expected, 'hex');
@@ -21,13 +23,19 @@ export async function atomicJson(path: string, value: unknown): Promise<void> {
   await rename(tmp, path);
 }
 export async function readJson(path: string): Promise<unknown | undefined> {
-  try { return JSON.parse(await readFile(path, 'utf8')) as unknown; }
-  catch (error) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8')) as unknown;
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw new CuError('unavailable', 'Local state is unreadable; repair it before starting the runtime.');
   }
 }
-const clientSchema = z.object({ id: z.string(), name: z.string(), tokenHash: z.string().regex(/^[a-f0-9]{64}$/), grant: z.object({ appIds: z.array(z.string()), browser: z.boolean(), foreground: z.boolean().default(false) }) });
+const clientSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
+  grant: z.object({ appIds: z.array(z.string()), browser: z.boolean(), foreground: z.boolean().default(false) }),
+});
 export class ClientStore {
   readonly clients = new Map<string, Client>();
   private writeTail: Promise<void> = Promise.resolve();
@@ -53,19 +61,32 @@ export class ClientStore {
 }
 export type ActionState = 'queued' | 'running' | 'executed' | 'verified' | 'failed' | 'cancelled' | 'unknown';
 export type ActionRecord = {
-  requestId: string; clientId: string; sessionId: string; fingerprint: string;
-  type: string; state: ActionState; updatedAt: number; error?: { code: string; message: string };
+  requestId: string;
+  clientId: string;
+  sessionId: string;
+  fingerprint: string;
+  type: string;
+  state: ActionState;
+  updatedAt: number;
+  error?: { code: string; message: string };
 };
 const recordSchema = z.object({
-  requestId: z.string(), clientId: z.string(), sessionId: z.string(), fingerprint: z.string(), type: z.string(),
+  requestId: z.string(),
+  clientId: z.string(),
+  sessionId: z.string(),
+  fingerprint: z.string(),
+  type: z.string(),
   state: z.enum(['queued', 'running', 'executed', 'verified', 'failed', 'cancelled', 'unknown']),
-  updatedAt: z.number(), error: z.object({ code: z.string(), message: z.string() }).optional(),
+  updatedAt: z.number(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
 });
 export class ActionStore {
   readonly records = new Map<string, ActionRecord>();
   private writeTail: Promise<void> = Promise.resolve();
   private readonly path: string;
-  constructor(dataDir: string) { this.path = join(dataDir, 'actions.json'); }
+  constructor(dataDir: string) {
+    this.path = join(dataDir, 'actions.json');
+  }
   async load(): Promise<void> {
     const parsed = z.array(recordSchema).safeParse((await readJson(this.path)) ?? []);
     if (!parsed.success) throw new CuError('unavailable', 'Action journal is invalid.');

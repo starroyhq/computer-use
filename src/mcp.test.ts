@@ -8,7 +8,18 @@ import { CuError, type RpcService } from './contracts.js';
 import { listenHttp, mcpResult } from './mcp.js';
 
 const imageData = Buffer.from('fixture-png').toString('base64');
-const toolNames = ['capabilities', 'doctor', 'targets', 'session_open', 'session_close', 'observe', 'act', 'wait', 'action_status', 'cancel'];
+const toolNames = [
+  'capabilities',
+  'doctor',
+  'targets',
+  'session_open',
+  'session_close',
+  'observe',
+  'act',
+  'wait',
+  'action_status',
+  'cancel',
+];
 let server: Awaited<ReturnType<typeof listenHttp>>;
 let token: string;
 let revoked: boolean;
@@ -18,31 +29,47 @@ let calls: string[];
 let service: RpcService;
 
 beforeEach(async () => {
-  token = randomUUID(); revoked = false; failure = undefined; clients = []; calls = [];
+  token = randomUUID();
+  revoked = false;
+  failure = undefined;
+  clients = [];
+  calls = [];
   const authenticate = (provided: string | undefined) => {
     if (revoked || provided !== token) throw new CuError('unauthorized', 'Client authorization required.');
   };
-  service = { async call(provided, method) {
-    authenticate(provided);
-    calls.push(method);
-    if (failure === 'domain') throw new CuError('permission_denied', 'Fixture permission denied.');
-    if (failure === 'unexpected') throw new Error('fixture-sensitive-value');
-    if (method === 'observe') return { snapshotId: 'fixture-snapshot', screenshot: { mimeType: 'image/png', data: imageData }, elements: [] };
-    return { state: 'ready', method };
-  } };
+  service = {
+    async call(provided, method) {
+      authenticate(provided);
+      calls.push(method);
+      if (failure === 'domain') throw new CuError('permission_denied', 'Fixture permission denied.');
+      if (failure === 'unexpected') throw new Error('fixture-sensitive-value');
+      if (method === 'observe')
+        return { snapshotId: 'fixture-snapshot', screenshot: { mimeType: 'image/png', data: imageData }, elements: [] };
+      return { state: 'ready', method };
+    },
+  };
   server = await listenHttp(service, authenticate, 0);
 });
-afterEach(async () => { await Promise.allSettled(clients.map(client => client.close())); await server.close(); });
+afterEach(async () => {
+  await Promise.allSettled(clients.map(client => client.close()));
+  await server.close();
+});
 
 async function connectedClient(): Promise<Client> {
   const client = new Client({ name: 'computer-use-protocol-test', version: '1.0.0' });
   clients.push(client);
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }),
+  );
   return client;
 }
 
 type Reply = { status: number; body: string; remoteAddress: string | undefined };
-async function rawHttp(options: { body?: string; method?: string; headers?: Record<string, string>; path?: string; authenticated?: boolean } = {}): Promise<Reply> {
+async function rawHttp(
+  options: { body?: string; method?: string; headers?: Record<string, string>; path?: string; authenticated?: boolean } = {},
+): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const headers = {
       Host: `127.0.0.1:${server.port}`,
@@ -52,13 +79,16 @@ async function rawHttp(options: { body?: string; method?: string; headers?: Reco
       ...(options.authenticated === false ? {} : { Authorization: `Bearer ${token}` }),
       ...options.headers,
     };
-    const request = httpRequest({ hostname: '127.0.0.1', port: server.port, method: options.method ?? 'POST', path: options.path ?? '/mcp', headers }, response => {
-      const chunks: Buffer[] = [];
-      const remoteAddress = response.socket.remoteAddress;
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('end', () => resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8'), remoteAddress }));
-      response.on('error', reject);
-    });
+    const request = httpRequest(
+      { hostname: '127.0.0.1', port: server.port, method: options.method ?? 'POST', path: options.path ?? '/mcp', headers },
+      response => {
+        const chunks: Buffer[] = [];
+        const remoteAddress = response.socket.remoteAddress;
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8'), remoteAddress }));
+        response.on('error', reject);
+      },
+    );
     request.on('error', reject);
     request.end(options.body);
   });
@@ -66,9 +96,16 @@ async function rawHttp(options: { body?: string; method?: string; headers?: Reco
 const rpc = (method: string, params: unknown = {}, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 
 it('extracts nested screenshots once and maps content indexes without duplicating base64', () => {
-  const result = mcpResult({ observations: [{ screenshot: { mimeType: 'image/png', data: imageData } }, { screenshot: { mimeType: 'image/jpeg', data: 'anBlZw==' } }] });
+  const result = mcpResult({
+    observations: [
+      { screenshot: { mimeType: 'image/png', data: imageData } },
+      { screenshot: { mimeType: 'image/jpeg', data: 'anBlZw==' } },
+    ],
+  });
   expect(result.content.map(content => content.type)).toEqual(['text', 'image', 'image']);
-  expect(result.structuredContent).toEqual({ observations: [{ screenshot: { mimeType: 'image/png', contentIndex: 1 } }, { screenshot: { mimeType: 'image/jpeg', contentIndex: 2 } }] });
+  expect(result.structuredContent).toEqual({
+    observations: [{ screenshot: { mimeType: 'image/png', contentIndex: 1 } }, { screenshot: { mimeType: 'image/jpeg', contentIndex: 2 } }],
+  });
   expect(JSON.stringify(result.structuredContent).includes(imageData)).toBe(false);
   expect(result.content[0]?.type === 'text' && result.content[0].text.includes(imageData)).toBe(false);
   expect(mcpResult(['simple']).structuredContent).toEqual({ result: ['simple'] });
@@ -80,7 +117,9 @@ describe('MCP Streamable HTTP', () => {
     const listing = await client.listTools();
     expect(listing.tools.map(tool => tool.name).sort()).toEqual([...toolNames].sort());
     for (const tool of listing.tools) expect(tool.inputSchema.type).toBe('object');
-    expect(listing.tools.find(tool => tool.name === 'act')?.inputSchema.required).toEqual(expect.arrayContaining(['sessionId', 'snapshotId', 'requestId', 'action']));
+    expect(listing.tools.find(tool => tool.name === 'act')?.inputSchema.required).toEqual(
+      expect.arrayContaining(['sessionId', 'snapshotId', 'requestId', 'action']),
+    );
     expect(listing.tools.find(tool => tool.name === 'targets')?.annotations?.readOnlyHint).toBe(false);
     const result = await client.callTool({ name: 'observe', arguments: { sessionId: 'fixture-session' } });
     expect(result.content.map(item => item.type)).toEqual(['text', 'image']);
@@ -106,7 +145,13 @@ describe('MCP Streamable HTTP', () => {
   });
 
   it('binds loopback and accepts raw initialize, tools/list, and tools/call POSTs', async () => {
-    const initialized = await rawHttp({ body: rpc('initialize', { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'raw-test', version: '1' } }) });
+    const initialized = await rawHttp({
+      body: rpc('initialize', {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'raw-test', version: '1' },
+      }),
+    });
     expect(initialized.remoteAddress).toBe('127.0.0.1');
     expect(initialized.status).toBe(200);
     expect(JSON.parse(initialized.body).result.serverInfo.name).toBe('computer-use');
@@ -154,7 +199,8 @@ it('performs a real stdio child-process handshake and calls the shared server im
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL('./test-fixtures/mcp-worker.mjs', import.meta.url))],
-    env: { TEST_MCP_TOKEN: token }, stderr: 'pipe',
+    env: { TEST_MCP_TOKEN: token },
+    stderr: 'pipe',
   });
   await client.connect(transport);
   expect((await client.listTools()).tools.map(tool => tool.name).sort()).toEqual([...toolNames].sort());
