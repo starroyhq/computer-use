@@ -30,7 +30,7 @@ export function mcpResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }, ...images], structuredContent };
 }
 export function createMcp(service: RpcService, token: string): McpServer {
-  const server = new McpServer({ name: 'computer-use', version: '0.1.0' }, { instructions });
+  const server = new McpServer({ name: 'computer-use', version: '0.2.0' }, { instructions });
   for (const method of Object.keys(schemas) as Method[]) {
     server.registerTool(
       method,

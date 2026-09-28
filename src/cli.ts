@@ -29,7 +29,7 @@ async function pruneScreenshots(directory: string): Promise<void> {
   );
 }
 
-const help = `Computer Use 0.1.0 — local desktop runtime
+const help = `Computer Use 0.2.0 — local desktop runtime
 
 computer-use pair --name "My Agent" --app com.apple.TextEdit [--browser]
 computer-use <method> --json '<JSON>' [--profile default]

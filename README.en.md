@@ -4,7 +4,7 @@
 
 Give your existing AI agent screenshots and control of authorized application windows through MCP or CLI. Built on [Cua Driver](https://github.com/trycua/cua) and [Playwright](https://github.com/microsoft/playwright), Computer Use provides a macOS menu-bar app and a Windows tray host. Your chosen agent handles task understanding and planning.
 
-**Development preview; build from source.** There is no official installer or published release package yet. See the platform status below for tested coverage.
+**Development preview.** Download the macOS ARM64, Windows ARM64 or x64 portable package from [Releases](https://github.com/starroyhq/computer-use/releases), or build from source below. There is no installer yet; see the platform status below for tested coverage.
 
 ## Features
 

@@ -4,7 +4,7 @@
 
 让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
 
-**开发预览，当前从源码构建。** 尚未提供正式安装器或公开发布包，已验证范围见下表。
+**开发预览。** 可从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载 macOS ARM64、Windows ARM64 和 x64 便携包；也可按下文从源码构建。尚未提供正式安装器，已验证范围见下表。
 
 ## 主要功能
 

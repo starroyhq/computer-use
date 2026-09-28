@@ -1,6 +1,6 @@
 {
   "name": "computer-use",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Local, agent-independent computer use for macOS and Windows",
   "license": "MIT",
