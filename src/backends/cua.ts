@@ -89,6 +89,10 @@ function withoutHiddenMenus(elements: WindowElement[]): WindowElement[] {
   return elements.filter(element => !excluded.has(element.elementIndex));
 }
 
+// Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
+// （开启、关闭两种设置下均实测反向），派发前需交换方向。
+const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
+
 function point(point: Point, observation: BackendObservation): Point {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0
       || point.x >= observation.imageWidth || point.y >= observation.imageHeight) {
@@ -362,7 +366,8 @@ export class CuaBackend implements Backend {
         if (!Number.isInteger(action.amount) || action.amount < 1 || action.amount > 50) throw new CuError('invalid_request', 'Scroll amount must be 1 to 50.');
         tool = 'scroll';
         Object.assign(args, point(action.point ?? { x: observation.imageWidth / 2, y: observation.imageHeight / 2 }, observation),
-          { direction: action.direction, by: action.unit, amount: action.amount });
+          { direction: this.platform === 'darwin' ? reversed[action.direction] : action.direction,
+            by: action.unit, amount: action.amount });
         break;
       case 'drag': {
         if (action.path.length !== 2) throw new CuError('invalid_request', 'This desktop driver supports straight two-point drags only.');

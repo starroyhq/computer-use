@@ -218,9 +218,22 @@ describe('Cua socket adapter', () => {
     await backend.act(await backend.observe(target), { type: 'scroll', direction: 'down', amount: 2, unit: 'page' }, 'background', new AbortController().signal);
     await backend.act(await backend.observe(target), { type: 'drag', path: [{ x: 1, y: 2 }, { x: 99, y: 88 }], durationMs: 800, modifiers: ['shift'], button: 'right' }, 'foreground', new AbortController().signal);
     expect(client.callTool.mock.calls.map(([tool, args]) => [tool, JSON.parse(args)])).toMatchObject([
-      ['scroll', { direction: 'down', amount: 2, by: 'page', x: 300, y: 200, delivery_mode: 'background' }],
+      ['scroll', { direction: 'up', amount: 2, by: 'page', x: 300, y: 200, delivery_mode: 'background' }],
       ['drag', { from_x: 1, from_y: 2, to_x: 99, to_y: 88, duration_ms: 800, modifier: ['shift'], button: 'right', delivery_mode: 'foreground' }],
     ]);
+  });
+
+  it('reverses macOS wheel scroll directions only', async () => {
+    const { client, backend } = fixture();
+    for (const direction of ['down', 'up', 'left', 'right'] as const) {
+      await backend.act(await backend.observe(target), { type: 'scroll', direction, amount: 1, unit: 'line' }, 'background', new AbortController().signal);
+    }
+    expect(client.callTool.mock.calls.map(([, args]) => JSON.parse(args).direction)).toEqual(['up', 'down', 'right', 'left']);
+    const other = fixture().client;
+    const windows = new CuaBackend('C:\\Computer Use\\cua-driver.exe', async () => other, 'win32', async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]));
+    const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+    await windows.act(await windows.observe(windowsTarget), { type: 'scroll', direction: 'down', amount: 1, unit: 'line' }, 'background', new AbortController().signal);
+    expect(JSON.parse(other.callTool.mock.calls.at(-1)![1]).direction).toBe('down');
   });
 
   it('rejects unsupported paths, background drags, and out of image points before dispatch', async () => {
