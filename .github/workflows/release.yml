@@ -1,0 +1,86 @@
+name: Publish verified Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v0.2.0
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful CI run that built all three packages from the tag commit
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify packages and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Test release artifact preparation
+        run: node --test .github/scripts/prepare-release.test.mjs
+      - name: Require a successful CI run for this tag
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release tag'; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Invalid CI run ID'; exit 1; }
+          git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null
+          tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+          version=$(git show "$RELEASE_TAG:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
+          [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
+          [[ -f ".github/release-notes/$RELEASE_TAG.md" ]] || { echo 'Missing release notes'; exit 1; }
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")
+          jq -e --arg sha "$tag_sha" --arg repo "$GITHUB_REPOSITORY" \
+            '.name == "CI" and .event == "push" and .head_branch == "main" and .head_repository.full_name == $repo and .head_sha == $sha and .conclusion == "success"' \
+            <<< "$run" >/dev/null || { echo 'CI run does not match the successful tag commit'; exit 1; }
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Download all platform artifacts
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for platform in macos-arm64 windows-arm64 windows-x64; do
+            gh run download "$CI_RUN_ID" \
+              --name "computer-use-$platform-$SOURCE_SHA" \
+              --dir "release-input/$platform"
+          done
+      - name: Verify checksums and prepare Release filenames
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: node .github/scripts/prepare-release.mjs release-input release-assets "$VERSION" "$SOURCE_SHA"
+      - name: Create draft, verify uploads, then publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --verify-tag --draft --prerelease \
+            --title "Computer Use $RELEASE_TAG — 开发预览" \
+            --notes-file ".github/release-notes/$RELEASE_TAG.md"
+          node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
