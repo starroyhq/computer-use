@@ -19,7 +19,7 @@ async function main(directory, tag) {
   const matches = releases.filter(release => release.tag_name === tag);
   if (matches.length !== 1) throw new Error(`Expected exactly one release for ${tag}.`);
   const [release] = matches;
-  if (release.tag_name !== tag || !release.draft || !release.prerelease) throw new Error('Expected a draft prerelease for the tag.');
+  if (release.tag_name !== tag || !release.draft || release.prerelease) throw new Error('Expected a draft full release for the tag.');
   const files = (await readdir(directory)).sort();
   const assets = new Map(release.assets.map(asset => [asset.name, asset]));
   if (files.length !== 9 || assets.size !== 9 || files.some(file => !assets.has(file))) throw new Error('Release asset list differs from verified files.');
