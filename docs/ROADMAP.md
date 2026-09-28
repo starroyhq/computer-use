@@ -4,7 +4,7 @@ This is a gate checklist, not a claim that all listed scenarios have passed.
 
 | Stage | Implemented | Remaining gate |
 |---|---|---|
-| P0 | Fixed SDK/driver adapter, macOS and Windows hosts, disposable fixtures; current ARM64 build passed 66 input cases and one Mac Codex model regression | Repeat macOS desktop acceptance after the identifier change; native Windows x64 validation and broader focus/gesture coverage |
+| P0 | Fixed SDK/driver adapter, macOS and Windows hosts, disposable fixtures; current ARM64 build passed 66 input cases and one Mac Codex model regression. Packaged macOS CLI Safari acceptance covers observe, scroll direction, multi-window key refusal, and `executed` + `effect` | Native Windows x64 validation and broader focus/gesture coverage |
 | P1 | Shared schemas, grants, sessions, queue, journal, CLI, snapshots, stop/restart handling; fixture input and independent output checks | Held-input cleanup on interruption, lock/sleep and multi-monitor scenarios, ordinary second-user Windows pipe isolation |
 | P2 | stdio/HTTP MCP, image results, CLI Skill, pairing/config generation; Mac Codex fixture runs locally and over SSH to Windows | Windows-local Codex and other agents, including Claude Code; broader model workflows. Protocol tests alone do not satisfy this |
 | P3 | Isolated browser backend and real browser tests | Blender and Final Cut Pro workflow repetitions; real model task scoring |
