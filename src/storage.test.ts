@@ -38,7 +38,8 @@ describe('private persisted state', () => {
     await store.save();
     expect(await readFile(file, 'utf8')).not.toContain(token);
     const restored = new ClientStore(file); await restored.load();
-    expect(restored.authenticate(token)).toEqual(client);
+    // 旧版配对没有 foreground 字段：按未授予前台加载，不会被静默提升。
+    expect(restored.authenticate(token)).toEqual({ ...client, grant: { ...client.grant, foreground: false } });
     for (const invalid of [undefined, '', 'bad', 'x'.repeat(513)]) expect(() => restored.authenticate(invalid)).toThrow();
     expect(matchesHash(token, 'invalid')).toBe(false);
     expect(matchesHash(token, hash(token))).toBe(true);

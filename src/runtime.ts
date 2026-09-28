@@ -32,7 +32,6 @@ export class Runtime implements RpcService {
   private readonly sessions = new Map<string, Session>();
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly pairs = new Map<string, PendingPair>();
-  private readonly foreground = new Map<string, (allow: boolean) => void>();
   private readonly work = new Map<string, Work>();
   private queue: Promise<unknown> = Promise.resolve();
   private paused = false;
@@ -78,8 +77,6 @@ export class Runtime implements RpcService {
   }
   private removeSession(id: string): void {
     this.sessions.delete(id);
-    this.foreground.get(id)?.(false);
-    this.foreground.delete(id);
     for (const [key, value] of this.snapshots) if (value.sessionId === id) this.snapshots.delete(key);
     for (const [requestId, work] of this.work) if (work.sessionId === id) {
       work.controller.abort();
@@ -89,7 +86,7 @@ export class Runtime implements RpcService {
   async control(command: HostCommand): Promise<void> {
     switch (command.command) {
       case 'pair_allow': case 'pair_deny': this.pairs.get(command.clientId)?.resolve(command.command === 'pair_allow'); break;
-      case 'foreground_allow': case 'foreground_deny': this.foreground.get(command.sessionId)?.(command.command === 'foreground_allow'); break;
+      case 'foreground_allow': case 'foreground_deny': break; // 前台权限已在配对时授予；保留命令以兼容旧宿主。
       case 'pause': this.paused = true; break;
       case 'resume': if (!this.stopped) this.paused = false; break;
       case 'stop':
@@ -131,12 +128,12 @@ export class Runtime implements RpcService {
     if (this.stopped) throw new CuError('unavailable', 'Runtime stopped.');
     if (this.pairs.size >= 3) throw new CuError('busy', 'Too many pending pairing requests.');
     const token = randomBytes(32).toString('base64url');
-    const client: Client = { id: randomUUID(), name: parsed.data.name, tokenHash: hash(token), grant: { appIds: [...new Set(parsed.data.appIds.map(id => canonicalAppId(id, this.options.platform)))], browser: parsed.data.browser } };
+    const client: Client = { id: randomUUID(), name: parsed.data.name, tokenHash: hash(token), grant: { appIds: [...new Set(parsed.data.appIds.map(id => canonicalAppId(id, this.options.platform)))], browser: parsed.data.browser, foreground: true } };
     let granted = false;
     try {
       const approved = await this.requestDecision(resolve => {
         this.pairs.set(client.id, { client, resolve });
-        this.options.emit({ event: 'pair_request', clientId: client.id, name: client.name, ...client.grant });
+        this.options.emit({ event: 'pair_request', clientId: client.id, name: client.name, appIds: client.grant.appIds, browser: client.grant.browser, foreground: true });
       }, () => this.pairs.delete(client.id));
       if (!approved || this.stopped) throw new CuError('permission_denied', 'Pairing was denied or expired.');
       this.clients.clients.set(client.id, client);
@@ -161,25 +158,12 @@ export class Runtime implements RpcService {
     const target = (await this.listTargets(client)).find(t => t.id === p.targetId);
     this.checkRunning();
     if (!target) throw new CuError('not_found', 'Authorized target not found.');
-    const session: Session = { id: randomUUID(), clientId: client.id, target, mode: p.mode, exclusive: p.exclusive, expiresAt: this.now() + SESSION_TTL, foregroundApproved: false };
+    // 前台权限只在配对时由用户批准一次并持久化，会话级不再弹窗。
+    if (p.mode === 'foreground' && client.grant.foreground !== true) throw new CuError('permission_denied', 'This client was paired before foreground access was included; pair it again in the local app.');
+    const session: Session = { id: randomUUID(), clientId: client.id, target, mode: p.mode, exclusive: p.exclusive, expiresAt: this.now() + SESSION_TTL, foregroundApproved: p.mode === 'foreground' };
     this.checkLease(session);
     if (session.exclusive && this.work.size > 0) throw new CuError('busy', 'Wait for pending actions before acquiring an exclusive session.');
     this.sessions.set(session.id, session);
-    if (session.mode === 'foreground') {
-      try {
-        const approved = await this.requestDecision(resolve => {
-          this.foreground.set(session.id, resolve);
-          this.options.emit({ event: 'foreground_request', sessionId: session.id, clientName: client.name, targetTitle: target.title });
-        }, () => this.foreground.delete(session.id));
-        if (!approved || !this.sessions.has(session.id) || !this.clients.clients.has(client.id) || this.stopped) {
-          this.removeSession(session.id);
-          throw new CuError('permission_denied', 'Foreground access was denied or expired.');
-        }
-        session.foregroundApproved = true;
-      } finally {
-        this.options.emit({ event: 'decision_finished', requestId: session.id, approved: session.foregroundApproved });
-      }
-    }
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }
   private async observe(session: Session): Promise<unknown> {

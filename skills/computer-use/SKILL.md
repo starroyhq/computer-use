@@ -25,7 +25,7 @@ On connection loss, query `action_status` with the original request UUID. Do not
 
 ## Execution modes and limits
 
-Background is the default. If a capability returns `background_unavailable`, explain the specific blocked step; request a foreground session only within the user's authorized task. The local app requires user approval. Never silently use external mouse/keyboard tools to bypass the runtime's mode.
+Background is the default. If a capability returns `background_unavailable`, explain the specific blocked step; request a foreground session only within the user's authorized task. Foreground was granted once at pairing and does not prompt again, so tell the user before it takes focus. Never silently use external mouse/keyboard tools to bypass the runtime's mode.
 
 The controlled browser is a separate headless Chromium instance with screenshot feedback; it has none of the user's normal browser login state. First use may require the explicit `computer-use browser install` command. Only HTTP(S) and `about:blank` navigation are supported.
 

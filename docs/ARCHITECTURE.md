@@ -6,7 +6,7 @@ The Swift AppKit host owns system permissions and directly spawns Cua Driver in 
 
 The desktop adapter replaces its SDK client before the driver's five-minute implicit idle-session limit and reconnects once after a read-only transport failure. It never replays a dispatched input action after uncertainty.
 
-Only the host's stdin pipe can approve pairing, foreground sessions and listener changes. Agent-facing RPC has no control-plane method or raw-driver escape hatch. Native launch configuration disables Cua telemetry/update checks and removes inherited Node/DYLD/Cua overrides. Local configuration does not provide a sandbox against the same OS user.
+Only the host's stdin pipe can approve pairing and listener changes. A pairing approval persists a grant that includes foreground control; sessions do not prompt again, and revocation removes the whole grant. Agent-facing RPC has no control-plane method or raw-driver escape hatch. Native launch configuration disables Cua telemetry/update checks and removes inherited Node/DYLD/Cua overrides. Local configuration does not provide a sandbox against the same OS user.
 
 ## Stable interface, replaceable adapters
 

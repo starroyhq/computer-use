@@ -95,7 +95,7 @@ tool_timeout_sec = 90
 
 Restart Codex and inspect `/mcp` or `codex mcp list`. Start with the README's read-only task, then use `doctor → targets → session_open → observe → act → observe → session_close`. Every action needs a UUID `requestId` and a fresh `snapshotId`. An action without a confirmed response after a tunnel failure is uncertain: reconnect, query `action_status` and observe before deciding what to do. Never automatically replay it. Screenshots are sent to the chosen agent; default action logs exclude images and typed text.
 
-If noninteractive `codex exec` fails with `MCP tool call requires approval, but approval policy is never`, a **temporary configuration limited to a paired disposable fixture** can set `default_tools_approval_mode = "approve"` for this server. Do not change user-level configuration for that test. This only handles Codex tool approval; tray pairing and foreground approval still apply. In an interactive client, approve tools when prompted. See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+If noninteractive `codex exec` fails with `MCP tool call requires approval, but approval policy is never`, a **temporary configuration limited to a paired disposable fixture** can set `default_tools_approval_mode = "approve"` for this server. Do not change user-level configuration for that test. This only handles Codex tool approval; tray pairing approval still applies. In an interactive client, approve tools when prompted. See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## Troubleshooting
 
@@ -107,6 +107,6 @@ Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.
 - `targets` blocked by MCP approval: check the Codex approval policy; dedicated noninteractive fixture tests can use the temporary setting above.
 - `401`: check the Mac JSON belongs to the current, unrevoked pairing and has mode `0600`. The helper should output one JSON header object; do not paste that credential-bearing output into logs or chat.
-- Missing application or rejected action: verify the executable path, window owner process and privilege level. Foreground sessions need explicit tray approval; failed background operations never trigger an automatic foreground fallback.
+- Missing application or rejected action: verify the executable path, window owner process and privilege level. Foreground sessions must be requested explicitly (granted at pairing, no per-session prompt); failed background operations never trigger an automatic foreground fallback.
 
 Windows element-directed typing and clicks always use background accessibility, including in approved foreground sessions, with no automatic fallback or retry. Long foreground input without an element ID, canvases and terminals have no completeness guarantee. See [Usage](USAGE.md) for action semantics and the [validation record](validation-results.md) for actual test coverage.

@@ -25,7 +25,8 @@ export type BackendObservation = {
 export type Point = { x: number; y: number };
 export type Action = z.infer<typeof actionSchema>;
 export type Condition = z.infer<typeof conditionSchema>;
-export type Grant = { appIds: string[]; browser: boolean };
+// foreground 在配对批准时一并授予并持久化；缺失表示旧版配对，需要重新配对才能使用前台。
+export type Grant = { appIds: string[]; browser: boolean; foreground?: boolean };
 export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> };
 export type BackendExecution = { effect: 'confirmed' | 'unconfirmed' };
 export interface Backend {
@@ -52,7 +53,7 @@ export function errorResult(error: unknown): { code: ErrorCode; message: string 
 }
 export type Client = { id: string; name: string; tokenHash: string; grant: Grant };
 export type HostEvent =
-  | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; browser: boolean }
+  | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; browser: boolean; foreground: boolean }
   | { event: 'foreground_request'; sessionId: string; clientName: string; targetTitle: string }
   | { event: 'decision_finished'; requestId: string; approved: boolean }
   | { event: 'clients'; clients: Array<{ id: string; name: string }> }

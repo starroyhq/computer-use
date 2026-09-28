@@ -39,7 +39,7 @@ export const descriptions: Record<Method, string> = {
   capabilities: 'List available computer-use capabilities and execution restrictions.',
   doctor: 'Check runtime, desktop permissions and browser installation without changing them.',
   targets: 'List windows and controlled browser pages authorized for this client.',
-  session_open: 'Bind a session to an authorized target. Background is the default; foreground requires approval in the local app. Exclusive sessions prevent other clients from changing the UI.',
+  session_open: 'Bind a session to an authorized target. Background is the default; foreground is allowed for clients whose pairing included it and may move focus, pointer and keyboard. Exclusive sessions prevent other clients from changing the UI.',
   session_close: 'Release the session, its execution lease and screenshots.',
   observe: 'Return a fresh screenshot and semantic elements. Coordinates refer to this image; use its snapshotId for the next action.',
   act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. Execution alone does not imply task success.',

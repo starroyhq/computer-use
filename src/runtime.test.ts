@@ -80,23 +80,32 @@ describe('Runtime authorization and execution', () => {
     ]);
   });
 
-  it.each(['expire', 'revoke', 'stop', 'allow'] as const)('finishes a foreground prompt on %s without accepting a late response', async outcome => {
+  it('grants foreground once at pairing and keeps it across runtime restarts without further prompts', async () => {
     const client = await pair();
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const pending = call<{ sessionId: string }>(client.token, 'session_open', { targetId: target.id, mode: 'foreground' });
-    const settled = outcome === 'allow' ? pending : expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
-    await vi.waitFor(() => expect(events.some(e => e.event === 'foreground_request')).toBe(true));
-    const request = events.findLast(e => e.event === 'foreground_request');
-    if (!request || request.event !== 'foreground_request') throw new Error('Missing foreground request');
-    if (outcome === 'expire') await vi.advanceTimersByTimeAsync(60_000);
-    else if (outcome === 'revoke') await runtime.control({ command: 'revoke', clientId: client.clientId });
-    else if (outcome === 'stop') await runtime.control({ command: 'stop' });
-    else await runtime.control({ command: 'foreground_allow', sessionId: request.sessionId });
-    await settled;
-    await runtime.control({ command: 'foreground_allow', sessionId: request.sessionId });
-    expect(events.filter(e => e.event === 'decision_finished' && e.requestId === request.sessionId)).toEqual([
-      { event: 'decision_finished', requestId: request.sessionId, approved: outcome === 'allow' },
-    ]);
+    const pairRequest = events.findLast(e => e.event === 'pair_request');
+    expect(pairRequest).toMatchObject({ foreground: true });
+    expect(JSON.parse(await readFile(join(directory, 'clients.json'), 'utf8'))[0].grant.foreground).toBe(true);
+    const first = await call<{ sessionId: string; mode: string }>(client.token, 'session_open', { targetId: target.id, mode: 'foreground' });
+    expect(first.mode).toBe('foreground');
+    await call(client.token, 'act', await actionInput(client.token, first.sessionId));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'foreground', expect.anything());
+    await runtime.close();
+    events = [];
+    runtime = new Runtime({ dataDir: directory, backends: [backend], emit: event => events.push(event), now: () => clock, platform: 'darwin' });
+    await runtime.start();
+    await expect(call(client.token, 'session_open', { targetId: target.id, mode: 'foreground' })).resolves.toMatchObject({ mode: 'foreground' });
+    expect(events.some(e => e.event === 'foreground_request' || e.event === 'pair_request')).toBe(false);
+  });
+
+  it('refuses foreground for revoked clients and for clients paired before foreground was included', async () => {
+    const client = await pair();
+    await runtime.control({ command: 'revoke', clientId: client.clientId });
+    await expect(call(client.token, 'session_open', { targetId: target.id, mode: 'foreground' })).rejects.toMatchObject({ code: 'unauthorized' });
+    const legacy = await pair('Legacy');
+    runtime.clients.clients.get(legacy.clientId)!.grant = { appIds: [target.appId], browser: false };
+    await expect(call(legacy.token, 'session_open', { targetId: target.id, mode: 'foreground' })).rejects.toMatchObject({ code: 'permission_denied', message: expect.stringContaining('pair') });
+    await expect(call(legacy.token, 'session_open', { targetId: target.id })).resolves.toMatchObject({ mode: 'background' });
+    expect(events.some(e => e.event === 'foreground_request')).toBe(false);
     expect(backend.act).not.toHaveBeenCalled();
   });
 
@@ -121,15 +130,10 @@ describe('Runtime authorization and execution', () => {
     await expect(call(b.token, 'act', request)).rejects.toMatchObject({ code: 'not_found' });
   });
 
-  it('requires explicit foreground approval and does not silently elevate', async () => {
-    const { token } = await pair();
-    const pending = call(token, 'session_open', { targetId: target.id, mode: 'foreground' });
-    await vi.waitFor(() => expect(events.some(e => e.event === 'foreground_request')).toBe(true));
-    const event = events.findLast(e => e.event === 'foreground_request');
-    if (!event || event.event !== 'foreground_request') throw new Error('No foreground request');
-    await runtime.control({ command: 'foreground_deny', sessionId: event.sessionId });
-    await expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
-    expect(backend.act).not.toHaveBeenCalled();
+  it('does not silently elevate a background session to foreground', async () => {
+    const { token } = await pair(), { sessionId } = await session(token);
+    await call(token, 'act', await actionInput(token, sessionId));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything());
   });
 
   it('consumes snapshots after one action, replaces observations, and hides backend state', async () => {
@@ -395,12 +399,7 @@ describe('Runtime authorization and execution', () => {
     expect(await call(token, 'act', request)).toMatchObject({ state: 'unknown' });
     expect(await call(token, 'session_close', { sessionId })).toEqual({ closed: true });
 
-    const opening = call<{ sessionId: string }>(token, 'session_open', { targetId: target.id, mode: 'foreground', exclusive: true });
-    await vi.waitFor(() => expect(events.some(event => event.event === 'foreground_request')).toBe(true));
-    const approval = events.findLast(event => event.event === 'foreground_request');
-    if (!approval || approval.event !== 'foreground_request') throw new Error('No foreground request');
-    await runtime.control({ command: 'foreground_allow', sessionId: approval.sessionId });
-    const next = await opening;
+    const next = await call<{ sessionId: string }>(token, 'session_open', { targetId: target.id, mode: 'foreground', exclusive: true });
     expect(await observation(token, next.sessionId)).toHaveProperty('snapshotId');
     expect(await call(token, 'action_status', { requestId: request.requestId })).toMatchObject({ state: 'unknown' });
     expect(backend.act).toHaveBeenCalledTimes(1);

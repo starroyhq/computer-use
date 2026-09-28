@@ -27,7 +27,7 @@ export async function readJson(path: string): Promise<unknown | undefined> {
     throw new CuError('unavailable', 'Local state is unreadable; repair it before starting the runtime.');
   }
 }
-const clientSchema = z.object({ id: z.string(), name: z.string(), tokenHash: z.string().regex(/^[a-f0-9]{64}$/), grant: z.object({ appIds: z.array(z.string()), browser: z.boolean() }) });
+const clientSchema = z.object({ id: z.string(), name: z.string(), tokenHash: z.string().regex(/^[a-f0-9]{64}$/), grant: z.object({ appIds: z.array(z.string()), browser: z.boolean(), foreground: z.boolean().default(false) }) });
 export class ClientStore {
   readonly clients = new Map<string, Client>();
   private writeTail: Promise<void> = Promise.resolve();

@@ -10,7 +10,7 @@ Give your existing AI agent screenshots and control of authorized application wi
 
 - **Desktop operations**: window screenshots, accessibility elements, clicks, typing, hotkeys, scrolling and straight drags; support depends on platform, application and action.
 - **Agent integration**: stdio MCP, optional loopback HTTP MCP and an independently usable CLI.
-- **Pairing authorization**: explicitly select applications, approve foreground sessions locally, pause, revoke clients or stop execution.
+- **Pairing authorization**: explicitly select applications; one pairing approval also grants foreground control and persists until the client is revoked; pause or stop execution.
 - **Action records**: fresh snapshots and request IDs for tracking outcomes; uncertain actions are never automatically replayed.
 - **Separate browser**: Playwright controls an isolated headless Chromium without inheriting your everyday browser's login state.
 
@@ -101,7 +101,7 @@ For manual CLI calls, browser setup and action parameters, see [Usage](docs/USAG
 
 ## Permissions and limits
 
-- This project's interface exposes only paired targets; foreground sessions require local approval. Background support depends on the control and does not guarantee zero focus changes.
+- This project's interface exposes only paired targets; pairing approval also grants foreground control (focus, pointer and keyboard) without further prompts; clients paired by earlier versions must pair again to use foreground. Background support depends on the control and does not guarantee zero focus changes.
 - Query `action_status` and observe after uncertainty; do not blindly replay. `executed` is not task success: inspect the actual UI or output artifact.
 - HTTP is off by default and listens only on `127.0.0.1:47631`. Cross-machine access uses a manual SSH tunnel, not direct LAN or public MCP exposure.
 - Default action logs exclude screenshots, typed text, URLs and window titles. CLI screenshots remain local until removed; screenshots and results sent to a cloud agent are processed by its provider.

@@ -7,7 +7,7 @@ import { errorResult, type RpcService } from './contracts.js';
 import { descriptions, schemas, type Method } from './schema.js';
 
 const imageSchema = z.object({ mimeType: z.enum(['image/png', 'image/jpeg']), data: z.string() });
-const instructions = 'Use only paired targets. Start with doctor and targets, open a session, then observe. Each act needs a fresh snapshotId and a UUID requestId. Observe again after each action. For an unknown outcome, query action_status and inspect the target; never blindly replay it. Verify the intended result and close the session. Foreground sessions require approval in the local app.';
+const instructions = 'Use only paired targets. Start with doctor and targets, open a session, then observe. Each act needs a fresh snapshotId and a UUID requestId. Observe again after each action. For an unknown outcome, query action_status and inspect the target; never blindly replay it. Verify the intended result and close the session. Foreground was granted once at pairing; use it only when the task needs keyboard or pointer input that background mode cannot deliver.';
 export function mcpResult(value: unknown): CallToolResult {
   const images: Array<{ type: 'image'; mimeType: string; data: string }> = [];
   function stripImages(input: unknown): unknown {

@@ -226,7 +226,7 @@ final class HostApplication: NSObject, NSApplicationDelegate {
             if event.event == "pair_request" {
                 alert.messageText = "允许客户端操作这些应用？"
                 let apps = (event.appIds ?? []).joined(separator: "\n")
-                alert.informativeText = "客户端：\(event.name ?? "")\n标识：\(event.clientId ?? "")\n应用标识：\n\(apps.isEmpty ? "无" : apps)\n独立受控浏览器：\(event.browser == true ? "允许" : "不允许")\n\n默认仅使用后台操作，前台操作另行询问。"
+                alert.informativeText = "客户端：\(event.name ?? "")\n标识：\(event.clientId ?? "")\n应用标识：\n\(apps.isEmpty ? "无" : apps)\n独立受控浏览器：\(event.browser == true ? "允许" : "不允许")\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启 App 也不再询问；在菜单中撤销该客户端即可收回全部权限。"
             } else {
                 alert.messageText = "允许当前会话使用前台操作？"
                 alert.informativeText = "客户端：\(event.clientName ?? "")\n目标：\(event.targetTitle ?? "")\n会话：\(event.sessionId ?? "")\n\n此操作可能切换焦点并移动鼠标。授权仅适用于此会话及目标应用。"
