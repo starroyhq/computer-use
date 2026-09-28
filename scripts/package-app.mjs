@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { access, chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 import { fetchRuntimes, ROOT, RUNTIMES } from './fetch-runtime.mjs';
 
 const OUTPUT = join(ROOT, 'artifacts', 'Computer Use.app');
@@ -158,12 +159,20 @@ async function build(identity) {
   } finally { await rm(stage, { recursive: true, force: true }); }
 }
 
+const LOCAL_ENV = join(ROOT, '.env.local');
+
+// 本机签名身份只存放在被 git 忽略的 .env.local 中；只读取这一项，不把文件其他内容注入环境。
+export async function signingIdentity(args, envFile = LOCAL_ENV) {
+  if (args.length === 2 && args[0] === '--identity') return args[1];
+  if (args.length !== 0) throw new Error('Usage: node scripts/package-app.mjs [--verify-only | --identity "Developer ID Application: …"]');
+  const content = await readFile(envFile, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+  return parseEnv(content).COMPUTER_USE_SIGNING_IDENTITY?.trim() || '-';
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === '--verify-only') { await verify(OUTPUT); return; }
-  if (args.length === 0) { await build('-'); return; }
-  if (args.length === 2 && args[0] === '--identity') { await build(args[1]); return; }
-  throw new Error('Usage: node scripts/package-app.mjs [--verify-only | --identity "Developer ID Application: …"]');
+  await build(await signingIdentity(args));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

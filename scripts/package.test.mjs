@@ -4,7 +4,20 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { sha256 } from './fetch-runtime.mjs';
-import { assertInternalLinks } from './package-app.mjs';
+import { assertInternalLinks, signingIdentity } from './package-app.mjs';
+
+test('signing identity comes from --identity, then the ignored local env file, then ad-hoc', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'computer-use-signing-test-'));
+  try {
+    const file = join(directory, '.env.local');
+    assert.equal(await signingIdentity([], file), '-');
+    await writeFile(file, 'OTHER_SECRET=ignored\nCOMPUTER_USE_SIGNING_IDENTITY="Developer ID Application: Local (TEAM)"\n');
+    assert.equal(await signingIdentity([], file), 'Developer ID Application: Local (TEAM)');
+    assert.equal(await signingIdentity(['--identity', 'Developer ID Application: Explicit (X)'], file), 'Developer ID Application: Explicit (X)');
+    assert.equal(process.env.OTHER_SECRET, undefined);
+    await assert.rejects(signingIdentity(['--unknown'], file), /Usage/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('archive checksum reads actual bytes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'computer-use-checksum-test-'));
