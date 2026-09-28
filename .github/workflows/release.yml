@@ -78,9 +78,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" release-assets/* \
-            --verify-tag --draft --prerelease \
-            --title "Computer Use $RELEASE_TAG — 开发预览" \
-            --notes-file ".github/release-notes/$RELEASE_TAG.md"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag --draft --prerelease \
+              --title "Computer Use $RELEASE_TAG — 开发预览" \
+              --notes-file ".github/release-notes/$RELEASE_TAG.md"
+          fi
           node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

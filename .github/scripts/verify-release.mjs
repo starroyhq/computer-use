@@ -14,7 +14,11 @@ async function main(directory, tag) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error('Invalid release tag.');
   const repository = process.env.GITHUB_REPOSITORY;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) throw new Error('Missing GitHub repository.');
-  const release = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/tags/${tag}`], { encoding: 'utf8' }));
+  // GitHub's "release by tag" endpoint returns 404 for drafts, so inspect the authenticated release list.
+  const releases = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases?per_page=100`], { encoding: 'utf8' }));
+  const matches = releases.filter(release => release.tag_name === tag);
+  if (matches.length !== 1) throw new Error(`Expected exactly one release for ${tag}.`);
+  const [release] = matches;
   if (release.tag_name !== tag || !release.draft || !release.prerelease) throw new Error('Expected a draft prerelease for the tag.');
   const files = (await readdir(directory)).sort();
   const assets = new Map(release.assets.map(asset => [asset.name, asset]));
