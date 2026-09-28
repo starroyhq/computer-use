@@ -289,13 +289,13 @@ export class Runtime implements RpcService {
     );
   }
   private async waitFor(session: Session, condition: Condition, timeout: number, signal?: AbortSignal): Promise<BackendObservation> {
-    const deadline = Date.now() + timeout;
+    const deadline = this.now() + timeout;
     do {
       if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
       try {
         const observed = await bounded(
           this.backend(session.target.kind).observe(session.target),
-          Math.max(1, deadline - Date.now()),
+          Math.max(1, deadline - this.now()),
           signal,
         );
         if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
@@ -304,8 +304,8 @@ export class Runtime implements RpcService {
         // A changing page is an expected waiting state, not a reason to retry input.
         if (!(error instanceof CuError) || error.code !== 'stale_snapshot') throw error;
       }
-      await delay(Math.min(150, Math.max(1, deadline - Date.now())), undefined, signal ? { signal } : {});
-    } while (Date.now() < deadline);
+      await delay(Math.min(150, Math.max(1, deadline - this.now())), undefined, signal ? { signal } : {});
+    } while (this.now() < deadline);
     throw new CuError('timeout', 'The requested observable condition was not satisfied.');
   }
   private async act(client: Client, params: unknown): Promise<unknown> {

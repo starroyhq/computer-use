@@ -15,13 +15,14 @@ function deferred() {
   });
   return { promise, resolve };
 }
-function fakeBackend(): Backend {
+function fakeBackend(tick: () => void = () => {}): Backend {
   return {
     kind: 'desktop',
     doctor: vi.fn(async () => ({ available: true, checks: [] })),
     targets: vi.fn(async () => [target, secretTarget]),
-    observe: vi.fn(
-      async (requested: Target): Promise<BackendObservation> => ({
+    observe: vi.fn(async (requested: Target): Promise<BackendObservation> => {
+      tick();
+      return {
         target: requested,
         bounds: { x: 100, y: 100, width: 200, height: 100 },
         imageWidth: 400,
@@ -29,8 +30,8 @@ function fakeBackend(): Backend {
         elements: [{ id: 'button-1', label: 'Save', role: 'button' }],
         screenshot: { mimeType: 'image/png', data: 'cGl4ZWxz' },
         backendState: { private: 'must not leak' },
-      }),
-    ),
+      };
+    }),
     validate: vi.fn(async () => true),
     act: vi.fn(async () => {}),
     cancel: vi.fn(async () => {}),
@@ -69,7 +70,10 @@ describe('Runtime authorization and execution', () => {
   }
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'cu-runtime-test-'));
-    backend = fakeBackend();
+    // Each observation advances the injected clock so bounded waits reach their deadline.
+    backend = fakeBackend(() => {
+      clock += 50;
+    });
     events = [];
     clock = 1_000;
     runtime = new Runtime({
@@ -510,6 +514,23 @@ describe('Runtime authorization and execution', () => {
     ).toMatchObject({ state: 'verified' });
     vi.mocked(backend.observe).mockResolvedValue({ ...partial, elementsComplete: true });
     expect(await call(token, 'wait', { sessionId, timeoutMs: 100, condition })).toMatchObject({ state: 'verified' });
+  });
+
+  it('bounds waits by the injected clock rather than wall time', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const observe = vi.mocked(backend.observe);
+    const original = observe.getMockImplementation()!;
+    observe.mockClear().mockImplementation(async requested => {
+      clock += 5_000;
+      return original(requested);
+    });
+    const started = Date.now();
+    await expect(
+      call(token, 'wait', { sessionId, timeoutMs: 30_000, condition: { type: 'title', includes: 'never' } }),
+    ).rejects.toMatchObject({ code: 'timeout' });
+    expect(observe).toHaveBeenCalledTimes(6);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it('reports an unconfirmed dispatch as executed without halting or repeating it', async () => {
