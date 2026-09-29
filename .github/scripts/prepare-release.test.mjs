@@ -13,7 +13,8 @@ async function fixture(root) {
   for (const platform of platforms) {
     const directory = join(root, 'input', platform);
     await mkdir(directory, { recursive: true });
-    const base = `computer-use-0.2.0-${platform}-${commit.slice(0, 12)}-dev`;
+    const mac = platform === 'macos-arm64';
+    const base = `computer-use-0.2.0-${platform}-${commit.slice(0, 12)}-${mac ? 'notarized' : 'dev'}`;
     const bytes = Buffer.from(`archive for ${platform}`);
     const digest = createHash('sha256').update(bytes).digest('hex');
     await writeFile(join(directory, `${base}.zip`), bytes);
@@ -21,7 +22,8 @@ async function fixture(root) {
     await writeFile(join(directory, `${base}.json`), JSON.stringify({
       version: '0.2.0', platform, commit, sourceDirty: false, archive: `${base}.zip`,
       bytes: bytes.length, sha256: digest,
-      signing: platform === 'macos-arm64' ? 'ad-hoc-development' : 'unsigned',
+      signing: mac ? 'developer-id-notarized' : 'unsigned',
+      ...(mac ? { notarization: 'stapled' } : {}),
       verification: 'Archive extracted and verified.',
     }));
   }
@@ -56,6 +58,21 @@ test('rejects a modified archive before moving any assets', async () => {
     const output = join(root, 'release');
     await assert.rejects(prepareRelease(join(root, 'input'), output, '0.2.0', commit), /checksum/);
     await assert.rejects(stat(output), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects an ad-hoc macOS package from release input', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'computer-use-release-'));
+  try {
+    await fixture(root);
+    const name = `computer-use-0.2.0-macos-arm64-${commit.slice(0, 12)}-notarized.json`;
+    const path = join(root, 'input', 'macos-arm64', name);
+    const metadata = JSON.parse(await readFile(path, 'utf8'));
+    metadata.signing = 'ad-hoc-development';
+    await writeFile(path, JSON.stringify(metadata));
+    await assert.rejects(prepareRelease(join(root, 'input'), join(root, 'release'), '0.2.0', commit), /metadata/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

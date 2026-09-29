@@ -17,8 +17,10 @@ function run(command, args, options = {}) {
 
 async function main() {
   const [platform, ...extra] = process.argv.slice(2);
-  if (extra.length || !['macos-arm64', 'windows-x64', 'windows-arm64'].includes(platform)) {
-    throw new Error('Usage: node .github/scripts/archive-package.mjs macos-arm64|windows-x64|windows-arm64');
+  const notarized = extra.length === 1 && extra[0] === '--notarized';
+  if ((!notarized && extra.length) || (notarized && platform !== 'macos-arm64') ||
+    !['macos-arm64', 'windows-x64', 'windows-arm64'].includes(platform)) {
+    throw new Error('Usage: node .github/scripts/archive-package.mjs macos-arm64 [--notarized]|windows-x64|windows-arm64');
   }
   const mac = platform === 'macos-arm64';
   const arch = platform.split('-')[1];
@@ -33,12 +35,13 @@ async function main() {
   if (process.env.GITHUB_ACTIONS === 'true' && dirty) throw new Error('CI packaging changed tracked sources or created unignored files.');
   const output = join(root, 'artifacts', 'ci');
   await mkdir(output, { recursive: true });
-  const name = `computer-use-${version}-${platform}-${commit.slice(0, 12)}-dev`;
+  const name = `computer-use-${version}-${platform}-${commit.slice(0, 12)}-${notarized ? 'notarized' : 'dev'}`;
   const archive = join(output, `${name}.zip`);
   const target = mac ? undefined : targetForArch(arch);
   const bundle = mac ? join(root, 'artifacts', 'Computer Use.app') : target.output;
   const verify = path => mac ? verifyMac(path) : verifyWindows(path, target);
   await verify(bundle);
+  if (notarized) verifyNotarizedMac(bundle);
   await mkdir(join(root, '.cache'), { recursive: true });
   const temporary = await mkdtemp(join(root, '.cache', 'archive-check-'));
   try {
@@ -60,6 +63,7 @@ Expand-Archive -LiteralPath $Archive -DestinationPath $Destination
       run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, bundle, archive, temporary]);
     }
     await verify(join(temporary, basename(bundle)));
+    if (notarized) verifyNotarizedMac(join(temporary, basename(bundle)));
     const hash = createHash('sha256');
     for await (const chunk of createReadStream(archive)) hash.update(chunk);
     const digest = hash.digest('hex');
@@ -67,13 +71,33 @@ Expand-Archive -LiteralPath $Archive -DestinationPath $Destination
     await writeFile(join(output, `${name}.json`), JSON.stringify({
       version, platform, commit, sourceDirty: dirty, archive: basename(archive),
       bytes: (await stat(archive)).size, sha256: digest,
-      signing: mac ? 'ad-hoc-development' : 'unsigned',
-      verification: 'Archive extracted; architecture, dependencies, CLI and native SDK verified. No desktop or model acceptance.',
+      signing: mac ? (notarized ? 'developer-id-notarized' : 'ad-hoc-development') : 'unsigned',
+      ...(notarized ? { notarization: 'stapled' } : {}),
+      verification: 'Archive extracted; architecture, dependencies, CLI and native SDK verified.' +
+        (notarized ? ' Developer ID signature, team, stapled ticket and Gatekeeper assessed.' : '') +
+        ' No desktop or model acceptance.',
     }, null, 2) + '\n');
-    console.log(`Verified development archive: ${basename(archive)} (${digest})`);
+    console.log(`Verified archive: ${basename(archive)} (${digest})`);
   } finally {
     await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   }
+}
+
+function verifyNotarizedMac(app) {
+  const identity = process.env.APPLE_SIGNING_IDENTITY;
+  const team = process.env.APPLE_TEAM_ID;
+  if (!identity?.startsWith('Developer ID Application:') || !/^[A-Z0-9]{10}$/.test(team ?? '')) {
+    throw new Error('APPLE_SIGNING_IDENTITY and APPLE_TEAM_ID are required for notarized archive verification.');
+  }
+  const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', app], { encoding: 'utf8', timeout: 30_000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`codesign display failed: ${result.stderr}`);
+  const details = result.stderr;
+  if (!details.split('\n').includes(`Authority=${identity}`) || !details.split('\n').includes(`TeamIdentifier=${team}`)) {
+    throw new Error('App Developer ID signing identity or team does not match the release configuration.');
+  }
+  run('xcrun', ['stapler', 'validate', app]);
+  run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', app]);
 }
 
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

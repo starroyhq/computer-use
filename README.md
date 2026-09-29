@@ -46,7 +46,7 @@ pnpm package:app
 open 'artifacts/Computer Use.app'
 ```
 
-在 App 中请求“辅助功能”和“屏幕录制”权限，授权给 Computer Use 后完全退出并重新打开。默认构建使用 ad-hoc 开发签名，未经公证；重新签名或更换应用标识后可能需要重新授权。运行中不要覆盖 App。
+在 App 中请求“辅助功能”和“屏幕录制”权限，授权给 Computer Use 后完全退出并重新打开。源码默认构建使用 ad-hoc 开发签名，未经公证；从 v0.3.0 起，正式发布的 macOS 包使用 Developer ID 签名并经过 Apple 公证。重新签名或更换应用标识后可能需要重新授权。运行中不要覆盖 App。
 
 从菜单栏选择“安装 CLI 到 ~/.local/bin”，然后在当前终端验证入口：
 

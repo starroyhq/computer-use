@@ -17,7 +17,8 @@ export async function prepareRelease(inputRoot, outputRoot, version, commit) {
   const prepared = [];
   for (const platform of platforms) {
     const directory = join(inputRoot, platform);
-    const sourceName = `computer-use-${version}-${platform}-${commit.slice(0, 12)}-dev`;
+    const mac = platform === 'macos-arm64';
+    const sourceName = `computer-use-${version}-${platform}-${commit.slice(0, 12)}-${mac ? 'notarized' : 'dev'}`;
     const expected = [`${sourceName}.json`, `${sourceName}.zip`, `${sourceName}.zip.sha256`].sort();
     const actual = (await readdir(directory)).sort();
     if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`Unexpected ${platform} artifact contents: ${actual.join(', ')}`);
@@ -25,7 +26,8 @@ export async function prepareRelease(inputRoot, outputRoot, version, commit) {
     const metadata = JSON.parse(await readFile(join(directory, `${sourceName}.json`), 'utf8'));
     const checksum = await readFile(join(directory, `${sourceName}.zip.sha256`), 'utf8');
     if (metadata.version !== version || metadata.platform !== platform || metadata.commit !== commit || metadata.sourceDirty !== false ||
-      metadata.archive !== basename(sourceArchive) || metadata.signing !== (platform === 'macos-arm64' ? 'ad-hoc-development' : 'unsigned') ||
+      metadata.archive !== basename(sourceArchive) || metadata.signing !== (mac ? 'developer-id-notarized' : 'unsigned') ||
+      (mac && metadata.notarization !== 'stapled') ||
       typeof metadata.verification !== 'string' || !metadata.verification) throw new Error(`Invalid ${platform} build metadata.`);
     const digest = await sha256(sourceArchive);
     if (metadata.sha256 !== digest || metadata.bytes !== (await stat(sourceArchive)).size ||

@@ -4,27 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag, for example v0.2.0
+        description: Existing version tag, for example v0.3.0
         required: true
         type: string
       ci_run_id:
-        description: Successful CI run that built all three packages from the tag commit
+        description: Successful CI run that built all three development packages from the tag commit
         required: true
         type: string
-
-permissions:
-  actions: read
-  contents: write
 
 concurrency:
   group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Verify packages and publish
+  source:
+    name: Verify release source
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
@@ -50,29 +52,102 @@ jobs:
           tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
           version=$(git show "$RELEASE_TAG:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
           [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
-          [[ -f ".github/release-notes/$RELEASE_TAG.md" ]] || { echo 'Missing release notes'; exit 1; }
+          git cat-file -e "$RELEASE_TAG:.github/release-notes/$RELEASE_TAG.md"
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")
           jq -e --arg sha "$tag_sha" --arg repo "$GITHUB_REPOSITORY" \
             '.name == "CI" and .event == "push" and .head_branch == "main" and .head_repository.full_name == $repo and .head_sha == $sha and .conclusion == "success"' \
             <<< "$run" >/dev/null || { echo 'CI run does not match the successful tag commit'; exit 1; }
           echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Download all platform artifacts
+
+  notarize_macos:
+    name: Sign and notarize macOS ARM64
+    needs: source
+    runs-on: macos-15
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      CUA_DRIVER_RS_TELEMETRY_ENABLED: 'false'
+      CUA_DRIVER_RS_UPDATE_CHECK: 'false'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          architecture: arm64
+          cache: pnpm
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Sign, notarize, staple and verify
         shell: bash
         env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash .github/scripts/notarize-macos-release.sh
+      - name: Upload verified notarized package
+        uses: actions/upload-artifact@v7
+        with:
+          name: computer-use-macos-arm64-${{ needs.source.outputs.sha }}-notarized
+          path: artifacts/ci/*
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 14
+
+  publish:
+    name: Verify packages and publish
+    needs: [source, notarize_macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Download Windows development packages
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
         run: |
           set -euo pipefail
-          for platform in macos-arm64 windows-arm64 windows-x64; do
+          for platform in windows-arm64 windows-x64; do
             gh run download "$CI_RUN_ID" \
               --name "computer-use-$platform-$SOURCE_SHA" \
               --dir "release-input/$platform"
           done
+      - name: Download notarized macOS package
+        uses: actions/download-artifact@v8
+        with:
+          name: computer-use-macos-arm64-${{ needs.source.outputs.sha }}-notarized
+          path: release-input/macos-arm64
       - name: Verify checksums and prepare Release filenames
         shell: bash
         env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
         run: node .github/scripts/prepare-release.mjs release-input release-assets "$VERSION" "$SOURCE_SHA"
       - name: Create draft, verify uploads, then publish
         shell: bash
