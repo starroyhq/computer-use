@@ -9,7 +9,20 @@ export type Target = {
   url?: string;
 };
 export type Bounds = { x: number; y: number; width: number; height: number };
-export type Element = { id: string; role: string; label: string; bounds?: Bounds };
+export type Element = {
+  id: string;
+  role: string;
+  label: string;
+  bounds?: Bounds;
+  /** 后端读到的当前值（文本框内容、滑块数值等）。后端能识别的密码类字段不带值，不进入观察或条件判断。 */
+  value?: string;
+  enabled?: boolean;
+  selected?: boolean;
+  min?: number;
+  max?: number;
+  /** 树深度：运行时只用它在多次观察间识别同一元素，不返回给客户端。 */
+  depth?: number;
+};
 export type Screenshot = { mimeType: 'image/png' | 'image/jpeg'; data: string };
 export type BackendObservation = {
   target: Target;

@@ -23,6 +23,7 @@ if (!/^[a-zA-Z0-9_-]{1,64}$/.test(values.profile!)) throw new CuError('invalid_r
 const credential = z.object({ token: z.string() }).parse(await readJson(join(credentialDir, `${values.profile}.json`)));
 const client = new IpcClient(values.socket ?? socketPath);
 const call = (method: string, params: unknown) => client.call(credential.token, method, params);
+const FIXTURE_SECRET = 'fixture-secret-8431';
 const report: { driver: string; iterations: unknown[]; completed: boolean; error?: unknown } = {
   driver: '0.28.2',
   iterations: [],
@@ -57,7 +58,11 @@ try {
     throw new CuError('unknown_outcome', 'Independent fixture evidence did not confirm the requested effect.');
   };
   const action = async (label: string, text?: string) => {
-    const observed = observationSchema.parse(await call('observe', { sessionId }));
+    const raw = await call('observe', { sessionId });
+    // The fixture's secure field holds this fixed dummy value; no observation may contain it.
+    if (JSON.stringify(raw).includes(FIXTURE_SECRET))
+      throw new CuError('internal', 'An observation exposed the fixture secure-field value.');
+    const observed = observationSchema.parse(raw);
     const element = observed.elements.find(e => e.label === label);
     if (!element) throw new CuError('not_found', `Fixture element unavailable: ${label}`);
     const result = z.object({ requestId: z.string(), state: z.string(), effect: z.enum(['confirmed', 'unconfirmed']).optional() }).parse(

@@ -25,15 +25,20 @@ Use a disposable test document. Save the following as `request.json` with the cu
   "sessionId": "SESSION_ID",
   "snapshotId": "SNAPSHOT_ID",
   "requestId": "be9fefc8-ff22-46a8-80b0-05cd50c54129",
-  "action": { "type": "type", "elementId": "ELEMENT_ID", "text": "Hello，世界！" }
+  "action": { "type": "type", "elementId": "ELEMENT_ID", "text": "Hello，世界！" },
+  "verify": { "type": "element", "valueIncludes": "Hello，世界！", "present": true },
+  "observe": { "changes": true }
 }
 ```
 
 ```sh
 computer-use act --profile codex --input request.json
-computer-use observe --profile codex --json '{"sessionId":"SESSION_ID"}'
 computer-use session_close --profile codex --json '{"sessionId":"SESSION_ID"}'
 ```
+
+`verify` 按控件读回的值确认文本已写入；`observe` 让结果直接带上动作后的新快照，`changes: true` 时只列出相对所用快照新增或变化的元素。不带 `observe` 时，下一步前另行调用 `observe`。
+
+`verify` confirms the text through the control's read-back value. `observe` returns the next snapshot with the result; with `changes: true` it lists only elements added or changed since the acted snapshot. Without `observe`, call `observe` before the next step.
 
 CLI 返回截图的本机私有文件路径；MCP 返回图片内容。用新观察或目标程序独立输出确认结果。`executed` 只表示执行阶段结束；大多数桌面动作同时带 `effect: "unconfirmed"`，表示输入已派发但驱动无法证明效果，重新观察即可继续。显式可观察条件通过才返回 `verified`；它也只证明所指定条件，不证明整个任务成功。
 
@@ -51,12 +56,14 @@ computer-use action_status --profile codex --json '{"requestId":"be9fefc8-ff22-4
 
 | 规则 / Rule | 说明 / Behavior |
 |---|---|
-| 快照 / Snapshots | 坐标是截图像素；动作消费快照，下次操作前重新观察。有效期 30 秒，不能检测所有视觉变化。 / Coordinates are screenshot pixels. Actions consume snapshots; observe again before the next action. Snapshots expire after 30 seconds and cannot detect every visual change. |
+| 快照 / Snapshots | 坐标是截图像素；动作消费快照，下次操作前重新观察，或在 `act` 里带 `observe` 直接取回新快照。有效期 30 秒，不能检测所有视觉变化。 / Coordinates are screenshot pixels. Actions consume snapshots; observe again before the next action, or pass `observe` to `act` to receive the next snapshot. Snapshots expire after 30 seconds and cannot detect every visual change. |
 | 会话 / Sessions | 默认后台、独占，两分钟无活动过期。`mode: "foreground"` 需要本地宿主批准；不自动切换模式。 / Background and exclusive by default; expire after two idle minutes. Foreground requires local host approval, with no automatic mode fallback. |
-| 元素 / Elements | 使用当前快照中的 `elementId`。`elementsComplete: false` 时，没列出某元素不能证明它不存在，负向验证会被拒绝。 / Use an element ID from the current snapshot. An incomplete element tree cannot establish absence; negative verification is rejected. |
+| 元素 / Elements | 元素 id 由运行时分配：同一会话内角色、标签和位置不变的元素沿用原 id，但动作仍要使用当前 `snapshotId`。可读时给出 `value`（最多 2000 字符，截断时附 `valueLength`）、`enabled: false`、`selected: true` 和 `min`/`max`。密码内容不会返回：macOS 安全文本框和浏览器密码框没有 `value`，只含掩码字符的值也会丢弃；Windows 上 UI Automation 读不到密码框内容，但 WinForms 密码框会把本地化的“拒绝访问”占位文字当作值上报。桌面驱动不报告空文本框的值，`value: ""` 只在独立浏览器中能验证。`elementsComplete: false` 时，没列出某元素不能证明它不存在，负向验证会被拒绝。 / Element IDs are assigned by the runtime and stay the same within a session while an element's role, label and position are unchanged; actions still need the current `snapshotId`. When readable, elements carry `value` (up to 2000 characters, with `valueLength` when truncated), `enabled: false`, `selected: true` and `min`/`max`. Password contents are never returned: macOS secure text fields and browser password inputs carry no `value`, and mask-only values are dropped; on Windows, UI Automation cannot read password boxes, but WinForms reports a localized "access denied" placeholder as the value. Desktop drivers omit empty text values, so `value: ""` can only be verified in the controlled browser. An incomplete element tree cannot establish absence; negative verification is rejected. |
+| 观察内容 / Observation parts | `observe` 的 `screenshot: false` 或 `elements: false` 只省略返回内容，快照照常可用。`since` 填你已拿到元素列表的快照 ID，结果只含新增或变化的元素，`changes.removed` 列出消失的 id；没有 `changes` 字段时列表是完整的。`act` 带 `observe` 时结果附带动作后的观察，但结果为 `unknown` 时不附带；观察失败时给 `observationError`，重复提交同一请求不再附带。 / `screenshot: false` or `elements: false` only omits that part; the snapshot stays usable. `since` takes the snapshot ID whose element list you already have and returns only added or changed elements, with `changes.removed` listing IDs that disappeared; without a `changes` field the list is complete. `act` with `observe` attaches the next observation, except after an `unknown` outcome; `observationError` explains a failed observation, and a repeated request does not attach one. |
+| 验证条件 / Conditions | 元素条件可按 `label`、`value`（完整值相等）或 `valueIncludes` 匹配，并可加 `role`、`enabled`、`selected`。值比较不受观察截断影响，换行符统一处理；未报告的值或状态不算满足。这些状态条件只能配 `present: true`。 / Element conditions match `label`, `value` (exact full value) or `valueIncludes`, optionally with `role`, `enabled` and `selected`. Value checks use the full value regardless of observation truncation and normalize line endings; unreported values or states never match. State checks require `present: true`. |
 | 点击 / Click | `elementId` 与 `point` 二选一。Windows 元素点击始终走后台辅助功能路径；批准的前台会话中坐标点击走前台指针路径。 / Choose either an element or a point. Windows element clicks use background accessibility; point clicks use the pointer in an approved foreground session. |
 | 输入 / Type | Windows 元素定向输入即使在前台会话也走后台辅助功能路径；不确定或拒绝后不换路径、不重发。无元素 ID 的前台长文本未获完整性保证。 / Windows element-directed typing uses background accessibility even in foreground sessions, without fallback or retry. Long foreground text without an element ID is not guaranteed. |
-| 文本效果 / Text effects | 后端和控件决定具体文本行为，需读回完整内容；不要假定所有路径都追加或替换。浏览器路径使用 `insertText`。 / Read back the full value: do not assume all controls append or replace text identically. The browser uses `insertText`. |
+| 文本效果 / Text effects | 后端和控件决定具体文本行为，需读回完整内容（元素的 `value`，或 `value` / `valueIncludes` 条件）；不要假定所有路径都追加或替换。浏览器路径使用 `insertText`。 / Read back the full value (the element's `value`, or a `value` / `valueIncludes` condition): do not assume all controls append or replace text identically. The browser uses `insertText`. |
 | 拖拽 / Drag | 仅两个端点的直线手势。macOS 拒绝后台拖拽；Windows 向驱动传递会话模式，实际支持仍需验证。 / Two-endpoint straight gestures only. macOS rejects background dragging; Windows passes the session mode to the driver, with actual support still requiring validation. |
 | 时限 / Deadlines | `timeoutMs`（默认 15 秒、最多 30 秒）同时限定派发和 `verify`；排队超过 15 秒仍未开始的动作直接取消、不派发。输入发出前就到时限时，动作以 `failed` / `timeout` 结束且未发送任何输入；输入已经发出时，再给它最多 5 秒完成，仍未完成才记为 `unknown`。 / `timeoutMs` (default 15 s, max 30 s) bounds dispatch and `verify` together; an action still queued after 15 seconds is cancelled without dispatch. If the deadline passes before input is dispatched, the action ends as `failed` / `timeout` and nothing was sent; input already dispatched gets up to 5 more seconds to finish before it is recorded as `unknown`. |
 | 保留 / Retention | CLI 截图文件保留 24 小时，之后在下次观察时删除；动作日志只保留 7 天内、最多 500 条已结束记录；过期会话和快照在后台定时回收。 / CLI screenshot files are kept for 24 hours and removed on a later observe; the action journal keeps at most 500 finished records from the last 7 days; expired sessions and snapshots are reclaimed in the background. |

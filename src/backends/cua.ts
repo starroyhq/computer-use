@@ -141,6 +141,21 @@ function withoutHiddenMenus(elements: WindowElement[]): WindowElement[] {
   return elements.filter(element => !excluded.has(element.elementIndex));
 }
 
+// 密码类字段的值不进入观察结果，也不参与条件判断，避免 verify/wait 被用来逐次试探内容。
+// 按角色识别；系统常用只含掩码字符的值代替真实内容，这类值同样丢弃，连长度也不透露。
+// 实测 macOS 驱动把安全文本框报告为 AXTextField，值是等长的 U+F79A（系统私用区的掩码字符）。
+// 单个圆点或星号多半是列表符号或必填标记，不当作掩码；U+F79A 不会作为普通文字出现。
+const PROTECTED_ROLE = /secure|password/i;
+const MASK_ONLY = /^(?:\uf79a+|[\u2022\u2219\u25cf*]{2,})$/u;
+function readable(element: WindowElement): { label: string; value?: string } {
+  const label = element.label ?? '';
+  const { value } = element;
+  if (!PROTECTED_ROLE.test(element.role) && (value === undefined || !MASK_ONLY.test(value)))
+    return value === undefined ? { label } : { label, value };
+  // 驱动在控件没有名称时会用值充当标签；这时标签也不能公开。
+  return { label: value !== undefined && label === value ? '' : label };
+}
+
 // Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
 // （开启、关闭两种设置下均实测反向），派发前需交换方向。
 const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
@@ -478,10 +493,16 @@ export class CuaBackend implements Backend {
       screenshot: { mimeType: image.mimeType as 'image/png' | 'image/jpeg', data: image.dataBase64 },
       elements: elements
         .filter(element => element.elementToken)
-        .map(element => ({
+        .map(element => ({ element, ...readable(element) }))
+        .map(({ element, label, value }) => ({
           id: element.elementToken!,
           role: element.role,
-          label: element.label ?? '',
+          label,
+          ...(value !== undefined ? { value } : {}),
+          ...(element.enabled !== undefined ? { enabled: element.enabled } : {}),
+          ...(element.selected !== undefined ? { selected: element.selected } : {}),
+          ...(Number.isFinite(element.min) && Number.isFinite(element.max) ? { min: element.min, max: element.max } : {}),
+          depth: element.depth,
           // AX frames are global logical screen points. Actions and public element
           // bounds use window-local pixels of this particular (possibly scaled) image.
           ...(element.frame

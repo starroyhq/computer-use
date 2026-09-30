@@ -5,6 +5,8 @@ import Foundation
 final class Fixture: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private let input = NSTextField(string: "")
+    // A fixed dummy value used only to check that observations never expose secure-field contents.
+    private let secret = NSSecureTextField(string: "fixture-secret-8431")
     private let result = NSTextField(labelWithString: "Ready")
     private var count = 0
     private var output: URL?
@@ -23,8 +25,12 @@ final class Fixture: NSObject, NSApplicationDelegate {
         record.frame = NSRect(x: 24, y: 102, width: 100, height: 32)
         let reset = NSButton(title: "Reset", target: self, action: #selector(resetInput))
         reset.frame = NSRect(x: 140, y: 102, width: 100, height: 32)
+        secret.frame = NSRect(x: 256, y: 103, width: 238, height: 30)
+        secret.setAccessibilityLabel("Probe secret")
         result.frame = NSRect(x: 24, y: 45, width: 470, height: 40)
-        [title, input, record, reset, result].forEach(content.addSubview)
+        [title, input, record, reset, secret, result].forEach(content.addSubview)
+        // Keep focus off the secure field: a focused secure field turns on system-wide secure keyboard input.
+        window.initialFirstResponder = input
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         persist(text: "")

@@ -26,6 +26,16 @@ const fixture = `<!doctype html><html><head><title>Fixture</title></head><body>
 </body></html>`;
 
 let server: Server;
+// 各种控件的当前值与状态；密码框预填一个一次性测试值，用来确认它不会出现在观察结果里。
+const form = `<!doctype html><title>Form</title>
+<label for="nick">Nickname</label><input id="nick" value="初始">
+<label for="secret">Secret</label><input id="secret" type="password" value="fixture-secret">
+<label for="notes">Notes</label><textarea id="notes">第一行
+第二行</textarea>
+<label for="size">Size</label><select id="size"><option>Small</option><option selected>Large</option></select>
+<input id="subscribe" type="checkbox" checked><label for="subscribe">Subscribe</label>
+<button disabled>Locked</button>
+<div role="switch" aria-checked="false" aria-label="Alerts">Alerts</div>`;
 let url: string;
 let directory: string;
 let backend: BrowserBackend;
@@ -43,9 +53,11 @@ beforeAll(async () => {
       response.end(
         request.url === '/popup'
           ? '<title>Popup page</title><button>Popup button</button>'
-          : request.url === '/loading'
-            ? `<title>Loading</title><p id=progress>Loading</p><script>const timer=setInterval(()=>document.querySelector('#progress').textContent=String(Date.now()),5);setTimeout(()=>{clearInterval(timer);document.title='Loaded';document.querySelector('#progress').textContent='Ready'},500)</script>`
-            : fixture,
+          : request.url === '/form'
+            ? form
+            : request.url === '/loading'
+              ? `<title>Loading</title><p id=progress>Loading</p><script>const timer=setInterval(()=>document.querySelector('#progress').textContent=String(Date.now()),5);setTimeout(()=>{clearInterval(timer);document.title='Loaded';document.querySelector('#progress').textContent='Ready'},500)</script>`
+              : fixture,
       );
     }
   });
@@ -137,6 +149,28 @@ describe('isolated Chromium backend', () => {
     observation = await backend.observe(target);
     await act(observation, { type: 'click', elementId: element(observation, 'Save') });
     expect((await backend.targets(grant))[0]?.title).toBe('Saved 中文测试已完成有');
+  });
+
+  it('reports editable values and control states without exposing password contents', async () => {
+    await act(await backend.observe(target), { type: 'navigate', url: `${url}/form` });
+    const observation = await backend.observe(target);
+    const byLabel = (label: string) => observation.elements.find(item => item.label === label);
+    expect(byLabel('Nickname')).toMatchObject({ role: 'textbox', value: '初始', enabled: true });
+    expect(byLabel('Secret')).toMatchObject({ role: 'textbox', enabled: true });
+    expect(byLabel('Secret')).not.toHaveProperty('value');
+    expect(byLabel('Notes')).toMatchObject({ role: 'textbox', value: '第一行\n第二行' });
+    expect(byLabel('Size')).toMatchObject({ role: 'combobox', value: 'Large' });
+    expect(byLabel('Subscribe')).toMatchObject({ role: 'checkbox', selected: true });
+    expect(byLabel('Locked')).toMatchObject({ role: 'button', enabled: false });
+    expect(byLabel('Alerts')).toMatchObject({ role: 'switch', selected: false });
+    expect(byLabel('Locked')).not.toHaveProperty('value');
+    expect(JSON.stringify(observation.elements)).not.toContain('fixture-secret');
+    // 值变化会让旧快照失效，新观察读到新值。
+    await act(observation, { type: 'type', elementId: byLabel('Nickname')!.id, text: '已改' });
+    expect(await backend.validate(observation)).toBe(false);
+    const updated = await backend.observe(target);
+    // 与上面的中文输入用例一致：聚焦后光标位于开头。
+    expect(updated.elements.find(item => item.label === 'Nickname')).toMatchObject({ value: '已改初始' });
   });
 
   it('rejects old references after DOM replacement and navigation', async () => {

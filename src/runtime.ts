@@ -6,8 +6,10 @@ import {
   errorResult,
   type Backend,
   type BackendObservation,
+  type Bounds,
   type Client,
   type Condition,
+  type Element,
   type HostCommand,
   type HostEvent,
   type Mode,
@@ -25,8 +27,28 @@ type Session = {
   mode: Mode;
   exclusive: boolean;
   expiresAt: number;
+  // 最近一次发布的元素表：用于在多次观察间沿用元素 id，并计算增量。
+  view?: ElementView;
 };
-type Snapshot = { id: string; sessionId: string; createdAt: number; observation: BackendObservation };
+// elementIds：公开元素 id → 后端元素 id。后端 id 不返回给客户端。
+type Snapshot = { id: string; sessionId: string; createdAt: number; observation: BackendObservation; elementIds: Map<string, string> };
+// key 是元素身份（角色、标签、深度、取整后的位置），state 是其值与状态的摘要。
+type ViewEntry = { key: string; state: string; id: string };
+// shown：这次发布是否把元素返回给了客户端。只有客户端见过的元素表才能作为增量的基准。
+type ElementView = { snapshotId: string; shown: boolean; entries: ViewEntry[] };
+type PublishOptions = { screenshot: boolean; elements: boolean; since?: string | undefined };
+type PublicElement = {
+  id: string;
+  role: string;
+  label: string;
+  bounds?: Bounds;
+  value?: string;
+  valueLength?: number;
+  enabled?: false;
+  selected?: true;
+  min?: number;
+  max?: number;
+};
 type PendingPair = { client: Client; resolve: (allow: boolean) => void };
 type Work = {
   controller: AbortController;
@@ -48,6 +70,45 @@ const DISPATCH_GRACE_MS = 5_000;
 const REAP_INTERVAL_MS = 30_000;
 // 宿主马上回执；没有回执时会话仍然打开，避免标记失败挡住操作。
 const CONTROL_ACK_MS = 2_000;
+const OBSERVE_MS = 30_000;
+// act 连同动作后观察的整体响应上限，低于传输层约 65 秒的超时。剩余时间不足时不再观察。
+const ACT_RESPONSE_MS = 60_000;
+const MIN_OBSERVE_MS = 1_000;
+// 观察结果中单个元素值的长度上限；条件判断仍使用后端读到的完整值。
+const VALUE_LIMIT = 2_000;
+const FULL: PublishOptions = { screenshot: true, elements: true };
+
+function truncate(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  // 不把代理对拆成半个字符。
+  const last = text.charCodeAt(limit - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit);
+}
+
+// 返回给客户端的元素：位置取整；只在与默认不同时给出 enabled/selected；与非空标签重复的值不再重复。
+// 空值照常给出：它说明文本框是空的，而没有 value 只说明后端读不到。
+function publicElement(element: Element): Omit<PublicElement, 'id'> {
+  const published: Omit<PublicElement, 'id'> = { role: element.role, label: element.label };
+  const { value } = element;
+  if (value !== undefined && (value === '' || value !== element.label)) {
+    published.value = truncate(value, VALUE_LIMIT);
+    if (published.value.length < value.length) published.valueLength = value.length;
+  }
+  if (element.enabled === false) published.enabled = false;
+  if (element.selected === true) published.selected = true;
+  if (element.min !== undefined && element.max !== undefined) {
+    published.min = element.min;
+    published.max = element.max;
+  }
+  if (element.bounds) {
+    const { x, y, width, height } = element.bounds;
+    published.bounds = { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+  }
+  return published;
+}
+
+// 不同平台的文本控件换行符不同，条件比较时统一成 \n。
+const newlines = (text: string) => text.replace(/\r\n?/g, '\n');
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -81,6 +142,8 @@ export class Runtime implements RpcService {
   private readonly controlCounts = new Map<number, number>();
   private readonly controlReady = new Map<number, () => void>();
   private queue: Promise<unknown> = Promise.resolve();
+  // 公开元素 id 的全局序号：同一会话内沿用，不同会话之间不会重复。
+  private elementSequence = 0;
   private paused = false;
   private stopped = false;
   private reaper: NodeJS.Timeout | undefined;
@@ -361,34 +424,85 @@ export class Runtime implements RpcService {
     this.sessions.set(session.id, session);
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }
-  private async observe(session: Session): Promise<unknown> {
-    const observation = await bounded(this.backend(session.target.kind).observe(session.target), 30_000);
+  private async observe(session: Session, options: PublishOptions = FULL, milliseconds = OBSERVE_MS): Promise<Record<string, unknown>> {
+    const observation = await bounded(this.backend(session.target.kind).observe(session.target), milliseconds);
     try {
-      return this.publishObservation(session, observation);
+      return this.publishObservation(session, observation, options);
     } catch (error) {
       // 会话在观察期间被关闭时，后端刚缓存的截图不会再有人使用。
       if (!this.sessions.has(session.id)) this.releaseTarget(session.target);
       throw error;
     }
   }
-  private publishObservation(session: Session, observation: BackendObservation): unknown {
+  private publishObservation(session: Session, observation: BackendObservation, options: PublishOptions = FULL): Record<string, unknown> {
     const client = this.clients.clients.get(session.clientId);
     if (!client) throw new CuError('unauthorized', 'Client revoked during observation.');
     this.getSession(client, session.id);
     // Keep one snapshot per session to bound memory and make stale references explicit.
     for (const [id, snap] of this.snapshots) if (snap.sessionId === session.id) this.snapshots.delete(id);
-    const snapshot: Snapshot = { id: randomUUID(), sessionId: session.id, createdAt: this.now(), observation };
+    const snapshot: Snapshot = { id: randomUUID(), sessionId: session.id, createdAt: this.now(), observation, elementIds: new Map() };
+    // 与上一次发布的元素表按身份逐个匹配：身份相同的元素沿用 id；值或状态不同则算作变化。
+    // 同一身份出现多次时按出现顺序配对。
+    const previous = session.view;
+    const unmatched = new Map<string, ViewEntry[]>();
+    for (const entry of previous?.entries ?? []) {
+      const same = unmatched.get(entry.key);
+      if (same) same.push(entry);
+      else unmatched.set(entry.key, [entry]);
+    }
+    const entries: ViewEntry[] = [];
+    const elements: PublicElement[] = [];
+    const changed: PublicElement[] = [];
+    for (const element of observation.elements) {
+      const published = publicElement(element);
+      const key = JSON.stringify([element.role, element.label, element.depth ?? null, published.bounds ?? null]);
+      const state = hash(
+        JSON.stringify([
+          element.value ?? null,
+          element.enabled ?? null,
+          element.selected ?? null,
+          element.min ?? null,
+          element.max ?? null,
+        ]),
+      );
+      const reused = unmatched.get(key)?.shift();
+      const id = reused?.id ?? `e${++this.elementSequence}`;
+      entries.push({ key, state, id });
+      snapshot.elementIds.set(id, element.id);
+      const item: PublicElement = { id, ...published };
+      elements.push(item);
+      if (!reused || reused.state !== state) changed.push(item);
+    }
+    session.view = { snapshotId: snapshot.id, shown: options.elements, entries };
     this.snapshots.set(snapshot.id, snapshot);
-    const { backendState: _, ...publicObservation } = observation;
-    return { snapshotId: snapshot.id, capturedAt: snapshot.createdAt, ...publicObservation };
+    const { backendState: _, screenshot, elements: __, ...geometry } = observation;
+    const result: Record<string, unknown> = { snapshotId: snapshot.id, capturedAt: snapshot.createdAt, ...geometry };
+    if (options.screenshot) result.screenshot = screenshot;
+    if (options.elements) {
+      const unchanged = elements.length - changed.length;
+      // 没有任何元素沿用时（例如页面整体跳转），增量不会比完整列表小，直接给完整列表。
+      if (options.since !== undefined && previous?.shown && previous.snapshotId === options.since && unchanged > 0) {
+        const removed = [...unmatched.values()].flat().map(entry => entry.id);
+        result.changes = { since: options.since, unchanged, removed };
+        result.elements = changed;
+      } else result.elements = elements;
+    }
+    return result;
   }
   private satisfies(observation: BackendObservation, condition: Condition): boolean {
     if (condition.type === 'title') return observation.target.title.includes(condition.includes);
     if (!condition.present && !observation.elementsComplete)
       throw new CuError('unavailable', 'This backend returns a partial element tree and cannot verify element absence.');
-    return (
-      observation.elements.some(e => e.label === condition.label && (!condition.role || e.role === condition.role)) === condition.present
-    );
+    // 后端没有报告的值或状态一律不满足条件。
+    const matches = (element: Element) =>
+      (condition.label === undefined || element.label === condition.label) &&
+      (!condition.role || element.role === condition.role) &&
+      (condition.value === undefined || (element.value !== undefined && newlines(element.value) === newlines(condition.value))) &&
+      (condition.valueIncludes === undefined ||
+        (element.value !== undefined && newlines(element.value).includes(newlines(condition.valueIncludes)))) &&
+      (condition.enabled === undefined || element.enabled === condition.enabled) &&
+      (condition.selected === undefined || element.selected === condition.selected);
+    return observation.elements.some(matches) === condition.present;
   }
   private async waitFor(session: Session, condition: Condition, timeout: number, signal?: AbortSignal): Promise<BackendObservation> {
     const deadline = this.now() + timeout;
@@ -416,8 +530,11 @@ export class Runtime implements RpcService {
     throw new CuError('timeout', 'The requested observable condition was not satisfied.');
   }
   private async act(client: Client, params: unknown): Promise<unknown> {
+    const startedAt = this.now();
     const p = schemas.act.parse(params);
-    const fingerprint = hash(JSON.stringify(p));
+    // observe 只决定结果里附带什么，不属于动作参数：带或不带它重试同一请求都算同一动作。
+    const { observe: _, ...identity } = p;
+    const fingerprint = hash(JSON.stringify(identity));
     const existing = this.actions.records.get(p.requestId);
     if (existing) {
       if (existing.clientId !== client.id) throw new CuError('not_found', 'Request not found.');
@@ -436,8 +553,11 @@ export class Runtime implements RpcService {
     const points = action.type === 'drag' ? action.path : 'point' in action && action.point ? [action.point] : [];
     if (points.some(point => point.x >= snapshot.observation.imageWidth || point.y >= snapshot.observation.imageHeight))
       throw new CuError('invalid_request', 'Coordinates are outside the observed image.');
-    if ('elementId' in action && action.elementId && !snapshot.observation.elements.some(e => e.id === action.elementId))
+    const backendElementId = 'elementId' in action && action.elementId ? snapshot.elementIds.get(action.elementId) : undefined;
+    if ('elementId' in action && action.elementId && backendElementId === undefined)
       throw new CuError('stale_snapshot', 'Element does not belong to this snapshot.');
+    // 后端只认识它自己的元素 id；公开 id 在这里换回去。
+    const backendAction = backendElementId === undefined ? action : { ...action, elementId: backendElementId };
     const record: ActionRecord = {
       requestId: p.requestId,
       clientId: client.id,
@@ -466,6 +586,7 @@ export class Runtime implements RpcService {
     const submittedAt = this.now();
     work.promise = this.queue.then(async () => {
       let timer: NodeJS.Timeout | undefined;
+      let verified: BackendObservation | undefined;
       try {
         await work.admitted;
         if (controller.signal.aborted) throw new CuError('cancelled', 'Action cancelled before execution.');
@@ -511,7 +632,7 @@ export class Runtime implements RpcService {
           work.started = true;
         };
         const execution = await Promise.race([
-          backend.act(snapshot.observation, action, session.mode, controller.signal, dispatched),
+          backend.act(snapshot.observation, backendAction, session.mode, controller.signal, dispatched),
           aborted,
         ]);
         clearTimeout(timer);
@@ -521,7 +642,7 @@ export class Runtime implements RpcService {
         if (execution) record.effect = execution.effect;
         if (p.verify) {
           try {
-            await this.waitFor(session, p.verify, Math.max(1, deadline - this.now()), controller.signal);
+            verified = await this.waitFor(session, p.verify, Math.max(1, deadline - this.now()), controller.signal);
             record.state = 'verified';
             delete record.error;
           } catch (error) {
@@ -550,10 +671,38 @@ export class Runtime implements RpcService {
         this.work.delete(record.requestId);
         await this.persistActions();
       }
-      return this.publicRecord(record);
+      const result = this.publicRecord(record);
+      // 结果不确定时不附带观察：Agent 必须先查询状态、有意识地检查目标，而不是顺着新截图继续操作。
+      if (p.observe && record.state !== 'unknown')
+        Object.assign(result, await this.observeAfter(session, p.snapshotId, p.observe, verified, startedAt));
+      return result;
     });
     this.queue = work.promise.catch(() => {});
     return work.promise;
+  }
+  // 在动作的队列位置内观察，后面排队的动作不会插到动作与观察之间。观察失败不改变动作记录。
+  private async observeAfter(
+    session: Session,
+    actedSnapshotId: string,
+    options: { screenshot: boolean; elements: boolean; changes: boolean },
+    verified: BackendObservation | undefined,
+    startedAt: number,
+  ): Promise<{ observation: unknown } | { observationError: { code: string; message: string } }> {
+    const publish: PublishOptions = {
+      screenshot: options.screenshot,
+      elements: options.elements,
+      ...(options.changes ? { since: actedSnapshotId } : {}),
+    };
+    try {
+      if (this.stopped) throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
+      // 验证条件刚刚满足的那次观察就是动作后的最新状态，直接发布，不再重复抓取。
+      if (verified) return { observation: this.publishObservation(session, verified, publish) };
+      const remaining = startedAt + ACT_RESPONSE_MS - this.now();
+      if (remaining < MIN_OBSERVE_MS) throw new CuError('timeout', 'No time remained to observe after the action; call observe.');
+      return { observation: await this.observe(session, publish, Math.min(OBSERVE_MS, remaining)) };
+    } catch (error) {
+      return { observationError: errorResult(error) };
+    }
   }
   private async persistActions(): Promise<void> {
     try {
@@ -563,7 +712,7 @@ export class Runtime implements RpcService {
       throw new CuError('unavailable', 'Action journal could not be persisted; execution has stopped.');
     }
   }
-  private publicRecord(record: ActionRecord): unknown {
+  private publicRecord(record: ActionRecord): Record<string, unknown> {
     const { clientId: _, fingerprint: __, ...publicRecord } = record;
     return structuredClone(publicRecord);
   }
@@ -587,6 +736,14 @@ export class Runtime implements RpcService {
             scroll: 'direction + line/page units',
           },
           modes: ['background', 'foreground'],
+          observation: {
+            elementFields: ['id', 'role', 'label', 'bounds', 'value', 'valueLength', 'enabled', 'selected', 'min', 'max'],
+            elementIds: 'stable within a session while role, label and bounds are unchanged',
+            valueLimit: VALUE_LIMIT,
+            omit: ['screenshot', 'elements'],
+            changesSince: true,
+            observeAfterAct: true,
+          },
           sessionTtlMs: SESSION_TTL,
           snapshotTtlMs: SNAPSHOT_TTL,
           paused: this.paused,
@@ -611,8 +768,8 @@ export class Runtime implements RpcService {
         return { closed: true };
       }
       case 'observe': {
-        const p = schemas.observe.parse(parsed.data);
-        return this.observe(this.getSession(client, p.sessionId));
+        const { sessionId, ...options } = schemas.observe.parse(parsed.data);
+        return this.observe(this.getSession(client, sessionId), options);
       }
       case 'act':
         return this.act(client, parsed.data);

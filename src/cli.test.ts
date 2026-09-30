@@ -157,14 +157,22 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     });
     expect(typed.state).toBe('executed');
     observation = await call<Observation>('observe', session);
+    // 元素 id 在会话内保持不变，且能读回输入框当前的值。
+    expect(observation.elements.find(element => element.label === '姓名')).toMatchObject({ id: name!.id, value: '中文端到端' });
     const save = observation.elements.find(element => element.label === 'Save')!;
-    const saved = await call<{ requestId: string; state: string }>('act', {
+    const saved = await call<{ requestId: string; state: string; observation: Observation & { changes: unknown } }>('act', {
       ...session,
       snapshotId: observation.snapshotId,
       action: { type: 'click', elementId: save.id },
-      verify: { type: 'title', includes: 'Saved 中文端到端' },
+      verify: { type: 'element', label: '姓名', value: '中文端到端', present: true },
+      observe: { changes: true },
     });
     expect(saved.state).toBe('verified');
+    // 动作后的观察随结果返回：只含变化的元素，截图同样由 CLI 落成私有文件。
+    expect(saved.observation.changes).toEqual({ since: observation.snapshotId, unchanged: 2, removed: [] });
+    expect(saved.observation.elements).toEqual([]);
+    expect(isAbsolute(saved.observation.screenshot.path)).toBe(true);
+    expect((await stat(saved.observation.screenshot.path)).mode & 0o777).toBe(0o600);
     const waited = await call<{ state: string; observation: Observation }>('wait', {
       ...session,
       condition: { type: 'title', includes: 'Saved 中文端到端' },

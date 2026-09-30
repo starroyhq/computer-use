@@ -38,10 +38,31 @@ export const actionSchema = z.discriminatedUnion('type', [
 ]);
 export const conditionSchema = z.discriminatedUnion('type', [
   z
-    .object({ type: z.literal('element'), role: z.string().max(100).optional(), label: z.string().min(1).max(1000), present: z.boolean() })
-    .strict(),
+    .object({
+      type: z.literal('element'),
+      role: z.string().max(100).optional(),
+      label: z.string().min(1).max(1000).optional(),
+      // 状态条件按后端读到的完整值判断，不受观察结果里的截断影响；适配器丢弃的值（如可识别的密码框）不参与匹配。
+      value: z.string().max(100_000).optional(),
+      valueIncludes: z.string().min(1).max(100_000).optional(),
+      enabled: z.boolean().optional(),
+      selected: z.boolean().optional(),
+      present: z.boolean(),
+    })
+    .strict()
+    .refine(v => v.label !== undefined || v.value !== undefined || v.valueIncludes !== undefined, 'Specify label, value or valueIncludes')
+    // 后端没有报告的状态无法证明“不存在”，状态条件只用于确认元素存在。
+    .refine(
+      v => v.present || (v.value === undefined && v.valueIncludes === undefined && v.enabled === undefined && v.selected === undefined),
+      'value, valueIncludes, enabled and selected require present: true',
+    ),
   z.object({ type: z.literal('title'), includes: z.string().min(1).max(1000) }).strict(),
 ]);
+// 观察结果里要包含哪些部分。省略截图或元素只影响返回内容，快照照常可用于后续动作。
+const observeParts = {
+  screenshot: z.boolean().default(true),
+  elements: z.boolean().default(true),
+};
 export const schemas = {
   capabilities: z.object({}).strict(),
   doctor: z.object({}).strict(),
@@ -50,7 +71,7 @@ export const schemas = {
     .object({ targetId: id, mode: z.enum(['background', 'foreground']).default('background'), exclusive: z.boolean().default(true) })
     .strict(),
   session_close: z.object({ sessionId: id }).strict(),
-  observe: z.object({ sessionId: id }).strict(),
+  observe: z.object({ sessionId: id, ...observeParts, since: id.optional() }).strict(),
   act: z
     .object({
       sessionId: id,
@@ -59,6 +80,10 @@ export const schemas = {
       action: actionSchema,
       verify: conditionSchema.optional(),
       timeoutMs: z.number().int().min(100).max(30_000).default(15_000),
+      observe: z
+        .object({ ...observeParts, changes: z.boolean().default(false) })
+        .strict()
+        .optional(),
     })
     .strict(),
   wait: z.object({ sessionId: id, condition: conditionSchema, timeoutMs: z.number().int().min(100).max(30_000).default(10_000) }).strict(),
@@ -90,9 +115,10 @@ export const descriptions: Record<Method, string> = {
   session_open:
     'Bind a session to an authorized target. Background is the default; foreground is allowed for clients whose pairing included it and may move focus, pointer and keyboard. Exclusive sessions prevent other clients from changing the UI.',
   session_close: 'Release the session, its execution lease and screenshots.',
-  observe: 'Return a fresh screenshot and semantic elements. Coordinates refer to this image; use its snapshotId for the next action.',
-  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Execution alone does not imply task success.',
-  wait: 'Wait for an explicit observable condition, with a bounded timeout. No fixed sleep or implicit task planning.',
+  observe:
+    'Return a fresh screenshot and semantic elements (role, label, bounds, and value/enabled/selected when readable; password contents are never returned). Coordinates refer to this image; use its snapshotId for the next action. An element keeps its id within the session while its role, label and bounds stay the same. screenshot: false or elements: false omits that part without affecting the snapshot. since: a snapshotId whose elements you already have returns only added or changed elements plus changes.removed; without a changes field the element list is complete.',
+  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Pass observe to receive the next observation in this result (not after an unknown outcome); observe.changes returns only elements changed since the acted snapshot. Execution alone does not imply task success.',
+  wait: 'Wait for an explicit observable condition, with a bounded timeout. Element conditions match label, value or valueIncludes, optionally role, enabled and selected. No fixed sleep or implicit task planning.',
   action_status: 'Read the status of a previous request owned by this client, including uncertain outcomes after disconnects.',
   cancel: 'Cancel a queued or active request. Active cancellation may require a runtime restart to guarantee input has stopped.',
 };

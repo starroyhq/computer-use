@@ -473,6 +473,50 @@ describe('Cua socket adapter', () => {
     expect(incompatible.client.callTool).not.toHaveBeenCalled();
   });
 
+  it('surfaces readable element values and states but never protected values', async () => {
+    const { backend, state } = fixture();
+    const common = { depth: 1, frame: { x: 12, y: 23, w: 20, h: 10 } };
+    state.elements = [
+      { elementIndex: 1n, role: 'AXTextField', label: 'Name', value: '中文内容', enabled: true, elementToken: 's1:1', ...common },
+      { elementIndex: 2n, role: 'AXSecureTextField', label: 'Password', value: 'fixture-secret', elementToken: 's1:2', ...common },
+      { elementIndex: 3n, role: 'Edit', label: 'PIN', value: '••••', elementToken: 's1:3', ...common },
+      // macOS 实测：安全文本框的角色是普通 AXTextField，值是等长的 U+F79A。
+      { elementIndex: 8n, role: 'AXTextField', label: 'Probe secret', value: '\uf79a'.repeat(19), elementToken: 's1:8', ...common },
+      { elementIndex: 9n, role: 'AXTextField', label: 'One', value: '\uf79a', elementToken: 's1:9', ...common },
+      // 没有名称的密码框：驱动用值充当标签，标签同样不能公开。
+      { elementIndex: 6n, role: 'AXSecureTextField', label: 'unnamed-secret', value: 'unnamed-secret', elementToken: 's1:6', ...common },
+      // 单个圆点是列表符号，照常保留。
+      { elementIndex: 7n, role: 'AXStaticText', label: '•', value: '•', elementToken: 's1:7', ...common },
+      {
+        elementIndex: 4n,
+        role: 'AXSlider',
+        label: 'Volume',
+        value: '0.25',
+        min: 0,
+        max: 1,
+        enabled: false,
+        selected: true,
+        elementToken: 's1:4',
+        ...common,
+      },
+      { elementIndex: 5n, role: 'AXTextField', label: 'Search', value: '', elementToken: 's1:5', ...common },
+    ];
+    const observation = await backend.observe(target);
+    expect(observation.elements.map(({ bounds: _, ...element }) => element)).toEqual([
+      { id: 's1:1', role: 'AXTextField', label: 'Name', value: '中文内容', enabled: true, depth: 1 },
+      { id: 's1:2', role: 'AXSecureTextField', label: 'Password', depth: 1 },
+      { id: 's1:3', role: 'Edit', label: 'PIN', depth: 1 },
+      { id: 's1:8', role: 'AXTextField', label: 'Probe secret', depth: 1 },
+      { id: 's1:9', role: 'AXTextField', label: 'One', depth: 1 },
+      { id: 's1:6', role: 'AXSecureTextField', label: '', depth: 1 },
+      { id: 's1:7', role: 'AXStaticText', label: '•', value: '•', depth: 1 },
+      { id: 's1:4', role: 'AXSlider', label: 'Volume', value: '0.25', enabled: false, selected: true, min: 0, max: 1, depth: 1 },
+      // 空值照常保留，才能验证“已清空”。
+      { id: 's1:5', role: 'AXTextField', label: 'Search', value: '', depth: 1 },
+    ]);
+    for (const hidden of ['fixture-secret', 'unnamed-secret', '\uf79a']) expect(JSON.stringify(observation.elements)).not.toContain(hidden);
+  });
+
   it('converts offset AX frames to pixels for Retina and downscaled screenshots', async () => {
     const { backend, state } = fixture();
     state.windowBounds = { x: -200, y: 120, width: 300, height: 200 };

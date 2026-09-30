@@ -197,7 +197,15 @@ export class BrowserBackend implements Backend {
         }
         const id = `e${elements.length + 1}`;
         state.elements.set(id, { handle, signature: JSON.stringify(value) });
-        elements.push({ id, role: value.role, label: value.label, bounds: value.bounds });
+        elements.push({
+          id,
+          role: value.role,
+          label: value.label,
+          bounds: value.bounds,
+          ...(value.text !== undefined ? { value: value.text } : {}),
+          enabled: value.enabled,
+          ...(value.selected !== undefined ? { selected: value.selected } : {}),
+        });
       }
       const viewport = page.viewportSize()!;
       const png = await page.screenshot({ type: 'png', fullPage: false, scale: 'css', caret: 'initial', timeout: 5_000 });
@@ -486,6 +494,24 @@ async function describe(handle: ElementHandle) {
       .trim()
       .replace(/\s+/g, ' ')
       .slice(0, 500);
+    const disabled = 'disabled' in element && Boolean((element as HTMLInputElement).disabled);
+    // 公开给客户端的值：只取可编辑控件的内容。密码框不给值；按钮等控件的 value 属性不是用户可见内容。
+    const input = element instanceof HTMLInputElement ? element : undefined;
+    const text =
+      element instanceof HTMLSelectElement
+        ? Array.from(element.selectedOptions, option => option.label).join(', ')
+        : element instanceof HTMLTextAreaElement ||
+            (input && !['password', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'hidden'].includes(input.type))
+          ? (element as HTMLInputElement | HTMLTextAreaElement).value
+          : undefined;
+    const aria = (name: string) => {
+      const state = element.getAttribute(name);
+      return state === 'true' ? true : state === 'false' ? false : undefined;
+    };
+    const selected =
+      input && (input.type === 'checkbox' || input.type === 'radio')
+        ? input.checked
+        : (aria('aria-checked') ?? aria('aria-selected') ?? aria('aria-pressed'));
     return {
       role,
       label,
@@ -495,8 +521,12 @@ async function describe(handle: ElementHandle) {
         width: Math.min(innerWidth, rect.right) - Math.max(0, rect.left),
         height: Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top),
       },
+      // value 与 disabled 只用于快照签名，检测输入内容变化；它们不会原样返回给客户端。
       value: 'value' in element ? String((element as HTMLInputElement).value) : '',
-      disabled: 'disabled' in element && Boolean((element as HTMLInputElement).disabled),
+      disabled,
+      ...(text !== undefined ? { text } : {}),
+      enabled: !disabled && aria('aria-disabled') !== true,
+      ...(selected !== undefined ? { selected } : {}),
     };
   });
 }

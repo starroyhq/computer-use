@@ -107,9 +107,19 @@ internal sealed class FixtureForm : Form
             recordCount = 0;
             Persist("reset");
         };
+        // A fixed dummy value used only to check that observations never expose password-field contents.
+        var secret = new TextBox
+        {
+            AccessibleName = "Probe secret",
+            UseSystemPasswordChar = true,
+            Text = "fixture-secret-8431",
+            Location = new Point(256, 132),
+            Size = new Size(238, 30),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+        };
         status.Location = new Point(24, 190);
         status.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
-        Controls.AddRange([title, inputHost, record, reset, status]);
+        Controls.AddRange([title, inputHost, record, reset, secret, status]);
         Shown += (_, _) => focusInput();
 
         // Clear stale evidence from a previous run before any automation begins.
