@@ -210,12 +210,16 @@ describe('isolated Chromium backend', () => {
       const observation = await backend.observe(target);
       await act(observation, { type: 'click', elementId: element(observation, 'Download') });
     }
-    await vi.waitFor(async () => {
-      const folders = await readdir(join(directory, 'downloads'));
-      expect(folders).toHaveLength(2);
-      for (const folder of folders)
-        expect(await readFile(join(directory, 'downloads', folder, 'sample.txt'), 'utf8')).toBe('private fixture download');
-    });
+    // 目录先建好，文件要等下载完成才写入；慢一些的 Windows runner 上会超过默认的 1 秒等待。
+    await vi.waitFor(
+      async () => {
+        const folders = await readdir(join(directory, 'downloads'));
+        expect(folders).toHaveLength(2);
+        for (const folder of folders)
+          expect(await readFile(join(directory, 'downloads', folder, 'sample.txt'), 'utf8')).toBe('private fixture download');
+      },
+      { timeout: 10_000, interval: 100 },
+    );
     expect((await backend.doctor()).checks.find(check => check.name === 'downloads')?.ok).toBe(true);
   });
 
