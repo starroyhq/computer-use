@@ -60,7 +60,7 @@
 
 ## 元素读值、稳定 id 与增量观察（2026-09-30）
 
-验证 v0.3.1 之后的工作区改动：元素增加 `value` / `enabled` / `selected` / `min` / `max`；元素 id 由运行时分配并在会话内保持；`observe` 可省略截图或元素，并用 `since` 只返回变化；`act` 可附带动作后的观察；元素条件支持 `value` / `valueIncludes` / `enabled` / `selected`。两台机器都使用临时数据目录、临时凭据和一次性 Fixture，由测试宿主自动批准本轮测试客户端；用户的宿主、已有配对和 Agent 配置没有改动。
+验证随 v0.4.0 发布的改动（提交 `191076a`，实测后只调整了注释和文档）：元素增加 `value` / `enabled` / `selected` / `min` / `max`；元素 id 由运行时分配并在会话内保持；`observe` 可省略截图或元素，并用 `since` 只返回变化；`act` 可附带动作后的观察；元素条件支持 `value` / `valueIncludes` / `enabled` / `selected`。两台机器都使用临时数据目录、临时凭据和一次性 Fixture，由测试宿主自动批准本轮测试客户端；用户的宿主、已有配对和 Agent 配置没有改动。
 
 - **macOS（本机 Apple Silicon），24/24 通过。** 工作区编译的宿主进程经私有套接字连接正在运行的 Computer Use.app 驱动（Cua 0.28.2），走 CLI、IPC、运行时到真实驱动的完整链路。
   - 原有探针 3 轮 Reset → 中文输入 → Record 均由独立文件确认，探针新增的“观察不含安全文本框测试值”检查通过。
