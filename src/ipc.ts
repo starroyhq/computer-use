@@ -107,15 +107,18 @@ export class IpcClient implements RpcService {
           ),
         ),
       );
-      socket.on('connect', () => socket.write(JSON.stringify({ version: 1, id, token, method, params }) + '\n'));
-      socket.on('error', () =>
-        fail(
-          new CuError(
-            method === 'act' ? 'unknown_outcome' : 'unavailable',
-            'Cannot connect to runtime. Open the local app and check its status.',
-          ),
-        ),
-      );
+      let sent = false;
+      // 连接建立前失败说明请求从未送达运行时，不属于结果不确定。
+      const connectionError = () => {
+        if (sent && method === 'act')
+          return new CuError('unknown_outcome', 'Connection failed after sending; query action_status with the original requestId.');
+        return new CuError('unavailable', 'Cannot connect to runtime. Open the local app and check its status.');
+      };
+      socket.on('connect', () => {
+        sent = true;
+        socket.write(JSON.stringify({ version: 1, id, token, method, params }) + '\n');
+      });
+      socket.on('error', () => fail(connectionError()));
       socket.on('end', () => {
         if (!complete)
           fail(new CuError(method === 'act' ? 'unknown_outcome' : 'unavailable', 'Runtime connection closed before a result arrived.'));

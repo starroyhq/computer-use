@@ -66,9 +66,11 @@ export const schemas = {
   cancel: z.object({ requestId: z.uuid() }).strict(),
 };
 export type Method = keyof typeof schemas;
+// 客户端名称会原样显示在本机审批框里：拒绝换行、方向控制等不可见字符，避免伪造提示内容。
+const visibleText = /^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u;
 export const pairSchema = z
   .object({
-    name: z.string().trim().min(1).max(80),
+    name: z.string().trim().min(1).max(80).regex(visibleText),
     appIds: z.array(z.string().min(2).max(1024)).max(50).default([]),
     browser: z.boolean().default(false),
   })

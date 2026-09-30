@@ -23,6 +23,9 @@ type Snapshot = {
 /** Isolated Chromium only. Coordinates and PNG dimensions are CSS viewport pixels (scale 1). */
 export class BrowserBackend implements Backend {
   readonly kind = 'browser' as const;
+  // 输入只作用于隔离的无头页面：中止时关闭该页并释放按键，不会在桌面上留下进行中的手势。
+  readonly reportsDispatch = true;
+  readonly interruptionContained = true;
   private browser: Browser | undefined;
   private context: BrowserContext | undefined;
   private starting: Promise<void> | undefined;
@@ -118,7 +121,7 @@ export class BrowserBackend implements Backend {
       this.checkOpen();
     } catch {
       // Do not call close() here: it awaits this startup promise and would deadlock.
-      await this.release();
+      await this.releaseBrowser();
       throw new CuError(
         'unavailable',
         this.closed ? 'Controlled browser startup was cancelled.' : 'Unable to launch the isolated Chromium component.',
@@ -243,7 +246,13 @@ export class BrowserBackend implements Backend {
     }
   }
 
-  async act(observation: BackendObservation, action: Action, _mode: Mode, signal: AbortSignal): Promise<undefined> {
+  async act(
+    observation: BackendObservation,
+    action: Action,
+    _mode: Mode,
+    signal: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<undefined> {
     if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled.');
     if (!(await this.validate(observation))) throw new CuError('stale_snapshot', 'Page or elements changed; observe again.');
     const state = this.observations.get(observation)!;
@@ -257,6 +266,8 @@ export class BrowserBackend implements Backend {
     };
     try {
       check();
+      // 快照已复核且未被中止；之后的页面操作都可能产生输入或请求。
+      onDispatch?.();
       switch (action.type) {
         case 'navigate': {
           let url: URL;
@@ -353,12 +364,26 @@ export class BrowserBackend implements Backend {
     } catch (error) {
       if (signal.aborted) throw new CuError('cancelled', 'Browser action cancelled; its page was closed.');
       if (error instanceof CuError) throw error;
+      // 导航被 Chromium 以网络错误拒绝时结果是确定的：页面没有加载目标地址。只回传固定格式的错误名。
+      // ERR_ABORTED 例外：导航转成下载或被其他导航取代时也会报它，此时已有副作用，仍按结果不确定处理。
+      const network = action.type === 'navigate' && error instanceof Error ? /net::ERR_\w+/.exec(error.message)?.[0] : undefined;
+      if (network && network !== 'net::ERR_ABORTED')
+        throw new CuError('unavailable', `Navigation failed (${network}); observe the page before continuing.`);
       if (error instanceof errors.TimeoutError)
         throw new CuError('unknown_outcome', 'Browser action timed out after possible input; inspect the target before retrying.');
       throw new CuError('unknown_outcome', 'Browser action did not finish normally; observe before retrying.');
     } finally {
       signal.removeEventListener('abort', abort);
     }
+  }
+
+  /** 页面已没有会话：释放它的快照（截图对应的元素句柄与 DOM 监视器）。 */
+  async release(target: Target): Promise<void> {
+    const page = this.pages.get(target.id);
+    const snapshot = page ? this.snapshots.get(page) : undefined;
+    if (!page || !snapshot) return;
+    this.snapshots.delete(page);
+    await this.dispose(snapshot);
   }
 
   async cancel(): Promise<void> {
@@ -368,7 +393,7 @@ export class BrowserBackend implements Backend {
   async close(): Promise<void> {
     this.closed = true;
     this.closing ??= (async () => {
-      await this.release();
+      await this.releaseBrowser();
       // A launch may still be awaiting the OS when cancellation arrives. Its closed check
       // disposes anything it creates; wait for that cleanup before reporting stopped.
       await this.starting?.catch(() => {});
@@ -376,7 +401,7 @@ export class BrowserBackend implements Backend {
     await this.closing;
   }
 
-  private async release(): Promise<void> {
+  private async releaseBrowser(): Promise<void> {
     const browser = this.browser;
     this.context = undefined;
     this.browser = undefined;

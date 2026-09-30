@@ -9,6 +9,9 @@ namespace ComputerUse.WindowsHost;
 internal sealed class HostRuntime : IAsyncDisposable
 {
     private const int MaxLineBytes = 32 * 1024 * 1024;
+    private const int MaxPipeInstances = 64;
+    // CLI 连接后立即写入请求；迟迟不发请求的连接会占住管道实例，限时后关闭。
+    private static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(10);
     private readonly Action<JsonElement> _event;
     private readonly SemaphoreSlim _inputLock = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pending = new();
@@ -136,9 +139,19 @@ internal sealed class HostRuntime : IAsyncDisposable
         {
             while (!cancellation.IsCancellationRequested)
             {
-                var pipe = new NamedPipeServerStream(_pipeShortName, PipeDirection.InOut, 64,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-                    64 * 1024, 64 * 1024);
+                NamedPipeServerStream pipe;
+                try
+                {
+                    pipe = new NamedPipeServerStream(_pipeShortName, PipeDirection.InOut, MaxPipeInstances,
+                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+                        64 * 1024, 64 * 1024);
+                }
+                catch (IOException) when (!_connections.IsEmpty)
+                {
+                    // 所有实例都在处理请求时无法再建实例：这是暂时拥塞，等连接释放后重试，而不是停止服务。
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellation);
+                    continue;
+                }
                 try { await pipe.WaitForConnectionAsync(cancellation); }
                 catch { pipe.Dispose(); throw; }
                 var id = Guid.NewGuid();
@@ -161,7 +174,9 @@ internal sealed class HostRuntime : IAsyncDisposable
         var publicId = "";
         try
         {
-            using var document = JsonDocument.Parse(await new BoundedLineReader(pipe, MaxLineBytes).ReadAsync(cancellation)
+            using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            readTimeout.CancelAfter(RequestReadTimeout);
+            using var document = JsonDocument.Parse(await new BoundedLineReader(pipe, MaxLineBytes).ReadAsync(readTimeout.Token)
                 ?? throw new IOException("Empty pipe request."));
             var request = document.RootElement;
             if (request.GetProperty("version").GetInt32() != 1) throw new FormatException("Unsupported IPC version.");
@@ -196,7 +211,9 @@ internal sealed class HostRuntime : IAsyncDisposable
         }
         catch (Exception error) when (error is not OperationCanceledException || !cancellation.IsCancellationRequested)
         {
-            var code = error is FormatException or JsonException or KeyNotFoundException or InvalidOperationException ? "invalid_request"
+            // 外部 cancellation 未触发时的取消只可能来自请求读取超时：请求尚未解析，不会送达运行时。
+            var code = error is FormatException or JsonException or KeyNotFoundException or InvalidOperationException
+                or OperationCanceledException ? "invalid_request"
                 : act ? "unknown_outcome" : "unavailable";
             var message = code == "unknown_outcome"
                 ? "Connection failed after dispatch; query action_status with the original requestId before acting again."

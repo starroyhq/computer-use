@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { Client, LATEST_PROTOCOL_VERSION, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -155,6 +156,8 @@ describe('MCP Streamable HTTP', () => {
     expect(initialized.remoteAddress).toBe('127.0.0.1');
     expect(initialized.status).toBe(200);
     expect(JSON.parse(initialized.body).result.serverInfo.name).toBe('computer-use');
+    const { version } = JSON.parse(await readFile('package.json', 'utf8')) as { version: string };
+    expect(JSON.parse(initialized.body).result.serverInfo.version).toBe(version);
     expect(JSON.parse(initialized.body).result.instructions).toContain('fresh snapshotId');
     const listing = await rawHttp({ body: rpc('tools/list', {}, 2) });
     expect(listing.status).toBe(200);

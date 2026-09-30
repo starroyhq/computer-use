@@ -717,4 +717,48 @@ describe('Cua socket adapter', () => {
     data.bundle_identifier = 'com.apple.Terminal';
     expect((await backend.doctor()).available).toBe(false);
   });
+
+  it('reports dispatch right before the driver call and not for an action cancelled during warm-up', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, backend } = fixture();
+      const order: string[] = [];
+      client.callTool.mockImplementation(async tool => {
+        order.push(tool);
+        return success();
+      });
+      const dispatched = () => {
+        order.push('dispatch');
+      };
+      const signal = new AbortController().signal;
+      await backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal, dispatched);
+      expect(order).toEqual(['dispatch', 'hotkey']);
+      const observation = await backend.observe(target);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const controller = new AbortController();
+      client.getWindowState.mockImplementationOnce(async () => {
+        controller.abort();
+        return fixture().state;
+      });
+      const click = backend.act(observation, { type: 'click', point: { x: 25, y: 50 } }, 'background', controller.signal, dispatched);
+      await expect(click).rejects.toMatchObject({ code: 'cancelled' });
+      expect(order).toEqual(['dispatch', 'hotkey']);
+      const next = backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal);
+      await expect(next).resolves.toEqual({ effect: 'confirmed' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the cached observation and screenshot when the runtime releases a target', async () => {
+    const { client, backend } = fixture();
+    const observation = await backend.observe(target);
+    expect(await backend.validate(observation)).toBe(true);
+    await backend.release(target);
+    expect(await backend.validate(observation)).toBe(false);
+    await expect(
+      backend.act(observation, { type: 'key', keys: ['tab'] }, 'background', new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'stale_snapshot' });
+    expect(client.callTool).not.toHaveBeenCalled();
+  });
 });

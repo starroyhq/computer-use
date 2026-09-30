@@ -21,7 +21,7 @@ Each accepted action consumes its snapshot. Observe again before the next action
 
 An `executed` result only describes the input operation. Most desktop actions return `effect: "unconfirmed"`: the input was dispatched but the driver could not prove its effect, so observe and continue. Claim the task succeeded only after checking the intended UI state or output artifact. `verified` means the supplied observable condition passed, not that an entire creative task was judged correct.
 
-State `unknown` is different: delivery itself is uncertain. On connection loss or `unknown`, query `action_status` with the original request UUID. Do not repeat uncertain actions with a new UUID. A stale snapshot requires a new observation. An unknown outcome or interrupted gesture may require the user to restart the local app, followed by inspection of the actual result.
+State `unknown` is different: delivery itself is uncertain. On connection loss or `unknown`, query `action_status` with the original request UUID. Do not repeat uncertain actions with a new UUID. A stale snapshot requires a new observation. An unknown desktop outcome or interrupted desktop gesture stops the runtime until the user restarts the local app; inspect the actual result afterwards. A browser `unknown` does not stop the runtime, but still observe before acting again. Do not choose a very small `timeoutMs`: if it expires before input is dispatched the action fails with `timeout` and nothing is sent.
 
 ## Execution modes and limits
 

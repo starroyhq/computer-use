@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { z } from 'zod';
 import { errorResult, type RpcService } from './contracts.js';
 import { descriptions, schemas, type Method } from './schema.js';
+import { VERSION } from './version.js';
 
 const imageSchema = z.object({ mimeType: z.enum(['image/png', 'image/jpeg']), data: z.string() });
 const instructions =
@@ -30,7 +31,7 @@ export function mcpResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }, ...images], structuredContent };
 }
 export function createMcp(service: RpcService, token: string): McpServer {
-  const server = new McpServer({ name: 'computer-use', version: '0.2.0' }, { instructions });
+  const server = new McpServer({ name: 'computer-use', version: VERSION }, { instructions });
   for (const method of Object.keys(schemas) as Method[]) {
     server.registerTool(
       method,

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrowserBackend } from './browser.js';
-import type { Action, BackendObservation, Target } from '../contracts.js';
+import type { Action, BackendObservation, HostEvent, Target } from '../contracts.js';
 
 const browserOptions = { headless: true };
 const grant = { appIds: [], browser: true };
@@ -71,6 +71,15 @@ afterEach(async () => {
 const act = (observation: BackendObservation, action: Action, signal = new AbortController().signal) =>
   backend.act(observation, action, 'background', signal);
 const element = (observation: BackendObservation, label: string) => observation.elements.find(item => item.label === label)!.id;
+// A loopback port that was just released: navigation to it is refused.
+async function closedPortUrl(): Promise<string> {
+  const probe = createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const address = probe.address();
+  if (!address || typeof address === 'string') throw new Error('Missing probe port');
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  return `http://127.0.0.1:${address.port}/`;
+}
 
 // These cases only launch a dedicated headless browser and a loopback fixture server.
 describe('isolated Chromium backend', () => {
@@ -226,5 +235,51 @@ describe('isolated Chromium backend', () => {
     const fresh = await backend.targets(grant);
     expect(fresh).toHaveLength(1);
     expect(fresh[0]?.id).not.toBe(target.id);
+  });
+
+  it('marks dispatch only for a current snapshot and reports a refused navigation as a definite failure', async () => {
+    const onDispatch = vi.fn();
+    const signal = new AbortController().signal;
+    const stale = await backend.observe(target);
+    await act(stale, { type: 'click', elementId: element(stale, 'Replace') });
+    const click: Action = { type: 'click', elementId: element(stale, 'Save') };
+    await expect(backend.act(stale, click, 'background', signal, onDispatch)).rejects.toMatchObject({ code: 'stale_snapshot' });
+    expect(onDispatch).not.toHaveBeenCalled();
+    const navigation: Action = { type: 'navigate', url: await closedPortUrl() };
+    const refused = backend.act(await backend.observe(target), navigation, 'background', signal, onDispatch);
+    await expect(refused).rejects.toMatchObject({ code: 'unavailable', message: expect.stringContaining('net::ERR_') });
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('records a refused navigation as failed without stopping the runtime', async () => {
+    const events: HostEvent[] = [];
+    const runtime = new Runtime({ dataDir: join(directory, 'runtime'), backends: [backend], emit: event => events.push(event) });
+    await runtime.start();
+    const credential = randomUUID();
+    runtime.clients.clients.set('browser-test-client', {
+      id: 'browser-test-client',
+      name: 'Browser test',
+      tokenHash: hash(credential),
+      grant,
+    });
+    try {
+      const { sessionId } = (await runtime.call(credential, 'session_open', { targetId: target.id })) as { sessionId: string };
+      const { snapshotId } = (await runtime.call(credential, 'observe', { sessionId })) as { snapshotId: string };
+      const action = { type: 'navigate', url: await closedPortUrl() };
+      const result = await runtime.call(credential, 'act', { sessionId, snapshotId, requestId: randomUUID(), action });
+      expect(result).toMatchObject({ state: 'failed', error: { code: 'unavailable' } });
+      expect(events.some(event => event.event === 'fatal')).toBe(false);
+      expect(await runtime.call(credential, 'doctor', {})).toMatchObject({ paused: false, stopped: false });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('releases the page snapshot once no session uses the page', async () => {
+    const observation = await backend.observe(target);
+    expect(await backend.validate(observation)).toBe(true);
+    await backend.release(target);
+    expect(await backend.validate(observation)).toBe(false);
+    await expect(act(await backend.observe(target), { type: 'navigate', url })).resolves.toBeUndefined();
   });
 });

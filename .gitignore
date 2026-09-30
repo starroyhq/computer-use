@@ -19,7 +19,10 @@ credentials/
 *.key
 *.pem
 *.p12
+*.p8
 *.pfx
+.pnpm-store/
+.idea/
 id_rsa
 id_ecdsa
 id_ed25519

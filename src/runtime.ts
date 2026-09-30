@@ -25,11 +25,19 @@ type Session = {
   mode: Mode;
   exclusive: boolean;
   expiresAt: number;
-  foregroundApproved: boolean;
 };
 type Snapshot = { id: string; sessionId: string; createdAt: number; observation: BackendObservation };
 type PendingPair = { client: Client; resolve: (allow: boolean) => void };
-type Work = { controller: AbortController; sessionId: string; started: boolean; promise: Promise<unknown>; admitted: Promise<void> };
+type Work = {
+  controller: AbortController;
+  sessionId: string;
+  // 输入可能已经送达：此时中断无法证明手势已停止。
+  started: boolean;
+  // 后端声明中断不会在其外部留下进行中的输入，不确定结果无需停止整个运行时。
+  contained: boolean;
+  promise: Promise<unknown>;
+  admitted: Promise<void>;
+};
 const SESSION_TTL = 120_000;
 const SNAPSHOT_TTL = 30_000;
 // 传输层约 65 秒超时：排队准入 15 秒 + 校验 10 秒 + 派发与验证共用 timeoutMs（最多 30 秒），合计不超过 55 秒。
@@ -190,9 +198,16 @@ export class Runtime implements RpcService {
     for (const [requestId, work] of this.work)
       if (work.sessionId === id) {
         work.controller.abort();
-        if (work.started)
+        if (work.started && !work.contained)
           this.haltUncertainInput(`Active action ${requestId} was interrupted; restart the runtime and inspect the target.`);
       }
+    this.releaseTarget(session.target);
+  }
+  // 同一目标不再有任何会话时，让后端释放它缓存的截图和元素句柄。
+  private releaseTarget(target: Target): void {
+    if ([...this.sessions.values()].some(other => other.target.id === target.id)) return;
+    const backend = this.options.backends.find(b => b.kind === target.kind);
+    void backend?.release?.(target).catch(() => {});
   }
   async control(command: HostCommand): Promise<void> {
     switch (command.command) {
@@ -322,22 +337,35 @@ export class Runtime implements RpcService {
       mode: p.mode,
       exclusive: p.exclusive,
       expiresAt: this.now() + SESSION_TTL,
-      foregroundApproved: p.mode === 'foreground',
     };
-    this.checkLease(session);
-    if (session.exclusive && this.work.size > 0)
-      throw new CuError('busy', 'Wait for pending actions before acquiring an exclusive session.');
+    const admit = () => {
+      this.checkLease(session);
+      if (session.exclusive && this.work.size > 0)
+        throw new CuError('busy', 'Wait for pending actions before acquiring an exclusive session.');
+    };
+    admit();
     await this.acquireControl(session.target);
-    if (this.stopped) {
+    // 等待宿主回执期间，可能有其他会话登记、客户端被撤销或运行时停止；登记前同步复核。
+    try {
+      this.checkRunning();
+      if (!this.clients.clients.has(client.id)) throw new CuError('unauthorized', 'Client revoked.');
+      admit();
+    } catch (error) {
       this.releaseControl(session.target);
-      throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
+      throw error;
     }
     this.sessions.set(session.id, session);
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }
   private async observe(session: Session): Promise<unknown> {
     const observation = await bounded(this.backend(session.target.kind).observe(session.target), 30_000);
-    return this.publishObservation(session, observation);
+    try {
+      return this.publishObservation(session, observation);
+    } catch (error) {
+      // 会话在观察期间被关闭时，后端刚缓存的截图不会再有人使用。
+      if (!this.sessions.has(session.id)) this.releaseTarget(session.target);
+      throw error;
+    }
   }
   private publishObservation(session: Session, observation: BackendObservation): unknown {
     const client = this.clients.clients.get(session.clientId);
@@ -374,7 +402,12 @@ export class Runtime implements RpcService {
         // A changing page is an expected waiting state, not a reason to retry input.
         if (!(error instanceof CuError) || error.code !== 'stale_snapshot') throw error;
       }
-      await delay(Math.min(150, Math.max(1, deadline - this.now())), undefined, signal ? { signal } : {});
+      try {
+        await delay(Math.min(150, Math.max(1, deadline - this.now())), undefined, signal ? { signal } : {});
+      } catch {
+        // 只有 signal 中止会让 delay 拒绝；统一报告为取消，而不是内部错误。
+        throw new CuError('cancelled', 'Wait cancelled.');
+      }
     } while (this.now() < deadline);
     throw new CuError('timeout', 'The requested observable condition was not satisfied.');
   }
@@ -414,7 +447,14 @@ export class Runtime implements RpcService {
     // Consume immediately: two queued actions cannot both rely on one pre-action snapshot.
     this.snapshots.delete(p.snapshotId);
     const controller = new AbortController();
-    const work: Work = { controller, sessionId: session.id, started: false, promise: Promise.resolve(), admitted: Promise.resolve() };
+    const work: Work = {
+      controller,
+      sessionId: session.id,
+      started: false,
+      contained: this.options.backends.find(b => b.kind === session.target.kind)?.interruptionContained === true,
+      promise: Promise.resolve(),
+      admitted: Promise.resolve(),
+    };
     this.work.set(record.requestId, work);
     work.admitted = this.persistActions();
     // Attach immediately: queued work may be waiting behind a running gesture.
@@ -431,15 +471,10 @@ export class Runtime implements RpcService {
         if (!this.clients.clients.has(client.id)) throw new CuError('unauthorized', 'Client revoked.');
         this.getSession(client, session.id);
         this.checkLease(session);
-        if (session.mode === 'foreground' && !session.foregroundApproved)
-          throw new CuError('permission_denied', 'Foreground approval required.');
+        const backend = this.backend(session.target.kind);
         if (
           this.now() - snapshot.createdAt > SNAPSHOT_TTL ||
-          !(await bounded(
-            this.backend(session.target.kind).validate(snapshot.observation),
-            Math.min(VALIDATE_MS, p.timeoutMs),
-            controller.signal,
-          ))
+          !(await bounded(backend.validate(snapshot.observation), Math.min(VALIDATE_MS, p.timeoutMs), controller.signal))
         )
           throw new CuError('stale_snapshot', 'Target changed; observe it again.');
         record.state = 'running';
@@ -450,18 +485,27 @@ export class Runtime implements RpcService {
         if (!this.clients.clients.has(client.id)) throw new CuError('unauthorized', 'Client revoked.');
         this.getSession(client, session.id);
         this.checkLease(session);
-        work.started = true;
+        // 能报告派发时刻的后端，要到真正发出输入时才进入“可能已送达”；其余后端从调用 act 起就按已派发处理。
+        work.started = backend.reportsDispatch !== true;
         const deadline = this.now() + p.timeoutMs;
+        let timedOut = false;
+        const interruption = (): CuError => {
+          if (work.started) return new CuError('unknown_outcome', 'Active action interrupted; inspect the target before retrying.');
+          if (timedOut) return new CuError('timeout', 'Action timed out before any input was dispatched; nothing was sent.');
+          return new CuError('cancelled', 'Action cancelled before any input was dispatched.');
+        };
         const aborted = new Promise<never>((_, reject) => {
-          controller.signal.addEventListener(
-            'abort',
-            () => reject(new CuError('unknown_outcome', 'Active action interrupted; inspect the target before retrying.')),
-            { once: true },
-          );
-          timer = setTimeout(() => controller.abort(), p.timeoutMs);
+          controller.signal.addEventListener('abort', () => reject(interruption()), { once: true });
+          timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, p.timeoutMs);
         });
+        const dispatched = () => {
+          work.started = true;
+        };
         const execution = await Promise.race([
-          this.backend(session.target.kind).act(snapshot.observation, action, session.mode, controller.signal),
+          backend.act(snapshot.observation, action, session.mode, controller.signal, dispatched),
           aborted,
         ]);
         clearTimeout(timer);
@@ -487,7 +531,8 @@ export class Runtime implements RpcService {
           : record.error.code === 'cancelled'
             ? 'cancelled'
             : 'failed';
-        if (work.started && record.state === 'unknown')
+        // 原生手势可能在取消后继续执行，必须停机；隔离后端只记录 unknown，由 Agent 重新观察。
+        if (work.started && record.state === 'unknown' && !work.contained)
           this.haltUncertainInput(
             `Active action ${record.requestId} ended with ${record.error.code}; restart the runtime and inspect the target.`,
           );
@@ -580,7 +625,7 @@ export class Runtime implements RpcService {
         if (name === 'cancel') {
           const work = this.work.get(p.requestId);
           work?.controller.abort();
-          if (work?.started)
+          if (work?.started && !work.contained)
             this.haltUncertainInput(`Active action ${p.requestId} was cancelled; restart the runtime and inspect the target.`);
           if (work) await work.promise;
         }

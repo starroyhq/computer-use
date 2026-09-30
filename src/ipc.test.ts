@@ -146,4 +146,10 @@ describe.skipIf(process.platform === 'win32')('private IPC transport', () => {
     mode = 'mismatch';
     await expect(client.call(token, 'doctor', {})).rejects.toMatchObject({ code: 'unavailable' });
   });
+
+  it('reports an action that never reached the runtime as unavailable instead of an unknown outcome', async () => {
+    const client = new IpcClient(join(directory, 'missing.sock'));
+    await expect(client.call(token, 'act', {})).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(client.call(token, 'doctor', {})).rejects.toMatchObject({ code: 'unavailable' });
+  });
 });

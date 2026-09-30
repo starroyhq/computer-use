@@ -20,7 +20,7 @@ node scripts/package-app.mjs --verify-only
 
 若本机长期使用同一身份，可写入被 git 忽略的 `.env.local`（脚本只读取这一项）：`COMPUTER_USE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"`。之后 `pnpm package:app` 默认使用该身份；Team ID 固定后，重新打包不再使辅助功能和屏幕录制授权失效。命令行 `--identity` 优先。
 
-没有自动公证、上传或发布。生产签名路径尚需具备实际 Developer ID 的环境验证；开发产物不代表可供其他用户直接通过 Gatekeeper 的发行包。Node 使用上游 [24.21.0 entitlements](https://github.com/nodejs/node/blob/v24.21.0/tools/osx-entitlements.plist) 中的 JIT 和可执行内存权限；不启用调试器、DYLD 环境变量或跳过库签名校验。嵌入式 `.node`、`.dylib` 和 executable 使用同一签名身份。
+本地脚本本身不做公证、上传或发布；这些步骤由 `.github/workflows/release.yml` 在 CI 中完成（见 [CI 说明](../docs/CI.md)），实际 release 运行成功前不应视为已公证。开发产物不代表可供其他用户直接通过 Gatekeeper 的发行包。Node 使用上游 [24.21.0 entitlements](https://github.com/nodejs/node/blob/v24.21.0/tools/osx-entitlements.plist) 中的 JIT 和可执行内存权限；不启用调试器、DYLD 环境变量或跳过库签名校验。嵌入式 `.node`、`.dylib` 和 executable 使用同一签名身份。
 
 验证包含 App 结构、全部包内符号链接、arm64 架构、每个 Mach-O 与 App 签名、内置 Node/驱动版本、CLI `--help` 及原生 SDK import。不会启动 App、申请 TCC 权限或操作其他软件。Chromium 不内置，使用者通过 `computer-use browser install` 显式下载匹配浏览器。CLI 包装器可经 `~/.local/bin` 的符号链接运行；创建链接和首次授权由 App 的显式用户操作完成。
 

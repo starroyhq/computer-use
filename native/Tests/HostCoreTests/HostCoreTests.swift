@@ -159,4 +159,49 @@ final class HostCoreTests: XCTestCase {
         XCTAssertFalse(try LocalSocket.acceptsConnections(path: "/tmp/cu-missing-\(UUID().uuidString)"))
         XCTAssertThrowsError(try LocalSocket.acceptsConnections(path: String(repeating: "x", count: 200)))
     }
+
+    func testDecisionFinishedIdentifiesTheRequestToWithdraw() throws {
+        let finished = try HostEvent.parse(Data(#"{"event":"decision_finished","requestId":"agent-1","approved":false}"#.utf8))
+        XCTAssertEqual(finished.requestId, "agent-1")
+        XCTAssertEqual(finished.approved, false)
+        for invalid in [
+            #"{"event":"decision_finished","approved":true}"#,
+            #"{"event":"decision_finished","requestId":"","approved":true}"#,
+            #"{"event":"decision_finished","requestId":"agent-1"}"#,
+        ] {
+            XCTAssertThrowsError(try HostEvent.parse(Data(invalid.utf8)))
+        }
+    }
+
+    func testApprovalQueueWithdrawsQueuedAndShownRequestsOnceTheRuntimeFinishesThem() throws {
+        func request(_ id: String) throws -> HostEvent {
+            try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"\#(id)","name":"Agent","appIds":[],"browser":true}"#.utf8))
+        }
+        var queue = ApprovalQueue()
+        for id in ["shown", "queued", "later"] { try queue.enqueue(request(id)) }
+        let shown = queue.activateNext()
+        XCTAssertEqual(shown?.clientId, "shown")
+        XCTAssertEqual(queue.activeID, "shown")
+
+        let droppedQueued = queue.finish("queued")
+        XCTAssertTrue(droppedQueued)
+        XCTAssertEqual(queue.pending.map(\.clientId), ["later"])
+        XCTAssertFalse(queue.activeWithdrawn)
+
+        let withdrewShown = queue.finish("shown")
+        XCTAssertTrue(withdrewShown)
+        XCTAssertTrue(queue.activeWithdrawn)
+        queue.deactivate()
+        let late = queue.finish("shown")
+        XCTAssertFalse(late)
+
+        let next = queue.activateNext()
+        XCTAssertEqual(next?.clientId, "later")
+        XCTAssertFalse(queue.activeWithdrawn)
+        queue.deactivate()
+        try queue.enqueue(request("stopped"))
+        queue.removeAll()
+        let none = queue.activateNext()
+        XCTAssertNil(none)
+    }
 }

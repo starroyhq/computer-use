@@ -25,9 +25,8 @@ if (
 ) {
   throw new Error('Launch this worker from the Computer Use host.');
 }
+// 两端宿主都依据 decision_finished 撤回已过期或已处理的审批弹窗。
 const emit = (event: HostEvent): void => {
-  // Decision lifecycle notifications are currently consumed by the Windows host.
-  if (event.event === 'decision_finished' && !values.windows) return;
   process.stdout.write(JSON.stringify(event) + '\n');
 };
 const desktop = values.windows

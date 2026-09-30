@@ -22,7 +22,9 @@ final class HostApplication: NSObject, NSApplicationDelegate {
     private var stopping = false
     private var httpEnabled = false
     private var alertActive = false
-    private var pendingAlerts: [HostEvent] = []
+    // 审批请求队列；运行时回报请求已结束时，据此撤回排队中或正在显示的弹窗。
+    private var approvals = ApprovalQueue()
+    private var activeAlert: NSAlert?
     private var statusWindow: NSWindow?
     private var statusDetails: NSTextField?
     private let readerQueue = DispatchQueue(label: "com.starroy.computeruse.events")
@@ -30,9 +32,7 @@ final class HostApplication: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        let resources = ProcessInfo.processInfo.environment["CU_RESOURCES_DIR"].map { URL(fileURLWithPath: $0) }
-            ?? Bundle.main.resourceURL!
-        paths = HostPaths(resources: resources)
+        paths = HostPaths(resources: Self.resourceDirectory())
         buildMenu()
         do {
             lock = try HostLock(directory: paths.data)
@@ -43,6 +43,17 @@ final class HostApplication: NSObject, NSApplicationDelegate {
             showMessage("Computer Use 无法启动", error.localizedDescription)
             NSApp.terminate(nil)
         }
+    }
+
+    // 发行版只使用 App 自带的资源：同一用户的其他进程可以用 launchctl setenv 注入环境变量，
+    // 若仍接受覆盖，持有辅助功能和屏幕录制权限的宿主就会启动任意程序。
+    private static func resourceDirectory() -> URL {
+        #if CU_RESOURCES_OVERRIDE
+        if let override = ProcessInfo.processInfo.environment["CU_RESOURCES_DIR"] {
+            return URL(fileURLWithPath: override)
+        }
+        #endif
+        return Bundle.main.resourceURL!
     }
 
     private func buildMenu() {
@@ -209,8 +220,15 @@ final class HostApplication: NSObject, NSApplicationDelegate {
                 entry.representedObject = client.id
             }
         case "pair_request", "foreground_request":
-            pendingAlerts.append(event)
+            approvals.enqueue(event)
             presentNextAlert()
+        case "decision_finished":
+            // 请求已结束（批准、拒绝或 60 秒过期）：排队中的弹窗不再显示；正在显示的直接撤回，且不再发送决定。
+            guard let id = event.requestId else { return }
+            let showing = approvals.activeID == id
+            let withdrawn = approvals.finish(id)
+            if showing { abortActiveAlert() }
+            if withdrawn && event.approved != true { updateStatus("审批请求已过期或失效；未授权") }
         case "control_begin":
             guard let pid = event.pid else { return }
             if controlLease.begin(pid) { registerComputerControl(Int32(pid), true) }
@@ -223,31 +241,49 @@ final class HostApplication: NSObject, NSApplicationDelegate {
     }
 
     private func presentNextAlert() {
-        guard !alertActive, !pendingAlerts.isEmpty, !stopping else { return }
+        // 取出即登记为当前请求：弹窗真正显示前收到结束通知也能撤回。
+        guard !alertActive, !stopping, let event = approvals.activateNext() else { return }
         alertActive = true
-        let event = pendingAlerts.removeFirst()
         let token = generation
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            defer { self.alertActive = false; self.presentNextAlert() }
-            guard self.generation == token, !self.stopping else { return }
-            let alert = NSAlert()
-            if event.event == "pair_request" {
-                alert.messageText = "允许客户端操作这些应用？"
-                let apps = (event.appIds ?? []).joined(separator: "\n")
-                alert.informativeText = "客户端：\(event.name ?? "")\n标识：\(event.clientId ?? "")\n应用标识：\n\(apps.isEmpty ? "无" : apps)\n独立受控浏览器：\(event.browser == true ? "允许" : "不允许")\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启 App 也不再询问；在菜单中撤销该客户端即可收回全部权限。"
-            } else {
-                alert.messageText = "允许当前会话使用前台操作？"
-                alert.informativeText = "客户端：\(event.clientName ?? "")\n目标：\(event.targetTitle ?? "")\n会话：\(event.sessionId ?? "")\n\n此操作可能切换焦点并移动鼠标。授权仅适用于此会话及目标应用。"
-            }
-            alert.addButton(withTitle: "拒绝")
-            alert.addButton(withTitle: "允许")
-            NSApp.activate(ignoringOtherApps: true)
-            let allowed = alert.runModal() == .alertSecondButtonReturn
-            guard self.generation == token, !self.stopping else { return }
-            let prefix = event.event == "pair_request" ? "pair" : "foreground"
-            self.send("\(prefix)_\(allowed ? "allow" : "deny")", clientID: event.clientId, sessionID: event.sessionId)
+        // runModal 不能放进 GCD 主队列块：主队列是串行的，弹窗期间撤回通知、fatal 和子进程退出
+        // 都会排在这个块后面，直到用户关掉弹窗。改由 run loop 计时器回调显示，模态期间主队列照常执行。
+        let timer = Timer(timeInterval: 0, repeats: false) { [weak self] _ in self?.showApproval(event, token: token) }
+        RunLoop.main.add(timer, forMode: .default)
+        RunLoop.main.add(timer, forMode: .modalPanel)
+    }
+
+    private func showApproval(_ event: HostEvent, token: UUID) {
+        defer {
+            alertActive = false
+            activeAlert = nil
+            approvals.deactivate()
+            presentNextAlert()
         }
+        guard generation == token, !stopping, !approvals.activeWithdrawn else { return }
+        let alert = NSAlert()
+        if event.event == "pair_request" {
+            alert.messageText = "允许客户端操作这些应用？"
+            let apps = (event.appIds ?? []).joined(separator: "\n")
+            alert.informativeText = "客户端：\(event.name ?? "")\n标识：\(event.clientId ?? "")\n应用标识：\n\(apps.isEmpty ? "无" : apps)\n独立受控浏览器：\(event.browser == true ? "允许" : "不允许")\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启 App 也不再询问；在菜单中撤销该客户端即可收回全部权限。"
+        } else {
+            alert.messageText = "允许当前会话使用前台操作？"
+            alert.informativeText = "客户端：\(event.clientName ?? "")\n目标：\(event.targetTitle ?? "")\n会话：\(event.sessionId ?? "")\n\n此操作可能切换焦点并移动鼠标。授权仅适用于此会话及目标应用。"
+        }
+        alert.addButton(withTitle: "拒绝")
+        alert.addButton(withTitle: "允许")
+        activeAlert = alert
+        NSApp.activate(ignoringOtherApps: true)
+        let allowed = alert.runModal() == .alertSecondButtonReturn
+        // 弹窗被撤回（请求已过期或已处理）时，运行时不再接受决定。
+        guard generation == token, !stopping, !approvals.activeWithdrawn else { return }
+        let prefix = event.event == "pair_request" ? "pair" : "foreground"
+        send("\(prefix)_\(allowed ? "allow" : "deny")", clientID: event.clientId, sessionID: event.sessionId)
+    }
+
+    // 只结束审批弹窗自己的模态循环，不影响同时打开的其他提示框；
+    // 弹窗尚未进入模态循环时，由 approvals.activeWithdrawn 或 generation 阻止它显示。
+    private func abortActiveAlert() {
+        if let alert = activeAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
     }
 
     private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil) {
@@ -274,8 +310,8 @@ final class HostApplication: NSObject, NSApplicationDelegate {
         stopping = true; running = false
         for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
         startupTimer?.invalidate(); startupTimer = nil
-        pendingAlerts.removeAll()
-        if alertActive { NSApp.abortModal() }
+        approvals.removeAll()
+        abortActiveAlert()
         updateStatus(message)
         send("stop")
         generation = UUID()
@@ -428,6 +464,9 @@ private let registerComputerControl: (Int32, Bool) -> Void = {
     return { pid, enabled in register(pid, enabled ? 1 : 0) }
 }()
 
+// 子进程意外退出后，向它的管道写入会产生 SIGPIPE 并直接终止宿主。忽略该信号后写入返回 EPIPE，
+// 由 send 的错误处理进入停服流程。
+signal(SIGPIPE, SIG_IGN)
 let application = NSApplication.shared
 let delegate = HostApplication()
 application.delegate = delegate

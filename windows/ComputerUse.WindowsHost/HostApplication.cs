@@ -72,7 +72,15 @@ internal sealed class HostApplication : ApplicationContext
             else
             {
                 _exiting = true;
-                _runtime?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                // 注销或关机时只能在 UI 线程同步等待。把释放放到线程池执行并限时，
+                // 否则 HostRuntime 的 await 需要回到这个被阻塞的 UI 线程，会互相等待。
+                var runtime = _runtime;
+                _runtime = null;
+                if (runtime is not null)
+                {
+                    try { Task.Run(() => runtime.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(10)); }
+                    catch { }
+                }
                 _tray.Visible = false;
             }
         };
@@ -214,9 +222,11 @@ internal sealed class HostApplication : ApplicationContext
         string explanation;
         if (isPair)
         {
-            var apps = request.TryGetProperty("appIds", out var appIds) && appIds.ValueKind == JsonValueKind.Array
-                ? string.Join("\n", appIds.EnumerateArray().Take(20).Select(value => value.GetString())) : "";
-            explanation = $"客户端：{String(request, "name")}\n标识：{identifier}\n应用路径：\n{(apps.Length == 0 ? "无" : apps)}\n独立浏览器：{(request.TryGetProperty("browser", out var browser) && browser.ValueKind == JsonValueKind.True ? "允许" : "不允许")}\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启托盘程序也不再询问；在托盘菜单中撤销该客户端即可收回全部权限。";
+            // 批准即授予全部路径，因此必须全部列出（文本框可滚动），不能截断。
+            var paths = request.TryGetProperty("appIds", out var appIds) && appIds.ValueKind == JsonValueKind.Array
+                ? appIds.EnumerateArray().Select(value => value.GetString() ?? "").ToArray() : Array.Empty<string>();
+            var apps = string.Join("\n", paths);
+            explanation = $"客户端：{String(request, "name")}\n标识：{identifier}\n应用路径（共 {paths.Length} 个）：\n{(apps.Length == 0 ? "无" : apps)}\n独立浏览器：{(request.TryGetProperty("browser", out var browser) && browser.ValueKind == JsonValueKind.True ? "允许" : "不允许")}\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启托盘程序也不再询问；在托盘菜单中撤销该客户端即可收回全部权限。";
         }
         else explanation = $"客户端：{String(request, "clientName")}\n目标：{String(request, "targetTitle")}\n会话：{identifier}\n\n此操作可能切换焦点并移动鼠标。授权仅适用于当前会话和目标。";
         var dialog = new ApprovalDialog(identifier, isPair ? "允许客户端操作这些应用？" : "允许当前会话使用前台操作？", explanation);

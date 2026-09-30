@@ -11,6 +11,7 @@ import { CuError, errorResult } from './contracts.js';
 import { credentialDir, dataDir, defaultIpcPath } from './paths.js';
 import { atomicJson, privateDirectory, readJson } from './storage.js';
 import { schemas, type Method } from './schema.js';
+import { VERSION } from './version.js';
 
 const SCREENSHOT_RETENTION_MS = 24 * 60 * 60_000;
 let pruned: Promise<void> | undefined;
@@ -29,7 +30,7 @@ async function pruneScreenshots(directory: string): Promise<void> {
   );
 }
 
-const help = `Computer Use 0.2.0 — local desktop runtime
+const help = `Computer Use ${VERSION} — local desktop runtime
 
 computer-use pair --name "My Agent" --app com.apple.TextEdit [--browser]
 computer-use <method> --json '<JSON>' [--profile default]
@@ -51,23 +52,32 @@ CLI operation does not depend on MCP. Images are written to private files.
 `;
 const credentialSchema = z.object({ clientId: z.string(), token: z.string().min(20) });
 const pairResultSchema = credentialSchema;
-const { values, positionals } = parseArgs({
-  allowPositionals: true,
-  options: {
-    help: { type: 'boolean', short: 'h' },
-    socket: { type: 'string' },
-    profile: { type: 'string', default: 'default' },
-    name: { type: 'string' },
-    app: { type: 'string', multiple: true },
-    browser: { type: 'boolean' },
-    json: { type: 'string' },
-    input: { type: 'string' },
-    out: { type: 'string' },
-  },
-});
+function commandLine() {
+  try {
+    return parseArgs({
+      allowPositionals: true,
+      options: {
+        help: { type: 'boolean', short: 'h' },
+        socket: { type: 'string' },
+        profile: { type: 'string', default: 'default' },
+        name: { type: 'string' },
+        app: { type: 'string', multiple: true },
+        browser: { type: 'boolean' },
+        json: { type: 'string' },
+        input: { type: 'string' },
+        out: { type: 'string' },
+      },
+    });
+  } catch (error) {
+    // 参数错误也走统一的 JSON 错误输出，而不是打印 Node 堆栈。
+    const detail = error instanceof Error ? `${error.message} ` : '';
+    throw new CuError('invalid_request', `${detail}Use --help.`);
+  }
+}
 let submittedRequestId: string | undefined;
 
 async function main(): Promise<void> {
+  const { values, positionals } = commandLine();
   if (values.help || positionals.length === 0) {
     process.stdout.write(help);
     return;
@@ -101,10 +111,12 @@ async function main(): Promise<void> {
     );
     return;
   }
-  const client = new IpcClient(values.socket ?? (await defaultIpcPath()));
+  // 只在需要运行时的命令里解析 IPC 路径：Windows 上生成配置不应要求托盘程序正在运行。
+  const connect = async () => new IpcClient(values.socket ?? (await defaultIpcPath()));
   if (command === 'pair') {
     if ((await readJson(credentialsPath)) !== undefined)
       throw new CuError('invalid_request', 'Profile already exists; choose another profile or remove it explicitly.');
+    const client = await connect();
     const result = pairResultSchema.parse(
       await client.call(undefined, 'pair', { name: values.name ?? profile, appIds: values.app ?? [], browser: values.browser ?? false }),
     );
@@ -117,7 +129,7 @@ async function main(): Promise<void> {
   if (!credential.success) throw new CuError('unauthorized', 'No valid credential profile. Run computer-use pair first.');
   if (command === 'mcp' && positionals[1] === 'stdio') {
     const { runStdio } = await import('./mcp.js');
-    await runStdio(client, credential.data.token);
+    await runStdio(await connect(), credential.data.token);
     return;
   }
   if (command === 'config') {
@@ -179,7 +191,7 @@ async function main(): Promise<void> {
     object.requestId ??= randomUUID();
     if (typeof object.requestId === 'string') submittedRequestId = object.requestId;
   }
-  const result = await client.call(credential.data.token, method, params);
+  const result = await (await connect()).call(credential.data.token, method, params);
   async function materialize(input: unknown): Promise<unknown> {
     if (Array.isArray(input)) return Promise.all(input.map(materialize));
     if (!input || typeof input !== 'object') return input;

@@ -217,4 +217,14 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     expect(repeated.stderr.includes(credential.token)).toBe(false);
     expect((await readFile(configPath, 'utf8')) === original).toBe(true);
   }, 30_000);
+
+  it('reports unknown options as a JSON error and shows the package version in help', async () => {
+    const unknown = await cli(['doctor', '--sessionId', 'x']);
+    expect(unknown.code).toBe(1);
+    expect(JSON.parse(unknown.stderr)).toEqual({ error: { code: 'invalid_request', message: expect.stringContaining('--sessionId') } });
+    const { version } = JSON.parse(await readFile('package.json', 'utf8')) as { version: string };
+    const help = await cli(['--help']);
+    expect(help.code).toBe(0);
+    expect(help.stdout.startsWith(`Computer Use ${version} `)).toBe(true);
+  });
 });

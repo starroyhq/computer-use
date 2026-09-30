@@ -139,7 +139,7 @@ describe('Runtime authorization and execution', () => {
     });
     expect(first.mode).toBe('foreground');
     await call(client.token, 'act', await actionInput(client.token, first.sessionId));
-    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'foreground', expect.anything());
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'foreground', expect.anything(), expect.any(Function));
     await runtime.close();
     events = [];
     runtime = new Runtime({
@@ -264,7 +264,7 @@ describe('Runtime authorization and execution', () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
     await call(token, 'act', await actionInput(token, sessionId));
-    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything());
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function));
   });
 
   it('consumes snapshots after one action, replaces observations, and hides backend state', async () => {
@@ -736,5 +736,140 @@ describe('Runtime authorization and execution', () => {
         verify: { type: 'title', includes: 'Not present' },
       }),
     ).toMatchObject({ state: 'executed', error: { code: 'timeout' } });
+  });
+
+  it('fails an action that times out before dispatching input without halting the runtime', async () => {
+    Object.assign(backend, { reportsDispatch: true });
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    vi.mocked(backend.act).mockImplementationOnce(() => new Promise(() => {}));
+    expect(await call(token, 'act', { ...(await actionInput(token, sessionId)), timeoutMs: 100 })).toMatchObject({
+      state: 'failed',
+      error: { code: 'timeout' },
+    });
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+    expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({ state: 'executed' });
+  });
+
+  it('cancels an action before it dispatches input without halting the runtime', async () => {
+    Object.assign(backend, { reportsDispatch: true });
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    vi.mocked(backend.act).mockImplementationOnce(() => new Promise(() => {}));
+    const request = await actionInput(token, sessionId);
+    const pending = call(token, 'act', request);
+    await vi.waitFor(() => expect(backend.act).toHaveBeenCalledTimes(1));
+    expect(await call(token, 'cancel', { requestId: request.requestId })).toMatchObject({ state: 'cancelled' });
+    expect(await pending).toMatchObject({ state: 'cancelled', error: { code: 'cancelled' } });
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+    expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({ state: 'executed' });
+  });
+
+  it('still halts when an action is interrupted after it reported dispatch', async () => {
+    Object.assign(backend, { reportsDispatch: true });
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    vi.mocked(backend.act).mockImplementationOnce((_observation, _action, _mode, _signal, onDispatch) => {
+      onDispatch?.();
+      return new Promise(() => {});
+    });
+    expect(await call(token, 'act', { ...(await actionInput(token, sessionId)), timeoutMs: 100 })).toMatchObject({
+      state: 'unknown',
+      error: { code: 'unknown_outcome' },
+    });
+    expect(events.filter(event => event.event === 'fatal')).toHaveLength(1);
+    await expect(session(token)).rejects.toMatchObject({ code: 'unavailable' });
+  });
+
+  it('records uncertain results from a contained backend as unknown without halting later work', async () => {
+    Object.assign(backend, { reportsDispatch: true, interruptionContained: true });
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    vi.mocked(backend.act).mockImplementationOnce(async (_observation, _action, _mode, _signal, onDispatch) => {
+      onDispatch?.();
+      throw new CuError('unknown_outcome', 'Browser action did not finish normally.');
+    });
+    expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({
+      state: 'unknown',
+      error: { code: 'unknown_outcome' },
+    });
+    vi.mocked(backend.act).mockImplementationOnce((_observation, _action, _mode, _signal, onDispatch) => {
+      onDispatch?.();
+      return new Promise(() => {});
+    });
+    const request = await actionInput(token, sessionId);
+    const pending = call(token, 'act', request);
+    await vi.waitFor(() => expect(backend.act).toHaveBeenCalledTimes(2));
+    await call(token, 'cancel', { requestId: request.requestId });
+    expect(await pending).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+    expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({ state: 'executed' });
+  });
+
+  it('rechecks the exclusive lease after waiting for the host control mark', async () => {
+    const desktop = { ...target, id: 'raced', pid: 4343 };
+    backend.targets = vi.fn(async () => [desktop]);
+    const { token } = await pair();
+    ackControl = false;
+    const first = call(token, 'session_open', { targetId: desktop.id, exclusive: true });
+    const rejected = expect(first).rejects.toMatchObject({ code: 'busy' });
+    await vi.waitFor(() => expect(events.some(event => event.event === 'control_begin')).toBe(true));
+    const second = await call(token, 'session_open', { targetId: desktop.id, exclusive: true });
+    expect(second).toHaveProperty('sessionId');
+    await runtime.control({ command: 'control_ready', pid: desktop.pid });
+    await rejected;
+    expect(events.some(event => event.event === 'control_end')).toBe(false);
+  });
+
+  it('does not register a session for a client revoked while the host control mark is pending', async () => {
+    const desktop = { ...target, id: 'revoked-mark', pid: 4444 };
+    backend.targets = vi.fn(async () => [desktop]);
+    const { token, clientId } = await pair();
+    ackControl = false;
+    const pending = call(token, 'session_open', { targetId: desktop.id, exclusive: false });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'unauthorized' });
+    await vi.waitFor(() => expect(events.some(event => event.event === 'control_begin')).toBe(true));
+    await runtime.control({ command: 'revoke', clientId });
+    await runtime.control({ command: 'control_ready', pid: desktop.pid });
+    await rejected;
+    expect(events.filter(event => event.event === 'control_end')).toEqual([{ event: 'control_end', pid: desktop.pid }]);
+  });
+
+  it('reports a verification cancelled while waiting as cancelled rather than an internal error', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const request = { ...(await actionInput(token, sessionId)), timeoutMs: 30_000, verify: { type: 'title', includes: 'never' } };
+    const observe = vi.mocked(backend.observe);
+    observe.mockClear();
+    const pending = call(token, 'act', request);
+    await vi.waitFor(() => expect(observe.mock.calls.length).toBeGreaterThan(1));
+    const cancelled = await call(token, 'cancel', { requestId: request.requestId });
+    expect(cancelled).toMatchObject({ state: 'executed', error: { code: 'cancelled' } });
+    expect(await pending).toMatchObject({ state: 'executed', error: { code: 'cancelled' } });
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+  });
+
+  it('asks the backend to release cached observations once no session uses the target', async () => {
+    const release = vi.fn(async (_target: Target) => {});
+    Object.assign(backend, { release });
+    const { token } = await pair(),
+      first = await session(token),
+      second = await session(token);
+    await observation(token, first.sessionId);
+    await call(token, 'session_close', { sessionId: first.sessionId });
+    expect(release).not.toHaveBeenCalled();
+    await call(token, 'session_close', { sessionId: second.sessionId });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(target);
+  });
+
+  it('rejects client names with line breaks or invisible formatting before prompting the user', async () => {
+    for (const name of ['Agent\nApproved for every app', 'Agent\u202eppA', 'Agent\u2028Line', 'Tab\tName']) {
+      await expect(call(undefined, 'pair', { name, appIds: [target.appId], browser: false })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    }
+    expect(events.some(event => event.event === 'pair_request')).toBe(false);
+    await expect(pair('中文 Agent · 1')).resolves.toHaveProperty('token');
   });
 });

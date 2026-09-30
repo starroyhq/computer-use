@@ -220,6 +220,8 @@ export async function connectWindowsWorker(binaryPath: string): Promise<CuaConne
 /** Socket SDK client only. The signed native host owns the daemon and TCC grants. */
 export class CuaBackend implements Backend {
   readonly kind = 'desktop' as const;
+  // act 在调用驱动派发前检查中止并回调 onDispatch；原生手势的中断仍需停止运行时，因此不声明 interruptionContained。
+  readonly reportsDispatch = true;
   private connection: Promise<CuaConnection> | undefined;
   private lastConnectionUse = 0;
   // 驱动会话一旦结束（空闲过期或连接关闭），同名后续调用会被永久拒绝；
@@ -527,7 +529,13 @@ export class CuaBackend implements Backend {
     );
   }
 
-  async act(observation: BackendObservation, action: Action, mode: Mode, signal: AbortSignal): Promise<BackendExecution> {
+  async act(
+    observation: BackendObservation,
+    action: Action,
+    mode: Mode,
+    signal: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<BackendExecution> {
     if (this.interrupted)
       throw new CuError('unavailable', 'An earlier desktop action was interrupted. Restart the native host before sending more actions.');
     if (signal.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
@@ -629,6 +637,9 @@ export class CuaBackend implements Backend {
           .catch(() => undefined);
         if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
       }
+      // 从这里到 callTool 之间没有 await：通过此处检查后不会再被中止打断，回调与派发处于同一时刻。
+      if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
+      onDispatch?.();
       state.consumed = true;
       dispatched = true;
       const result = await client.callTool(tool, JSON.stringify(args), { signal: combined });
@@ -642,6 +653,13 @@ export class CuaBackend implements Backend {
       if (dispatched && combined.aborted) this.interrupted = true;
       this.active.delete(controller);
     }
+  }
+
+  /** 目标已没有会话：丢弃为它缓存的最新观察（含截图）和坐标预热记录。 */
+  async release(target: Target): Promise<void> {
+    const key = this.captureKey(target);
+    this.latest.delete(key);
+    this.freshCaptures.delete(key);
   }
 
   async cancel(): Promise<void> {

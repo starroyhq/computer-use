@@ -58,13 +58,13 @@ computer-use action_status --profile codex --json '{"requestId":"be9fefc8-ff22-4
 | 输入 / Type | Windows 元素定向输入即使在前台会话也走后台辅助功能路径；不确定或拒绝后不换路径、不重发。无元素 ID 的前台长文本未获完整性保证。 / Windows element-directed typing uses background accessibility even in foreground sessions, without fallback or retry. Long foreground text without an element ID is not guaranteed. |
 | 文本效果 / Text effects | 后端和控件决定具体文本行为，需读回完整内容；不要假定所有路径都追加或替换。浏览器路径使用 `insertText`。 / Read back the full value: do not assume all controls append or replace text identically. The browser uses `insertText`. |
 | 拖拽 / Drag | 仅两个端点的直线手势。macOS 拒绝后台拖拽；Windows 向驱动传递会话模式，实际支持仍需验证。 / Two-endpoint straight gestures only. macOS rejects background dragging; Windows passes the session mode to the driver, with actual support still requiring validation. |
-| 时限 / Deadlines | `timeoutMs`（默认 15 秒、最多 30 秒）同时限定派发和 `verify`；排队超过 15 秒仍未开始的动作直接取消、不派发。 / `timeoutMs` (default 15 s, max 30 s) bounds dispatch and `verify` together; an action still queued after 15 seconds is cancelled without dispatch. |
+| 时限 / Deadlines | `timeoutMs`（默认 15 秒、最多 30 秒）同时限定派发和 `verify`；排队超过 15 秒仍未开始的动作直接取消、不派发。输入发出前就到时限时，动作以 `failed` / `timeout` 结束且未发送任何输入。 / `timeoutMs` (default 15 s, max 30 s) bounds dispatch and `verify` together; an action still queued after 15 seconds is cancelled without dispatch. If the deadline passes before input is dispatched, the action ends as `failed` / `timeout` and nothing was sent. |
 | 保留 / Retention | CLI 截图文件保留 24 小时，之后在下次观察时删除；动作日志只保留 7 天内、最多 500 条已结束记录；过期会话和快照在后台定时回收。 / CLI screenshot files are kept for 24 hours and removed on a later observe; the action journal keeps at most 500 finished records from the last 7 days; expired sessions and snapshots are reclaimed in the background. |
 | 滚动 / Scroll | 方向加 `line` / `page` 单位与 1–50 的数量；浏览器每行 40 CSS 像素。 / Direction, line/page unit and amount 1–50; browser lines are 40 CSS pixels. |
 
-暂停阻止新动作。紧急停止取消工作并关闭执行器；输入中断或超时引起的不确定结果会停止执行。`unknown` 只表示输入是否送达本身不确定；驱动已完成派发但效果无法确认时返回 `executed` 加 `effect: "unconfirmed"`，不停止执行。重启不重放动作。完整参数以 `computer-use schema <method>` 为准。
+暂停阻止新动作。紧急停止取消工作并关闭执行器；桌面输入发出后被中断或超时引起的不确定结果会停止执行。独立浏览器的输入限于隔离页面：不确定结果记为 `unknown`，但不停止执行；导航遇到网络错误时直接返回 `failed`。`unknown` 只表示输入是否送达本身不确定；驱动已完成派发但效果无法确认时返回 `executed` 加 `effect: "unconfirmed"`，不停止执行。重启不重放动作。完整参数以 `computer-use schema <method>` 为准。
 
-Pause blocks new actions. Emergency stop cancels work and closes executors; uncertain interrupted or timed-out input stops execution. `unknown` means delivery itself is uncertain; completed dispatch with an unconfirmed effect returns `executed` with `effect: "unconfirmed"` and does not stop execution. Restart never replays actions. Use `computer-use schema <method>` for full parameters.
+Pause blocks new actions. Emergency stop cancels work and closes executors; desktop input that is interrupted or times out after dispatch stops execution. Controlled-browser input is confined to an isolated page: an uncertain outcome is recorded as `unknown` without stopping execution, and a navigation network error returns `failed`. `unknown` means delivery itself is uncertain; completed dispatch with an unconfirmed effect returns `executed` with `effect: "unconfirmed"` and does not stop execution. Restart never replays actions. Use `computer-use schema <method>` for full parameters.
 
 ## 独立浏览器 / Separate browser
 

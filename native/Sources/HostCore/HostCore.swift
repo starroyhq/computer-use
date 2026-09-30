@@ -97,6 +97,8 @@ public struct HostEvent: Decodable {
     public let message: String?
     public let clients: [ClientRecord]?
     public let pid: Int?
+    public let requestId: String?
+    public let approved: Bool?
 
     public static func parse(_ data: Data) throws -> HostEvent {
         let item = try JSONDecoder().decode(Self.self, from: data)
@@ -108,6 +110,8 @@ public struct HostEvent: Decodable {
             guard let id = item.sessionId, !id.isEmpty, item.clientName != nil,
                   item.targetTitle != nil else { throw HostFailure.invalidEvent }
         case "clients": guard item.clients != nil else { throw HostFailure.invalidEvent }
+        case "decision_finished":
+            guard let id = item.requestId, !id.isEmpty, item.approved != nil else { throw HostFailure.invalidEvent }
         case "fatal", "status": guard item.message != nil else { throw HostFailure.invalidEvent }
         case "ready": break
         case "control_begin", "control_end":
@@ -187,6 +191,53 @@ public struct ControlLease {
         let pids = Array(counts.keys)
         counts.removeAll()
         return pids
+    }
+}
+
+/// 审批请求队列。运行时回报某个请求已结束（批准、拒绝或过期）时，排队中的同一请求直接丢弃，
+/// 正在显示的同一请求标记为撤回；宿主据此关闭弹窗，且不再发送迟到的决定。
+public struct ApprovalQueue {
+    public private(set) var pending: [HostEvent] = []
+    public private(set) var activeID: String?
+    public private(set) var activeWithdrawn = false
+    public init() {}
+
+    public static func requestID(of event: HostEvent) -> String? {
+        event.event == "pair_request" ? event.clientId : event.sessionId
+    }
+
+    public mutating func enqueue(_ event: HostEvent) {
+        pending.append(event)
+    }
+
+    /// 取出下一条请求并登记为正在显示；没有请求时返回 nil。
+    public mutating func activateNext() -> HostEvent? {
+        guard !pending.isEmpty else { return nil }
+        let event = pending.removeFirst()
+        activeID = Self.requestID(of: event)
+        activeWithdrawn = false
+        return event
+    }
+
+    /// 当前弹窗已结束（用户作答、被撤回或宿主停止）。
+    public mutating func deactivate() {
+        activeID = nil
+        activeWithdrawn = false
+    }
+
+    /// 运行时回报请求结束。返回 true 表示有排队中或正在显示的弹窗因此失效。
+    @discardableResult
+    public mutating func finish(_ id: String) -> Bool {
+        let queued = pending.count
+        pending.removeAll { Self.requestID(of: $0) == id }
+        let active = activeID == id
+        if active { activeWithdrawn = true }
+        return active || pending.count != queued
+    }
+
+    /// 停止服务时丢弃所有排队请求；正在显示的弹窗由宿主关闭。
+    public mutating func removeAll() {
+        pending.removeAll()
     }
 }
 

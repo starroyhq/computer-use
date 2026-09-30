@@ -52,6 +52,14 @@ internal static class Program
             dialog.Close();
             Pump();
             Check(HostRuntime.Commands.Last() == "foreground_deny:default-deny", "closing denies");
+
+            // Approval grants every requested path, so the dialog must list all of them.
+            var paths = Enumerable.Range(1, 25).Select(index => $@"C:\Apps\App{index}.exe").ToArray();
+            Event(host, new { @event = "pair_request", clientId = "many-apps", name = "Many apps", appIds = paths, browser = false, foreground = true });
+            var text = Dialog(host)?.Controls.OfType<TextBox>().Single().Text ?? "";
+            Check(text.Contains("共 25 个") && paths.All(text.Contains), "pair dialog lists every requested application");
+            Finish(host, "many-apps", false);
+            Check(Dialog(host) is null, "expired pair prompt withdrawn");
             Console.WriteLine("PASS: Windows authorization dialog lifecycle");
         }
         finally { Invoke(host, "ExitAsync").GetAwaiter().GetResult(); }

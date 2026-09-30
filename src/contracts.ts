@@ -31,11 +31,30 @@ export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boo
 export type BackendExecution = { effect: 'confirmed' | 'unconfirmed' };
 export interface Backend {
   readonly kind: 'desktop' | 'browser';
+  /**
+   * 为 true 时，后端保证在即将发出输入的同一时刻调用 act 的 onDispatch，且此前已检查 signal。
+   * 运行时据此区分“尚未派发”（超时或取消都不会送达输入）和“可能已送达”。
+   * 未声明时运行时保守处理：一旦调用 act 就视为可能已派发。
+   */
+  readonly reportsDispatch?: boolean;
+  /**
+   * 为 true 时，被中断或结果不确定的动作不会在该后端之外留下仍在进行的输入（例如隔离浏览器页面），
+   * 运行时只把记录标为 unknown，不停止整个运行时。未声明时按原生手势处理：停止运行时。
+   */
+  readonly interruptionContained?: boolean;
   doctor(): Promise<Doctor>;
   targets(grant: Grant): Promise<Target[]>;
   observe(target: Target): Promise<BackendObservation>;
   validate(observation: BackendObservation): Promise<boolean>;
-  act(observation: BackendObservation, action: Action, mode: Mode, signal: AbortSignal): Promise<BackendExecution | undefined>;
+  act(
+    observation: BackendObservation,
+    action: Action,
+    mode: Mode,
+    signal: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<BackendExecution | undefined>;
+  /** 该目标已没有任何会话时调用：释放后端为它缓存的截图、元素句柄等。 */
+  release?(target: Target): Promise<void>;
   cancel(): Promise<void>;
   close(): Promise<void>;
 }
