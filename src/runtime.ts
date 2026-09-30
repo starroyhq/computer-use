@@ -40,9 +40,11 @@ type Work = {
 };
 const SESSION_TTL = 120_000;
 const SNAPSHOT_TTL = 30_000;
-// 传输层约 65 秒超时：排队准入 15 秒 + 校验 10 秒 + 派发与验证共用 timeoutMs（最多 30 秒），合计不超过 55 秒。
+// 传输层约 65 秒超时：排队准入 15 秒 + 校验 10 秒 + 派发与验证共用 timeoutMs（最多 30 秒）
+// + 已发出输入的完成宽限 5 秒，合计不超过 60 秒。
 const QUEUE_ADMISSION_MS = 15_000;
 const VALIDATE_MS = 10_000;
+const DISPATCH_GRACE_MS = 5_000;
 const REAP_INTERVAL_MS = 30_000;
 // 宿主马上回执；没有回执时会话仍然打开，避免标记失败挡住操作。
 const CONTROL_ACK_MS = 2_000;
@@ -89,6 +91,8 @@ export class Runtime implements RpcService {
       emit: (event: HostEvent) => void;
       now?: () => number;
       platform?: NodeJS.Platform;
+      // 仅供测试缩短：输入已发出后，超过 timeoutMs 仍允许其完成的时长。
+      dispatchGraceMs?: number;
     },
   ) {
     this.clients = new ClientStore(join(options.dataDir, 'clients.json'));
@@ -498,7 +502,9 @@ export class Runtime implements RpcService {
           controller.signal.addEventListener('abort', () => reject(interruption()), { once: true });
           timer = setTimeout(() => {
             timedOut = true;
-            controller.abort();
+            // 已发出的输入中断不了，只会把一次正常完成的动作变成结果不确定并停机；给它一段宽限期完成。
+            if (!work.started) controller.abort();
+            else timer = setTimeout(() => controller.abort(), this.options.dispatchGraceMs ?? DISPATCH_GRACE_MS);
           }, p.timeoutMs);
         });
         const dispatched = () => {

@@ -24,8 +24,11 @@ internal sealed class HostApplication : ApplicationContext
 
     internal HostApplication()
     {
+        // Sizes below are 96-DPI pixels; the form scales them to the display DPI when it is created.
         _window = new Form
         {
+            AutoScaleDimensions = new SizeF(96F, 96F),
+            AutoScaleMode = AutoScaleMode.Dpi,
             Text = "Computer Use — Windows 状态",
             Width = 720,
             Height = 260,
@@ -33,6 +36,7 @@ internal sealed class HostApplication : ApplicationContext
             FormBorderStyle = FormBorderStyle.FixedSingle,
             MaximizeBox = false
         };
+        _window.SuspendLayout();
         MainForm = _window;
         _details = new Label { AutoSize = false, Dock = DockStyle.Top, Height = 130, Padding = new Padding(18, 22, 18, 8), Font = new Font(SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif, 11) };
         _window.Controls.Add(_details);
@@ -43,6 +47,7 @@ internal sealed class HostApplication : ApplicationContext
         AddButton(row, "重新启动", RestartAsync);
         AddButton(row, "切换本机 HTTP MCP", ToggleHttpAsync);
         _window.Controls.Add(row);
+        _window.ResumeLayout(false);
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开状态窗口", null, (_, _) => ShowStatus());

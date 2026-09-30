@@ -87,6 +87,7 @@ describe('Runtime authorization and execution', () => {
       },
       now: () => clock,
       platform: 'darwin',
+      dispatchGraceMs: 250,
     });
     await runtime.start();
   });
@@ -779,6 +780,23 @@ describe('Runtime authorization and execution', () => {
     });
     expect(events.filter(event => event.event === 'fatal')).toHaveLength(1);
     await expect(session(token)).rejects.toMatchObject({ code: 'unavailable' });
+  });
+
+  it('lets an input that was already dispatched finish after timeoutMs instead of halting', async () => {
+    Object.assign(backend, { reportsDispatch: true });
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    vi.mocked(backend.act).mockImplementationOnce(async (_observation, _action, _mode, _signal, onDispatch) => {
+      onDispatch?.();
+      await new Promise(resolve => setTimeout(resolve, 200));
+      return { effect: 'unconfirmed' };
+    });
+    expect(await call(token, 'act', { ...(await actionInput(token, sessionId)), timeoutMs: 100 })).toMatchObject({
+      state: 'executed',
+      effect: 'unconfirmed',
+    });
+    expect(events.some(event => event.event === 'fatal')).toBe(false);
+    expect(await call(token, 'act', await actionInput(token, sessionId))).toMatchObject({ state: 'executed' });
   });
 
   it('records uncertain results from a contained backend as unknown without halting later work', async () => {
