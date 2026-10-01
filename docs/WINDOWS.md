@@ -20,6 +20,8 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 
 省略 `--arch` 时默认使用当前 Node 的架构。打包脚本从官方来源下载对应架构的固定 Node 24.21.0 与 Cua Driver 0.28.2 包，同时核对官方清单和固定 SHA-256；在隔离目录按锁文件安装该架构的生产依赖。它检查托盘程序、Node、驱动与原生 SDK 的架构，实际加载 SDK，并保留 Node、Cua 与项目的许可文件。包内 CLI 为 `bin\node.exe runtime\cli.js`，无需全局 Node。退出托盘会停止服务和输入；便携包运行时不要覆盖。x64 构建和静态校验通过后，还需在 x64 桌面验证配对、截图与输入，才能视作 x64 验收。
 
+运行后会打开设置窗口；关闭窗口后服务仍在托盘运行，双击托盘图标或再次运行程序可重新打开。“通用”页可勾选“登录 Windows 时启动”（写入当前用户的启动项，登录后只在托盘运行）；移动便携目录后需重新勾选。“更新”页每天检查一次 GitHub 正式版（可关闭）；便携包未签名，宿主只下载并校验安装包，然后在资源管理器中显示。安装新版本：退出托盘程序，完整解压，用新文件夹替换当前文件夹并保持同一路径，这样 Agent 配置中的绝对路径仍然有效；已配对的客户端保存在 `%LOCALAPPDATA%\Computer Use`，不受影响。
+
 ## Windows 本机 Agent：stdio MCP
 
 打开希望控制的普通权限应用，用其**完整可执行文件路径**配对。以下测试程序路径是占位符，须替换为自己的测试应用路径。本节与后面的 Mac 远程接入是两种选择，无需都做。
@@ -29,7 +31,7 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 预构建 ZIP：直接在�
 & .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
 ```
 
-配对和前台授权请求须在 60 秒内处理。过期或失效后弹窗自动关闭，排队的失效请求不会再次弹出。点击“是”仅提交决定，宿主收到运行时确认后才显示“已批准请求”；未授权时需由 Agent 发起新请求。关闭弹窗或按默认按钮均为拒绝。
+配对和前台授权请求须在 60 秒内处理。过期或失效后弹窗自动关闭，排队的失效请求不会再次弹出。点击“允许”仅提交决定，宿主收到运行时确认后才显示“已批准请求”；未授权时需由 Agent 发起新请求。关闭弹窗或按默认按钮均为拒绝。
 
 在托盘批准配对，然后运行：
 
@@ -54,7 +56,7 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 使用预构建 ZIP 时跳
 
 在 Windows 托盘中批准配对。只批准明确的应用路径；撤销后 Mac 的旧凭据应立即失效。Windows 宿主及 CLI 的管道、凭据和日志位于当前用户的 `%LOCALAPPDATA%\Computer Use`，不要从服务账号或未登录的后台会话启动宿主。
 
-在托盘中启用本机 HTTP MCP，然后生成供 Mac 使用的私有配置文件：
+在设置窗口的“接入”页启用本机 HTTP MCP（仅本次运行有效），然后生成供 Mac 使用的私有配置文件：
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js config http --profile mac-codex --out "$env:LOCALAPPDATA\Computer Use\mac-codex-mcp.json"
@@ -91,13 +93,13 @@ tool_timeout_sec = 90
 ## 故障排查
 
 - `doctor` 无法连接：确认 Windows 托盘已启动、在登录用户桌面运行，驱动与宿主版本匹配。
-- Codex 连接拒绝：检查 Windows 托盘是否启用 HTTP、SSH 隧道是否仍在运行，以及 Mac 47631 端口是否由隧道占用。不要为排错开放 Windows MCP 防火墙端口。
+- Codex 连接拒绝：检查 Windows 设置窗口“接入”页是否已启用 HTTP、SSH 隧道是否仍在运行，以及 Mac 47631 端口是否由隧道占用。不要为排错开放 Windows MCP 防火墙端口。
 - `targets` 被 MCP 工具审批阻止：检查当前 Codex 审批策略；非交互专用测试可按上文只为临时服务器配置工具审批。
-- `401`：确认 Mac 私有 JSON 来自当前配对、文件权限为 `0600`，托盘中未撤销该客户端；在 Mac 直接运行 helper 应只输出一个 JSON header 对象，勿将输出粘贴到日志或聊天。
+- `401`：确认 Mac 私有 JSON 来自当前配对、文件权限为 `0600`，设置窗口“客户端”页中未撤销该客户端；在 Mac 直接运行 helper 应只输出一个 JSON header 对象，勿将输出粘贴到日志或聊天。
 - 配对程序不可见或动作拒绝：确认可执行文件路径、窗口所属进程及应用权限级别。后台动作不能送达时，可显式打开前台会话（配对时已授予，不再逐次批准）；不会自动切换。
 
 自动化测试和真实 Windows 虚拟机结果分别记在 [验证记录](validation-results.md)；静态打包检查不代表截图和输入已通过实测。
 
-授权窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝及停止清理，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。
+授权窗口与设置窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝、停止清理、两种语言的文案表、托盘偏好存储、6 个设置页与客户端列表，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。加 `-- --screenshots <目录>` 可把每个设置页保存为 PNG；加 `-- --live-update <旧版本便携包目录>` 会通过该包的 CLI 联网检查并下载真实的最新发布（需要网络）。
 
 Windows 元素定向输入与点击始终使用后台辅助功能路径，包括已批准的前台会话；拒绝或不确定时不自动切换或重发。无元素 ID 的前台长文本、画布和终端不在完整性保证范围内。具体动作语义见[使用说明](USAGE.md)。

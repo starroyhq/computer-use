@@ -221,7 +221,16 @@ export class Runtime implements RpcService {
     for (const [id, snapshot] of this.snapshots) if (now - snapshot.createdAt > SNAPSHOT_TTL) this.snapshots.delete(id);
   }
   private emitClients(): void {
-    this.options.emit({ event: 'clients', clients: [...this.clients.clients.values()].map(({ id, name }) => ({ id, name })) });
+    this.options.emit({
+      event: 'clients',
+      clients: [...this.clients.clients.values()].map(({ id, name, grant }) => ({
+        id,
+        name,
+        appIds: [...grant.appIds],
+        browser: grant.browser,
+        foreground: grant.foreground === true,
+      })),
+    });
   }
   authenticate(token: string | undefined): Client {
     return this.clients.authenticate(token);

@@ -4,67 +4,59 @@ using System.Windows.Forms;
 
 namespace ComputerUse.WindowsHost;
 
-internal sealed class HostApplication : ApplicationContext
+internal sealed class HostApplication : ApplicationContext, ISettingsHost
 {
-    private readonly Form _window;
-    private readonly Label _details;
+    private readonly SettingsForm _window;
     private readonly NotifyIcon _tray;
-    private readonly ToolStripMenuItem _httpItem;
-    private readonly ToolStripMenuItem _clientsMenu;
+    private readonly ToolStripMenuItem _pauseItem;
+    private readonly ToolStripMenuItem _stopItem;
+    private readonly ToolStripMenuItem _updateItem;
     private readonly Queue<JsonElement> _alerts = new();
+    private readonly RegisteredWaitHandle? _showRegistration;
     private HostRuntime? _runtime;
     private bool _running;
     private bool _busy;
     private bool _exiting;
+    private bool _paused;
     private ApprovalDialog? _approvalDialog;
     private readonly HashSet<string> _pendingDecisions = new();
     private bool _httpEnabled;
+    private string? _httpStatus;
     private string? _stopAfterStart;
-    private string _status = "正在启动…";
+    private string _status = L10n.T(Msg.StatusStarting);
+    private IReadOnlyList<ClientInfo> _clients = Array.Empty<ClientInfo>();
 
-    internal HostApplication()
+    /// <param name="showWindow">登录时启动（--background）不打开窗口，只在托盘运行。</param>
+    /// <param name="dataDirectory">托盘偏好与更新下载的位置；测试程序传入临时目录。</param>
+    /// <param name="showSignal">再次启动程序时由新进程触发，已运行的实例据此打开设置窗口。</param>
+    internal HostApplication(bool showWindow = true, string? dataDirectory = null, WaitHandle? showSignal = null)
     {
-        // Sizes below are 96-DPI pixels; the form scales them to the display DPI when it is created.
-        _window = new Form
-        {
-            AutoScaleDimensions = new SizeF(96F, 96F),
-            AutoScaleMode = AutoScaleMode.Dpi,
-            Text = "Computer Use — Windows 状态",
-            Width = 720,
-            Height = 260,
-            StartPosition = FormStartPosition.CenterScreen,
-            FormBorderStyle = FormBorderStyle.FixedSingle,
-            MaximizeBox = false
-        };
-        _window.SuspendLayout();
-        MainForm = _window;
-        _details = new Label { AutoSize = false, Dock = DockStyle.Top, Height = 130, Padding = new Padding(18, 22, 18, 8), Font = new Font(SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif, 11) };
-        _window.Controls.Add(_details);
-        var row = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 72, Padding = new Padding(14, 6, 10, 5) };
-        AddButton(row, "暂停", async () => await ControlAsync("pause", "已暂停新动作"));
-        AddButton(row, "恢复", async () => await ControlAsync("resume", "已恢复接收动作"));
-        AddButton(row, "紧急停止", async () => await StopAsync("紧急停止；请手动重启服务"));
-        AddButton(row, "重新启动", RestartAsync);
-        AddButton(row, "切换本机 HTTP MCP", ToggleHttpAsync);
-        _window.Controls.Add(row);
-        _window.ResumeLayout(false);
+        var settings = new HostSettingsStore(dataDirectory ?? PrivateData.DirectoryPath);
+        Updates = new UpdateService(AppContext.BaseDirectory, settings);
+        _window = new SettingsForm(this);
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("打开状态窗口", null, (_, _) => ShowStatus());
+        menu.Items.Add(L10n.T(Msg.TraySettings), null, (_, _) => _window.ShowPage());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("暂停新动作", null, async (_, _) => await ControlAsync("pause", "已暂停新动作"));
-        menu.Items.Add("恢复接收动作", null, async (_, _) => await ControlAsync("resume", "已恢复接收动作"));
-        menu.Items.Add("紧急停止", null, async (_, _) => await StopAsync("紧急停止；请手动重启服务"));
-        menu.Items.Add("重新启动服务", null, async (_, _) => await RestartAsync());
+        _pauseItem = new ToolStripMenuItem(L10n.T(Msg.TrayPause), null, async (_, _) => await TogglePauseAsync());
+        menu.Items.Add(_pauseItem);
+        _stopItem = new ToolStripMenuItem(L10n.T(Msg.TrayEmergencyStop), null, async (_, _) => await EmergencyStopAsync());
+        menu.Items.Add(_stopItem);
+        menu.Items.Add(L10n.T(Msg.TrayRestart), null, async (_, _) => await RestartAsync());
         menu.Items.Add(new ToolStripSeparator());
-        _httpItem = new ToolStripMenuItem("启用 Windows 本机 HTTP MCP", null, async (_, _) => await ToggleHttpAsync());
-        menu.Items.Add(_httpItem);
-        _clientsMenu = new ToolStripMenuItem("撤销客户端");
-        menu.Items.Add(_clientsMenu);
+        _updateItem = new ToolStripMenuItem("", null, (_, _) => _window.ShowPage(SettingsPage.Updates)) { Visible = false };
+        menu.Items.Add(_updateItem);
+        menu.Items.Add(L10n.T(Msg.TrayCheckUpdates), null, async (_, _) =>
+        {
+            _window.ShowPage(SettingsPage.Updates);
+            await Updates.CheckAsync(manual: true);
+        });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("退出 Computer Use", null, async (_, _) => await ExitAsync());
+        menu.Items.Add(L10n.T(Msg.TrayQuit), null, async (_, _) => await ExitAsync());
+        menu.Opening += (_, _) => RefreshTray();
         _tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "Computer Use", Visible = true, ContextMenuStrip = menu };
-        _tray.DoubleClick += (_, _) => ShowStatus();
+        _tray.DoubleClick += (_, _) => _window.ShowPage();
+        Updates.Changed += StateChanged;
 
         _window.FormClosing += (_, e) =>
         {
@@ -89,46 +81,71 @@ internal sealed class HostApplication : ApplicationContext
                 _tray.Visible = false;
             }
         };
-        _window.Shown += async (_, _) => await StartAsync();
-        _window.Show();
-        RefreshStatus();
+        // 先创建窗口句柄：后台启动（不显示窗口）时，运行时事件与启动任务同样能投递到界面线程。
+        _ = _window.Handle;
+        if (showSignal is not null)
+            _showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => Post(() => _window.ShowPage()),
+                null, Timeout.Infinite, executeOnlyOnce: false);
+        Post(() => _ = StartAsync());
+        Updates.Start();
+        if (showWindow) _window.ShowPage(SettingsPage.Status);
+        StateChanged();
     }
 
-    private void AddButton(FlowLayoutPanel panel, string caption, Func<Task> click)
+    // MARK: 设置窗口读取的状态
+
+    public UpdateService Updates { get; }
+    public string ServiceStatus => _status;
+    public bool IsRunning => _running && _runtime is not null;
+    public bool IsPaused => _paused;
+    public string? PipeName => IsRunning ? _runtime!.PipeName : null;
+    public IReadOnlyList<ClientInfo> Clients => _clients;
+    public bool HttpEnabled => _httpEnabled;
+    public string? HttpStatus => _httpStatus;
+    public string PackageRoot => AppContext.BaseDirectory;
+
+    private void StateChanged()
     {
-        var button = new Button { Text = caption, AutoSize = true, Height = 36 };
-        button.Click += async (_, _) => await click();
-        panel.Controls.Add(button);
+        RefreshTray();
+        _window.RefreshAll();
     }
 
-    private void ShowStatus()
+    private void RefreshTray()
     {
-        _window.Show();
-        _window.WindowState = FormWindowState.Normal;
-        _window.Activate();
-        RefreshStatus();
-    }
-
-    private void RefreshStatus()
-    {
-        _details.Text = $"服务：{_status}\n本机 HTTP MCP：{(_httpEnabled ? "已请求启用（127.0.0.1:47631）" : "关闭")}\n" +
-            $"CLI 管道：{(_running && _runtime is not null ? _runtime.PipeName : "未就绪")}\n" +
-            "关闭此窗口后服务仍在托盘运行；截图能力需由 Agent 实际验证。";
-        _tray.Text = _status.Length > 40 ? "Computer Use" : $"Computer Use · {_status}";
-        _httpItem.Checked = _httpEnabled;
+        var text = $"Computer Use · {_status}";
+        _tray.Text = text.Length <= 63 ? text : "Computer Use";
+        _tray.Icon = _running || _busy ? SystemIcons.Application : SystemIcons.Warning;
+        _pauseItem.Text = L10n.T(_paused ? Msg.TrayResume : Msg.TrayPause);
+        _pauseItem.Enabled = IsRunning;
+        _stopItem.Enabled = IsRunning || _busy;
+        if (Updates.Announced is { } check)
+        {
+            _updateItem.Text = L10n.F(Msg.TrayUpdateAvailable, check.Latest);
+            _updateItem.Visible = true;
+        }
+        else _updateItem.Visible = false;
     }
 
     private void SetStatus(string value)
     {
         _status = value.Length > 160 ? value[..160] : value;
-        RefreshStatus();
+        StateChanged();
     }
+
+    private void Post(Action action)
+    {
+        if (_window.IsDisposed) return;
+        try { _window.BeginInvoke(action); }
+        catch (InvalidOperationException) { }
+    }
+
+    // MARK: 服务
 
     private async Task StartAsync()
     {
-        if (_busy || _runtime is not null) return;
+        if (_busy || _runtime is not null || _exiting) return;
         _busy = true;
-        SetStatus("正在启动统一运行时…");
+        SetStatus(L10n.T(Msg.StatusStartingRuntime));
         HostRuntime? next = null;
         try
         {
@@ -136,19 +153,22 @@ internal sealed class HostApplication : ApplicationContext
             _runtime = next;
             await next.StartAsync();
             _running = true;
-            SetStatus("就绪 · 后台优先");
+            _paused = false;
+            SetStatus(L10n.T(Msg.StatusReady));
         }
         catch (Exception error)
         {
             _runtime = null;
             _running = false;
             if (next is not null) await next.DisposeAsync();
-            SetStatus("启动失败：" + error.Message);
-            MessageBox.Show(_window, error.Message, "Computer Use 无法启动", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            SetStatus(L10n.F(Msg.StatusStartFailed, error.Message));
+            _window.ShowPage(SettingsPage.Status);
+            MessageBox.Show(_window, error.Message, L10n.T(Msg.FailureLaunchTitle), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
             _busy = false;
+            StateChanged();
             if (_stopAfterStart is { } stopStatus)
             {
                 _stopAfterStart = null;
@@ -157,26 +177,35 @@ internal sealed class HostApplication : ApplicationContext
         }
     }
 
-    private void PostEvent(HostRuntime? source, JsonElement message)
-    {
-        if (_window.IsDisposed) return;
-        try { _window.BeginInvoke((Action)(() => { if (ReferenceEquals(_runtime, source) && !_exiting) HandleEvent(message); })); }
-        catch (InvalidOperationException) { }
-    }
+    private void PostEvent(HostRuntime? source, JsonElement message) =>
+        Post(() => { if (ReferenceEquals(_runtime, source) && !_exiting) HandleEvent(message); });
 
     private void HandleEvent(JsonElement message)
     {
         if (!message.TryGetProperty("event", out var eventValue)) return;
         switch (eventValue.GetString())
         {
-            case "ready": _running = true; SetStatus("就绪 · 后台优先"); break;
+            case "ready":
+                _running = true;
+                _paused = false;
+                SetStatus(L10n.T(Msg.StatusReady));
+                break;
             case "status":
                 var status = String(message, "message");
-                if (status.Contains("could not start", StringComparison.OrdinalIgnoreCase)) _httpEnabled = false;
-                SetStatus(status);
+                // 运行时的状态消息目前只报告本机 HTTP 监听结果，显示在“接入”页。
+                if (status.StartsWith("Local MCP: ", StringComparison.Ordinal) || status.StartsWith("HTTP listener", StringComparison.Ordinal))
+                {
+                    _httpStatus = status.Length > 200 ? status[..200] : status;
+                    if (status.Contains("could not start", StringComparison.OrdinalIgnoreCase)) _httpEnabled = false;
+                    StateChanged();
+                }
+                else SetStatus(status);
                 break;
-            case "fatal": _ = StopAsync("服务异常：" + String(message, "message")); break;
-            case "clients": RebuildClientMenu(message); break;
+            case "fatal": _ = StopAsync(L10n.F(Msg.StatusRuntimeFault, String(message, "message"))); break;
+            case "clients":
+                _clients = ParseClients(message);
+                StateChanged();
+                break;
             case "pair_request":
             case "foreground_request":
                 _pendingDecisions.Add(String(message, String(message, "event") == "pair_request" ? "clientId" : "sessionId"));
@@ -187,28 +216,31 @@ internal sealed class HostApplication : ApplicationContext
                 var requestId = String(message, "requestId");
                 if (!_pendingDecisions.Remove(requestId)) break;
                 SetStatus(message.TryGetProperty("approved", out var approved) && approved.ValueKind == JsonValueKind.True
-                    ? "已批准请求" : "请求已拒绝、过期或失效；未授权");
+                    ? L10n.T(Msg.StatusApproved) : L10n.T(Msg.StatusRequestInvalid));
                 if (_approvalDialog?.RequestId == requestId) _approvalDialog.Withdraw();
                 PresentNextAlert();
                 break;
-            default: _ = StopAsync("运行时返回了未知事件"); break;
+            default: _ = StopAsync(L10n.T(Msg.StatusUnknownEvent)); break;
         }
     }
 
-    private void RebuildClientMenu(JsonElement message)
+    /// <summary>客户端列表与授权范围只用于展示；旧版运行时不发送授权字段。</summary>
+    private static IReadOnlyList<ClientInfo> ParseClients(JsonElement message)
     {
-        _clientsMenu.DropDownItems.Clear();
-        if (!message.TryGetProperty("clients", out var clients) || clients.ValueKind != JsonValueKind.Array) return;
+        if (!message.TryGetProperty("clients", out var clients) || clients.ValueKind != JsonValueKind.Array) return Array.Empty<ClientInfo>();
+        var result = new List<ClientInfo>();
         foreach (var client in clients.EnumerateArray())
         {
+            if (client.ValueKind != JsonValueKind.Object) continue;
             var id = String(client, "id");
-            var name = String(client, "name");
             if (id.Length == 0) continue;
-            var entry = new ToolStripMenuItem(name.Length <= 80 ? name : name[..80]);
-            entry.Click += async (_, _) => await ControlAsync("revoke", "已撤销客户端", clientId: id);
-            _clientsMenu.DropDownItems.Add(entry);
+            var name = String(client, "name");
+            var apps = client.TryGetProperty("appIds", out var values) && values.ValueKind == JsonValueKind.Array
+                ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").ToArray()
+                : Array.Empty<string>();
+            result.Add(new ClientInfo(id, name.Length <= 80 ? name : name[..80], apps, Flag(client, "browser"), Flag(client, "foreground")));
         }
-        if (_clientsMenu.DropDownItems.Count == 0) _clientsMenu.DropDownItems.Add("尚无已配对客户端").Enabled = false;
+        return result;
     }
 
     private void PresentNextAlert()
@@ -223,7 +255,7 @@ internal sealed class HostApplication : ApplicationContext
         var kind = String(request, "event");
         var isPair = kind == "pair_request";
         var identifier = String(request, isPair ? "clientId" : "sessionId");
-        if (identifier.Length == 0) { _ = StopAsync("运行时请求缺少授权标识"); return; }
+        if (identifier.Length == 0) { _ = StopAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
         string explanation;
         if (isPair)
         {
@@ -231,10 +263,14 @@ internal sealed class HostApplication : ApplicationContext
             var paths = request.TryGetProperty("appIds", out var appIds) && appIds.ValueKind == JsonValueKind.Array
                 ? appIds.EnumerateArray().Select(value => value.GetString() ?? "").ToArray() : Array.Empty<string>();
             var apps = string.Join("\n", paths);
-            explanation = $"客户端：{String(request, "name")}\n标识：{identifier}\n应用路径（共 {paths.Length} 个）：\n{(apps.Length == 0 ? "无" : apps)}\n独立浏览器：{(request.TryGetProperty("browser", out var browser) && browser.ValueKind == JsonValueKind.True ? "允许" : "不允许")}\n前台操作：允许（可能切换焦点、移动鼠标并模拟键盘）\n\n批准后长期有效，重启托盘程序也不再询问；在托盘菜单中撤销该客户端即可收回全部权限。";
+            var foreground = request.TryGetProperty("foreground", out var foregroundValue) && foregroundValue.ValueKind == JsonValueKind.False
+                ? L10n.T(Msg.ApprovalNotAllowed) : L10n.T(Msg.ApprovalForegroundAllowed);
+            explanation = L10n.F(Msg.ApprovalPairBody, String(request, "name"), identifier, L10n.F(Msg.ApprovalPathCount, paths.Length),
+                apps.Length == 0 ? L10n.T(Msg.ApprovalNone) : apps,
+                Flag(request, "browser") ? L10n.T(Msg.ApprovalAllowed) : L10n.T(Msg.ApprovalNotAllowed), foreground);
         }
-        else explanation = $"客户端：{String(request, "clientName")}\n目标：{String(request, "targetTitle")}\n会话：{identifier}\n\n此操作可能切换焦点并移动鼠标。授权仅适用于当前会话和目标。";
-        var dialog = new ApprovalDialog(identifier, isPair ? "允许客户端操作这些应用？" : "允许当前会话使用前台操作？", explanation);
+        else explanation = L10n.F(Msg.ApprovalForegroundBody, String(request, "clientName"), String(request, "targetTitle"), identifier);
+        var dialog = new ApprovalDialog(identifier, L10n.T(isPair ? Msg.ApprovalPairTitle : Msg.ApprovalForegroundTitle), explanation);
         _approvalDialog = dialog;
         dialog.FormClosed += async (_, _) =>
         {
@@ -243,13 +279,13 @@ internal sealed class HostApplication : ApplicationContext
             {
                 var allow = dialog.DialogResult == DialogResult.Yes;
                 // A successful pipe write is not an authorization result.
-                SetStatus("已提交决定，等待运行时确认…");
+                SetStatus(L10n.T(Msg.StatusDecisionSent));
                 try
                 {
                     await source.SendControlAsync(isPair ? (allow ? "pair_allow" : "pair_deny") : (allow ? "foreground_allow" : "foreground_deny"),
                         clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier);
                 }
-                catch { if (ReferenceEquals(_runtime, source)) await StopAsync("无法向运行时发送授权决定"); }
+                catch { if (ReferenceEquals(_runtime, source)) await StopAsync(L10n.T(Msg.StatusSendDecisionFailed)); }
             }
             PresentNextAlert();
         };
@@ -259,29 +295,51 @@ internal sealed class HostApplication : ApplicationContext
     private static string String(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
 
+    private static bool Flag(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+
     private async Task ControlAsync(string command, string status, string? clientId = null, string? sessionId = null)
     {
         if (!_running || _runtime is null) return;
         try { await _runtime.SendControlAsync(command, clientId, sessionId); SetStatus(status); }
-        catch { await StopAsync("无法向运行时发送控制指令"); }
+        catch { await StopAsync(L10n.T(Msg.StatusSendControlFailed)); }
     }
 
-    private async Task ToggleHttpAsync()
+    // MARK: 设置窗口与托盘菜单的操作
+
+    public async Task TogglePauseAsync()
     {
-        if (!_running || _runtime is null) return;
-        var enable = !_httpEnabled;
+        if (!IsRunning) return;
+        var resume = _paused;
+        await ControlAsync(resume ? "resume" : "pause", L10n.T(resume ? Msg.StatusReady : Msg.StatusPaused));
+        if (IsRunning) _paused = !resume;
+        StateChanged();
+    }
+
+    public Task EmergencyStopAsync() => StopAsync(L10n.T(Msg.StatusEmergencyStopped));
+    public Task RestartServicesAsync() => RestartAsync();
+    public Task RevokeAsync(string clientId) => ControlAsync("revoke", L10n.T(Msg.StatusRevoked), clientId: clientId);
+
+    public async Task SetHttpAsync(bool enabled)
+    {
+        if (!IsRunning || enabled == _httpEnabled)
+        {
+            StateChanged();
+            return;
+        }
         try
         {
-            await _runtime.SendControlAsync(enable ? "http_enable" : "http_disable");
-            _httpEnabled = enable;
-            RefreshStatus();
+            await _runtime!.SendControlAsync(enabled ? "http_enable" : "http_disable");
+            _httpEnabled = enabled;
+            _httpStatus = null;
+            StateChanged();
         }
-        catch { await StopAsync("无法切换本机 HTTP MCP"); }
+        catch { await StopAsync(L10n.T(Msg.StatusHttpFailed)); }
     }
 
     private async Task RestartAsync()
     {
-        await StopAsync("正在重新启动…");
+        await StopAsync(L10n.T(Msg.StatusRestarting));
         await StartAsync();
     }
 
@@ -290,7 +348,10 @@ internal sealed class HostApplication : ApplicationContext
         if (_busy) { _stopAfterStart = status; return; }
         _busy = true;
         _running = false;
+        _paused = false;
         _httpEnabled = false;
+        _httpStatus = null;
+        _clients = Array.Empty<ClientInfo>();
         _alerts.Clear();
         _pendingDecisions.Clear();
         _approvalDialog?.Withdraw();
@@ -298,14 +359,20 @@ internal sealed class HostApplication : ApplicationContext
         var current = _runtime;
         _runtime = null;
         try { if (current is not null) await current.DisposeAsync(); }
-        finally { _busy = false; }
+        finally
+        {
+            _busy = false;
+            StateChanged();
+        }
     }
 
     private async Task ExitAsync()
     {
         if (_exiting) return;
         _exiting = true;
-        await StopAsync("正在退出…");
+        _showRegistration?.Unregister(null);
+        Updates.Dispose();
+        await StopAsync(L10n.T(Msg.StatusQuitting));
         _tray.Visible = false;
         _tray.Dispose();
         _window.Dispose();

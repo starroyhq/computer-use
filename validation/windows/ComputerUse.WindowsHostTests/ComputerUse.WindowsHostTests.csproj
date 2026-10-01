@@ -7,7 +7,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <!-- 直接编译托盘程序的界面源文件；HostRuntime 由 Program.cs 里的假实现替代。 -->
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostApplication.cs" Link="HostApplication.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/ApprovalDialog.cs" Link="ApprovalDialog.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/SettingsForm.cs" Link="SettingsForm.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/L10n.cs" Link="L10n.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/HostSettings.cs" Link="HostSettings.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/LaunchAtLogin.cs" Link="LaunchAtLogin.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/Updater.cs" Link="Updater.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/PrivateData.cs" Link="PrivateData.cs" />
   </ItemGroup>
 </Project>

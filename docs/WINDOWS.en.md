@@ -22,6 +22,8 @@ For ARM64, replace `x64` with `arm64` and use the `Computer Use Windows ARM64` o
 
 Packaging downloads pinned Node 24.21.0 and Cua Driver 0.28.2 artifacts, checks official manifests and pinned SHA-256 values, and installs production dependencies for the selected architecture from the lockfile. It checks host, Node, driver and native SDK architecture and loads the SDK. License files are retained. The bundled CLI is `bin\node.exe runtime\cli.js`; no global Node is required. Quitting the tray stops the service and input. Do not replace a running package. Component checks do not establish desktop screenshot or input correctness.
 
+Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder. The Updates page checks stable GitHub releases once a day (this can be turned off). Portable packages are unsigned, so the host only downloads and verifies a package and shows it in File Explorer. To install it, quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid. Paired clients are stored in `%LOCALAPPDATA%\Computer Use` and are kept.
+
 ## Local Windows agent: stdio MCP
 
 Open an ordinary, non-elevated test application and pair its **full executable path**. The path below is a placeholder: substitute your own disposable test application. Local stdio and remote Mac access are alternatives; you do not need both.
@@ -54,7 +56,7 @@ Set-Location '.\artifacts\Computer Use Windows x64'
 
 Approve only intended executable paths. Revoking this client invalidates its Mac credentials. Host connection metadata, credentials and logs are kept in the current user's protected `%LOCALAPPDATA%\Computer Use` directory. Do not start the host from a service account or a noninteractive session.
 
-Enable local HTTP MCP in the tray, then export a new private configuration file:
+Enable local HTTP MCP on the Connect page of Settings (it lasts for the current run only), then export a new private configuration file:
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js config http --profile mac-codex --out "$env:LOCALAPPDATA\Computer Use\mac-codex-mcp.json"
@@ -99,9 +101,9 @@ If noninteractive `codex exec` fails with `MCP tool call requires approval, but 
 
 ## Troubleshooting
 
-Pairing and foreground requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Yes submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
+Pairing and foreground requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Allow submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
 
-Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, and stop cleanup. This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
+Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, stop cleanup, both translation tables, the settings store, the six settings pages and the client list. Add `-- --screenshots <folder>` to save every settings page as PNG, or `-- --live-update <old-package-folder>` to check and download the real latest release through that package's CLI (network required). This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
 
 - `doctor` cannot connect: check that the tray runs in the logged-in desktop and that host and driver versions match.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.

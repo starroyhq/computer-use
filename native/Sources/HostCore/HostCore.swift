@@ -5,13 +5,13 @@ public enum HostFailure: Error, LocalizedError {
     case unsafeDirectory, alreadyRunning, resourcesUnavailable, lineTooLong, invalidEvent, socketPathTooLong, socketOccupied
     public var errorDescription: String? {
         switch self {
-        case .unsafeDirectory: return "服务数据目录必须属于当前用户且不能是符号链接。"
-        case .alreadyRunning: return "Computer Use 已在运行。"
-        case .resourcesUnavailable: return "缺少内置运行组件，请使用完整 App 安装包。"
-        case .lineTooLong: return "运行时事件超出长度限制。"
-        case .invalidEvent: return "运行时返回了无效事件。"
-        case .socketPathTooLong: return "本地服务 socket 路径过长。"
-        case .socketOccupied: return "本地服务 socket 路径已被其他文件占用，已保留原文件。"
+        case .unsafeDirectory: return tr(.errorUnsafeDirectory)
+        case .alreadyRunning: return tr(.errorAlreadyRunning)
+        case .resourcesUnavailable: return tr(.errorResourcesUnavailable)
+        case .lineTooLong: return tr(.errorLineTooLong)
+        case .invalidEvent: return tr(.errorInvalidEvent)
+        case .socketPathTooLong: return tr(.errorSocketPathTooLong)
+        case .socketOccupied: return tr(.errorSocketOccupied)
         }
     }
 }
@@ -28,6 +28,9 @@ public struct HostPaths {
     public var node: URL { resources.appendingPathComponent("bin/node") }
     public var runtime: URL { resources.appendingPathComponent("runtime/host.js") }
     public var cli: URL { resources.appendingPathComponent("bin/computer-use") }
+    /// 宿主直接用内置 Node 运行 CLI 脚本（检查更新），不经过 shell 包装。
+    public var cliScript: URL { resources.appendingPathComponent("runtime/cli.js") }
+    public var licenses: URL { resources.appendingPathComponent("licenses", isDirectory: true) }
     public var driverSocket: String { data.appendingPathComponent("driver.sock").path }
     public var runtimeSocket: String { data.appendingPathComponent("runtime.sock").path }
     public var driverArguments: [String] { ["serve", "--embedded", "--parent-liveness-stdio", "--socket", driverSocket] }
@@ -83,6 +86,18 @@ public final class HostLock {
 public struct ClientRecord: Decodable, Equatable {
     public let id: String
     public let name: String
+    /// 授权范围只用于展示；旧版运行时不发送这些字段。
+    public let appIds: [String]?
+    public let browser: Bool?
+    public let foreground: Bool?
+
+    public init(id: String, name: String, appIds: [String]? = nil, browser: Bool? = nil, foreground: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.appIds = appIds
+        self.browser = browser
+        self.foreground = foreground
+    }
 }
 
 public struct HostEvent: Decodable {
@@ -91,6 +106,7 @@ public struct HostEvent: Decodable {
     public let name: String?
     public let appIds: [String]?
     public let browser: Bool?
+    public let foreground: Bool?
     public let sessionId: String?
     public let clientName: String?
     public let targetTitle: String?

@@ -234,5 +234,19 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     const help = await cli(['--help']);
     expect(help.code).toBe(0);
     expect(help.stdout.startsWith(`Computer Use ${version} `)).toBe(true);
+    expect(help.stdout).toContain('computer-use update download --out DIR');
+    // 更新命令的用法错误在联网之前就报告。
+    for (const args of [['update'], ['update', 'install'], ['update', 'download'], ['update', 'check', 'extra']]) {
+      const misuse = await cli(args);
+      expect(misuse.code, args.join(' ')).toBe(1);
+      expect(JSON.parse(misuse.stderr), args.join(' ')).toEqual({
+        error: { code: 'invalid_request', message: expect.stringContaining('update check') },
+      });
+    }
+    const badRelease = await cli(['update', 'download', '--out', directory, '--release', 'latest']);
+    expect(badRelease.code).toBe(1);
+    expect(JSON.parse(badRelease.stderr)).toEqual({
+      error: { code: 'invalid_request', message: expect.stringContaining('MAJOR.MINOR.PATCH') },
+    });
   });
 });

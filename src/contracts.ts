@@ -104,7 +104,8 @@ export type HostEvent =
   | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; browser: boolean; foreground: boolean }
   | { event: 'foreground_request'; sessionId: string; clientName: string; targetTitle: string }
   | { event: 'decision_finished'; requestId: string; approved: boolean }
-  | { event: 'clients'; clients: Array<{ id: string; name: string }> }
+  // 宿主的客户端列表：授权范围只用于展示，不含凭据。
+  | { event: 'clients'; clients: Array<{ id: string; name: string; appIds: string[]; browser: boolean; foreground: boolean }> }
   | { event: 'ready' }
   | { event: 'control_begin' | 'control_end'; pid: number }
   | { event: 'rpc_response'; id: string; result?: unknown; error?: { code: ErrorCode; message: string } }

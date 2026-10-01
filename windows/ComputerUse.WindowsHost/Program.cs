@@ -23,20 +23,33 @@ internal static class Program
             PrintProcessPaths(args[1]);
             return 0;
         }
-        if (args.Length != 0) return 2;
+        // 登录时启动项带 --background：只在托盘运行，不打开设置窗口。
+        var background = args.Length == 1 && args[0] == LaunchAtLogin.BackgroundArgument;
+        if (args.Length != 0 && !background) return 2;
         if (!Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0) return 1;
         var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify current user.");
         var suffix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sid)))[..20];
         using var singleton = new Mutex(true, $@"Local\ComputerUse.WindowsHost.{suffix}", out var created);
+        using var showSignal = OpenShowSignal(suffix);
         if (!created)
         {
-            MessageBox.Show("Computer Use 已在当前用户会话中运行。", "Computer Use", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // 已在运行：请已运行的实例打开设置窗口，与 macOS 再次打开 App 的行为一致。
+            if (background) return 0;
+            if (showSignal is null || !showSignal.Set())
+                MessageBox.Show(L10n.T(Msg.AlreadyRunning), "Computer Use", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new HostApplication());
+        Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal));
         return 0;
+    }
+
+    // 会话内的命名事件（Local 命名空间，名称含当前用户 SID 的哈希）；触发它只会让托盘程序打开设置窗口。
+    private static EventWaitHandle? OpenShowSignal(string suffix)
+    {
+        try { return new EventWaitHandle(false, EventResetMode.AutoReset, $@"Local\ComputerUse.WindowsHost.Show.{suffix}"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { return null; }
     }
 
     private static void PrintProcessPaths(string values)

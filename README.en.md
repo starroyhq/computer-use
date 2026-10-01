@@ -13,6 +13,7 @@ Give your existing AI agent screenshots and control of authorized application wi
 - **Pairing authorization**: explicitly select applications; one pairing approval also grants foreground control and persists until the client is revoked; pause or stop execution.
 - **Action records**: fresh snapshots and request IDs for tracking outcomes; uncertain actions are never automatically replayed.
 - **Separate browser**: Playwright controls an isolated headless Chromium without inheriting your everyday browser's login state.
+- **Settings and updates**: a settings window with General, Status, Clients, Connect, Updates and About pages, shown in Simplified Chinese or English to match the system; a daily check for stable GitHub releases, with SHA-256 and release-metadata verification of downloads.
 
 Cua Driver supplies desktop capture, accessibility and input; Playwright supplies browser automation; MCP transport uses the official TypeScript SDK. This project implements the hosts, authorization, sessions and snapshots, deduplication and outcome records, CLI/MCP integration, backend adapters and packaging. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
@@ -48,7 +49,7 @@ open 'artifacts/Computer Use.app'
 
 Request Accessibility and Screen Recording in the app, grant them to Computer Use, then fully quit and reopen it. Default builds use ad-hoc development signing and are not notarized; re-signing or changing the application identifier may require new grants. Do not replace the app while it is running.
 
-Choose “安装 CLI 到 ~/.local/bin” in the menu bar (install CLI), then check the launcher in your current terminal:
+Open Settings… from the menu bar icon and choose Install in ~/.local/bin… on the General page, then check the launcher in your current terminal:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -98,6 +99,17 @@ Reload the client's MCP configuration, then start with a read-only task:
 Expect a real window screenshot and description. Confirm that flow before trying input and clicks in a disposable document. Other agents can use `computer-use config stdio --profile codex` for a paired profile's generic JSON configuration; real model integration with other clients is still pending validation.
 
 For manual CLI calls, browser setup and action parameters, see [Usage](docs/USAGE.md) and the bundled [CLI skill](skills/computer-use/SKILL.md).
+
+## Settings and updates
+
+The menu bar icon (the notification-area icon on Windows) shows the service state; its menu keeps only Settings, Pause/Resume, Emergency Stop, Restart, Check for Updates and Quit. Pairing approvals still appear as dialogs. Paired clients, their scopes and revocation live on the Clients page of Settings; the local HTTP MCP switch and the stdio configuration live on the Connect page. Opening at login is off by default; macOS uses a system login item and Windows a current-user startup entry.
+
+Automatic checks are on by default and run at most once a day. They read only this repository's latest stable GitHub release (never drafts, prereleases or older versions) and send no usage data. Turn them off on the Updates page or skip a version. Checks use the GitHub API first. The unauthenticated API allows 60 requests per hour per IP; when that is used up or the API is unreachable, the check reads the github.com release page instead, with the same result. A download must match the release's SHA-256 checksum file and metadata, and GitHub's recorded digest when read through the API:
+
+- **macOS**: signed releases install in one step. The app extracts the new version, confirms that its bundle identifier, version and signing team match the running app and that it passes Gatekeeper, then after your confirmation stops the service, replaces the app in place and reopens it; system permissions and paired clients are kept. When the system runs the app from a translocated location (for example, opened straight from Downloads) or its folder is not writable, the verified new version is shown in Finder for a manual replacement instead. Development builds from source only check manually.
+- **Windows**: portable packages are unsigned, so the host downloads and verifies the package and shows it in File Explorer. Quit the tray app, extract the package and replace the current folder with the new one, keeping the same path.
+
+Both hosts run the check and download through the bundled CLI; you can also run `computer-use update check` directly. See [Usage](docs/USAGE.md#检查更新--updates).
 
 ## Permissions and limits
 

@@ -136,6 +136,18 @@ describe('Runtime authorization and execution', () => {
     expect(runtime.clients.clients.size).toBe(0);
   });
 
+  it('tells the host each client grant for display, without credentials', async () => {
+    const client = await pair();
+    const listed = events.findLast(e => e.event === 'clients');
+    expect(listed).toEqual({
+      event: 'clients',
+      clients: [{ id: client.clientId, name: 'Test Agent', appIds: [target.appId], browser: false, foreground: true }],
+    });
+    expect(JSON.stringify(listed)).not.toContain(client.token);
+    await runtime.control({ command: 'revoke', clientId: client.clientId });
+    expect(events.findLast(e => e.event === 'clients')).toEqual({ event: 'clients', clients: [] });
+  });
+
   it('confirms pairing only after credentials have been persisted', async () => {
     const save = vi.spyOn(runtime.clients, 'save').mockRejectedValueOnce(new Error('disk failure'));
     await expect(pair()).rejects.toThrow('disk failure');

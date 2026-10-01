@@ -34,8 +34,8 @@ internal sealed class ApprovalDialog : Form
             Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 10, 0, 0)
         };
-        var deny = new Button { Text = "否", DialogResult = DialogResult.No, AutoSize = true, MinimumSize = new Size(96, 32) };
-        var allow = new Button { Text = "是", DialogResult = DialogResult.Yes, AutoSize = true, MinimumSize = new Size(96, 32) };
+        var deny = new Button { Text = L10n.T(Msg.ApprovalDeny), DialogResult = DialogResult.No, AutoSize = true, MinimumSize = new Size(96, 32) };
+        var allow = new Button { Text = L10n.T(Msg.ApprovalAllow), DialogResult = DialogResult.Yes, AutoSize = true, MinimumSize = new Size(96, 32) };
         deny.Click += (_, _) => { DialogResult = DialogResult.No; Close(); };
         allow.Click += (_, _) => { DialogResult = DialogResult.Yes; Close(); };
         buttons.Controls.Add(deny);

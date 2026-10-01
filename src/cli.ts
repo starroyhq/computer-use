@@ -42,6 +42,8 @@ computer-use config codex [--profile default]
 computer-use config http --out private-config.json
 computer-use browser install
 computer-use credentials remove [--profile default]
+computer-use update check
+computer-use update download --out DIR [--release X.Y.Z] [--progress]
 
 Methods: ${Object.keys(schemas).join(', ')}
 
@@ -66,6 +68,8 @@ function commandLine() {
         json: { type: 'string' },
         input: { type: 'string' },
         out: { type: 'string' },
+        release: { type: 'string' },
+        progress: { type: 'boolean' },
       },
     });
   } catch (error) {
@@ -109,6 +113,31 @@ async function main(): Promise<void> {
     process.stdout.write(
       JSON.stringify({ removed: profile, note: 'Revoke the client in the local app to invalidate copied credentials.' }) + '\n',
     );
+    return;
+  }
+  // 检查更新只读取 GitHub 上的公开发布信息，不需要配对凭据，也不需要运行时在运行。
+  if (command === 'update') {
+    const action = positionals.length === 2 ? positionals[1] : undefined;
+    if (action !== 'check' && !(action === 'download' && values.out))
+      throw new CuError('invalid_request', 'Use update check, or update download --out <existing directory>.');
+    const { checkForUpdate, downloadUpdate, updatePlatform } = await import('./update.js');
+    const options = { current: VERSION, platform: updatePlatform() };
+    if (action === 'check') {
+      process.stdout.write(JSON.stringify(await checkForUpdate(options)) + '\n');
+      return;
+    }
+    const result = await downloadUpdate({
+      ...options,
+      directory: resolve(values.out!),
+      ...(values.release !== undefined ? { expectedVersion: values.release } : {}),
+      ...(values.progress
+        ? {
+            onProgress: (downloaded: number, total: number) =>
+              process.stderr.write(JSON.stringify({ event: 'progress', downloaded, total }) + '\n'),
+          }
+        : {}),
+    });
+    process.stdout.write(JSON.stringify(result) + '\n');
     return;
   }
   // 只在需要运行时的命令里解析 IPC 路径：Windows 上生成配置不应要求托盘程序正在运行。
