@@ -13,6 +13,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private readonly ToolStripMenuItem _updateItem;
     private readonly Queue<JsonElement> _alerts = new();
     private readonly RegisteredWaitHandle? _showRegistration;
+    private readonly RegisteredWaitHandle? _quitRegistration;
     private HostRuntime? _runtime;
     private bool _running;
     private bool _busy;
@@ -29,7 +30,9 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     /// <param name="showWindow">登录时启动（--background）不打开窗口，只在托盘运行。</param>
     /// <param name="dataDirectory">托盘偏好与更新下载的位置；测试程序传入临时目录。</param>
     /// <param name="showSignal">再次启动程序时由新进程触发，已运行的实例据此打开设置窗口。</param>
-    internal HostApplication(bool showWindow = true, string? dataDirectory = null, WaitHandle? showSignal = null)
+    /// <param name="quitSignal">安装或卸载程序经 --quit 触发：先停止服务，再像菜单里选择“退出”一样退出。</param>
+    internal HostApplication(bool showWindow = true, string? dataDirectory = null, WaitHandle? showSignal = null,
+        WaitHandle? quitSignal = null)
     {
         var settings = new HostSettingsStore(dataDirectory ?? PrivateData.DirectoryPath);
         Updates = new UpdateService(AppContext.BaseDirectory, settings);
@@ -86,6 +89,9 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         if (showSignal is not null)
             _showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => Post(() => _window.ShowPage()),
                 null, Timeout.Infinite, executeOnlyOnce: false);
+        if (quitSignal is not null)
+            _quitRegistration = ThreadPool.RegisterWaitForSingleObject(quitSignal, (_, _) => Post(() => _ = ExitAsync()),
+                null, Timeout.Infinite, executeOnlyOnce: true);
         Post(() => _ = StartAsync());
         Updates.Start();
         if (showWindow) _window.ShowPage(SettingsPage.Status);
@@ -371,6 +377,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         if (_exiting) return;
         _exiting = true;
         _showRegistration?.Unregister(null);
+        _quitRegistration?.Unregister(null);
         Updates.Dispose();
         await StopAsync(L10n.T(Msg.StatusQuitting));
         _tray.Visible = false;

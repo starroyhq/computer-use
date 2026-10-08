@@ -30,8 +30,10 @@ export type UpdateCheck = {
   url: string;
   publishedAt?: string;
   notes: string;
-  /** 该平台的安装包；最新版没有这个平台的包时为空。 */
+  /** 该平台的 ZIP 包（macOS 一键更新与 Windows 便携版使用）；最新版没有这个平台的包时为空。 */
   asset?: UpdateAsset;
+  /** 首次安装用的安装包：macOS 为 DMG，Windows 为安装程序；较早的发布没有。 */
+  installer?: UpdateAsset;
 };
 export type UpdateDownload = {
   version: string;
@@ -99,15 +101,24 @@ const metadataSchema = z.object({
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   signing: z.string(),
   notarization: z.string().optional(),
+  // v0.6.0 起的发布才描述安装包；旧版本读到这个字段时忽略。
+  installer: z.object({ name: z.string(), bytes: z.number().int().nonnegative(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
 });
 type ReleaseFile = { name: string; url: string };
 // digest 只有 GitHub API 提供；改读发布页时为空，元数据已读过时带上原文。
+type PackageFile = ReleaseFile & { size: number; digest?: string };
 type ReleaseFiles = {
-  archive: ReleaseFile & { size: number; digest?: string };
+  archive: PackageFile;
   checksum: ReleaseFile;
   metadata: ReleaseFile & { text?: string };
+  installer?: { file: PackageFile; checksum: ReleaseFile };
 };
 type Release = { check: UpdateCheck; files?: ReleaseFiles };
+
+/** 发布中安装包的文件名：macOS 为 DMG，Windows 为安装程序。 */
+export function installerName(version: string, platform: UpdatePlatform): string {
+  return platform === 'macos-arm64' ? `computer-use-${version}-${platform}.dmg` : `computer-use-${version}-${platform}-setup.exe`;
+}
 
 function trusted(url: URL, options: UpdateOptions): boolean {
   if (options.trustedOrigins) return options.trustedOrigins.includes(url.origin);
@@ -261,6 +272,13 @@ async function resolveRelease(options: UpdateOptions): Promise<Release> {
   const archive = find(`${prefix}.zip`);
   const checksum = find(`${prefix}.zip.sha256`);
   const metadata = find(`${prefix}.json`);
+  const installer = find(installerName(latest, options.platform));
+  const installerChecksum = installer && find(`${installer.name}.sha256`);
+  const describe = (asset: z.infer<typeof assetSchema>): UpdateAsset => ({
+    name: asset.name,
+    size: asset.size,
+    ...(sha256Digest(asset.digest) ? { sha256: sha256Digest(asset.digest)! } : {}),
+  });
   const check: UpdateCheck = {
     current: options.current,
     latest,
@@ -270,24 +288,23 @@ async function resolveRelease(options: UpdateOptions): Promise<Release> {
     url: parsed.html_url,
     ...(parsed.published_at ? { publishedAt: parsed.published_at } : {}),
     notes: plainNotes(parsed.body),
-    ...(archive
-      ? {
-          asset: {
-            name: archive.name,
-            size: archive.size,
-            ...(sha256Digest(archive.digest) ? { sha256: sha256Digest(archive.digest)! } : {}),
-          },
-        }
-      : {}),
+    ...(archive ? { asset: describe(archive) } : {}),
+    ...(installer && installerChecksum ? { installer: describe(installer) } : {}),
   };
   if (!archive || !checksum || !metadata) return { check };
   const file = (asset: z.infer<typeof assetSchema>) => ({ name: asset.name, url: asset.browser_download_url });
+  const packageFile = (asset: z.infer<typeof assetSchema>): PackageFile => ({
+    ...file(asset),
+    size: asset.size,
+    ...(asset.digest ? { digest: asset.digest } : {}),
+  });
   return {
     check,
     files: {
-      archive: { ...file(archive), size: archive.size, ...(archive.digest ? { digest: archive.digest } : {}) },
+      archive: packageFile(archive),
       checksum: file(checksum),
       metadata: file(metadata),
+      ...(installer && installerChecksum ? { installer: { file: packageFile(installer), checksum: file(installerChecksum) } } : {}),
     },
   };
 }
@@ -317,17 +334,33 @@ async function releaseFromWeb(options: UpdateOptions): Promise<Release> {
   const url = (name: string) => `${options.downloadBase ?? DOWNLOAD_BASE}/v${latest}/${encodeURIComponent(name)}`;
   const metadataResponse = await request(url(`${prefix}.json`), options, signal, 'application/octet-stream');
   let files: ReleaseFiles | undefined;
-  let sha256: string | undefined;
+  let asset: UpdateAsset | undefined;
+  let installer: UpdateAsset | undefined;
   if (metadataResponse.ok) {
     const text = await readLimited(metadataResponse, SMALL_FILE_LIMIT);
     const metadata = parseMetadata(text);
-    if (metadata.version !== latest || metadata.platform !== options.platform || metadata.archive !== `${prefix}.zip`)
+    if (
+      metadata.version !== latest ||
+      metadata.platform !== options.platform ||
+      metadata.archive !== `${prefix}.zip` ||
+      (metadata.installer && metadata.installer.name !== installerName(latest, options.platform))
+    )
       fail('The release metadata does not match the package.');
-    sha256 = metadata.sha256;
+    asset = { name: metadata.archive, size: metadata.bytes, sha256: metadata.sha256 };
+    if (metadata.installer)
+      installer = { name: metadata.installer.name, size: metadata.installer.bytes, sha256: metadata.installer.sha256 };
     files = {
       archive: { name: metadata.archive, url: url(metadata.archive), size: metadata.bytes },
       checksum: { name: `${metadata.archive}.sha256`, url: url(`${metadata.archive}.sha256`) },
       metadata: { name: `${prefix}.json`, url: url(`${prefix}.json`), text },
+      ...(installer
+        ? {
+            installer: {
+              file: { name: installer.name, url: url(installer.name), size: installer.size },
+              checksum: { name: `${installer.name}.sha256`, url: url(`${installer.name}.sha256`) },
+            },
+          }
+        : {}),
     };
   } else {
     await metadataResponse.body?.cancel().catch(() => {});
@@ -344,7 +377,8 @@ async function releaseFromWeb(options: UpdateOptions): Promise<Release> {
     url: `${WEB_BASE}/${RELEASE_REPOSITORY}/releases/tag/v${latest}`,
     // 只有提供更新时才显示发布说明。
     notes: available ? await releaseNotes(latest, options) : '',
-    ...(files && sha256 ? { asset: { name: files.archive.name, size: files.archive.size, sha256 } } : {}),
+    ...(asset ? { asset } : {}),
+    ...(installer ? { installer } : {}),
   };
   return { check, ...(files ? { files } : {}) };
 }
@@ -398,6 +432,8 @@ export async function downloadUpdate(
     directory: string;
     /** 用户确认过的版本：最新版在此期间变了就拒绝，避免安装用户没看过的版本。 */
     expectedVersion?: string;
+    /** 下载安装包（macOS 为 DMG，Windows 为安装程序）而不是 ZIP。Windows 安装版用它更新。 */
+    installer?: boolean;
     onProgress?: (downloaded: number, total: number) => void;
   },
 ): Promise<UpdateDownload> {
@@ -408,33 +444,38 @@ export async function downloadUpdate(
   if (options.expectedVersion !== undefined && options.expectedVersion !== check.latest)
     throw new CuError('invalid_request', 'The latest release changed; check for updates again.');
   if (!files) throw new CuError('not_found', `The latest release has no package for ${options.platform}.`);
+  if (options.installer && !files.installer) throw new CuError('not_found', `The latest release has no installer for ${options.platform}.`);
+  const target = options.installer && files.installer ? files.installer.file : files.archive;
+  const checksumFile = options.installer && files.installer ? files.installer.checksum : files.checksum;
   const directory = await stat(options.directory).catch(() => undefined);
   if (!directory?.isDirectory()) throw new CuError('invalid_request', 'Specify an existing directory with --out.');
-  const destination = join(options.directory, files.archive.name);
+  const destination = join(options.directory, target.name);
   if (await stat(destination).catch(() => undefined)) throw new CuError('invalid_request', 'The package already exists in --out.');
   const signal = AbortSignal.any([AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), ...(options.signal ? [options.signal] : [])]);
 
-  const checksum = /^([0-9a-f]{64}) {2}(\S+)\n?$/.exec(await fetchSmall(files.checksum, check.latest, options, signal));
-  const expectedHash = checksum?.[2] === files.archive.name ? checksum[1] : undefined;
+  const checksum = /^([0-9a-f]{64}) {2}(\S+)\n?$/.exec(await fetchSmall(checksumFile, check.latest, options, signal));
+  const expectedHash = checksum?.[2] === target.name ? checksum[1] : undefined;
   if (!expectedHash) fail('The release checksum file is invalid.');
   const metadata = parseMetadata(files.metadata.text ?? (await fetchSmall(files.metadata, check.latest, options, signal)));
   const mac = options.platform === 'macos-arm64';
+  // 元数据同时描述 ZIP 与安装包：下载哪一个，就核对它的名称、大小与 SHA-256。
+  const described = options.installer ? metadata.installer : { name: metadata.archive, bytes: metadata.bytes, sha256: metadata.sha256 };
   if (
     metadata.version !== check.latest ||
     metadata.platform !== options.platform ||
     metadata.archive !== files.archive.name ||
-    metadata.sha256 !== expectedHash ||
-    metadata.bytes !== files.archive.size ||
+    described?.name !== target.name ||
+    described.sha256 !== expectedHash ||
+    described.bytes !== target.size ||
     metadata.signing !== (mac ? 'developer-id-notarized' : 'unsigned') ||
     (mac && metadata.notarization !== 'stapled')
   )
     fail('The release metadata does not match the package.');
   // GitHub 记录的摘要只在经 API 读取时可用。
-  if (files.archive.digest && sha256Digest(files.archive.digest) !== expectedHash)
-    fail('The release package digest does not match its checksum.');
+  if (target.digest && sha256Digest(target.digest) !== expectedHash) fail('The release package digest does not match its checksum.');
 
   const partial = `${destination}.partial`;
-  const response = await request(assetUrl(files.archive, check.latest, options), options, signal, 'application/octet-stream');
+  const response = await request(assetUrl(target, check.latest, options), options, signal, 'application/octet-stream');
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => {});
     throw httpFailure(response);
@@ -449,17 +490,17 @@ export async function downloadUpdate(
   try {
     for await (const chunk of chunks(response.body)) {
       downloaded += chunk.byteLength;
-      if (downloaded > files.archive.size) fail('The release package is larger than published.');
+      if (downloaded > target.size) fail('The release package is larger than published.');
       hash.update(chunk);
       await file.write(chunk);
-      if (options.onProgress && (downloaded - reported >= files.archive.size / 100 || downloaded === files.archive.size)) {
+      if (options.onProgress && (downloaded - reported >= target.size / 100 || downloaded === target.size)) {
         reported = downloaded;
-        options.onProgress(downloaded, files.archive.size);
+        options.onProgress(downloaded, target.size);
       }
     }
     await file.sync();
     await file.close();
-    if (downloaded !== files.archive.size) fail('The release package download was incomplete.');
+    if (downloaded !== target.size) fail('The release package download was incomplete.');
     if (hash.digest('hex') !== expectedHash) fail('The downloaded package failed its SHA-256 check.');
     await rename(partial, destination);
   } catch (error) {

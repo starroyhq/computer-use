@@ -4,7 +4,7 @@
 
 让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
 
-**开发预览。** 可从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载 macOS ARM64、Windows ARM64 和 x64 便携包；也可按下文从源码构建。尚未提供正式安装器，已验证范围见下表。
+**开发预览。** 可从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载 macOS ARM64 的 DMG、Windows ARM64 和 x64 的安装程序（另有便携 ZIP），见[安装正式版](#安装正式版)；也可按下文从源码构建。已验证范围见下表。
 
 ## 主要功能
 
@@ -22,11 +22,20 @@ Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright �
 | 平台 | 构建与接入 | 验证范围 |
 |---|---|---|
 | macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 旧标识版本完成 AppKit Fixture 与 Codex 桌面实测；新标识已通过构建、签名校验，桌面回归待完成 |
-| Windows 11 ARM64 | 托盘便携开发包；本机 CLI / MCP，Mac 可经 SSH 连接 | 当前版本在一台虚拟机通过 66 个 Fixture 输入用例、1 次 Mac Codex 模型回归及授权/断线/退出检查 |
+| Windows 11 ARM64 | 托盘程序（安装程序或便携包）；本机 CLI / MCP，Mac 可经 SSH 连接 | 当前版本在一台虚拟机通过 66 个 Fixture 输入用例、1 次 Mac Codex 模型回归及授权/断线/退出检查 |
 | Windows 11 x64 | 独立 x64 构建目标 | 旧开发包在 ARM64 系统的 x64 模拟环境通过组件校验；原生 x64 桌面未验收 |
 | macOS Intel / Linux | 暂无本项目宿主交付 | 未验证 |
 
 应用标识现为 `com.starroy.computeruse`。Windows ARM64 已完成上述限定验收；macOS 和 x64 的旧版证据不能代替当前版本验收。测试方法、结果及未覆盖项见 [验证记录](docs/validation-results.md)。
+
+## 安装正式版
+
+从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载对应平台的文件（`<版本>` 为版本号）：
+
+- **macOS（Apple Silicon）**：`computer-use-<版本>-macos-arm64.dmg`。打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。App 与 DMG 都使用 Developer ID 签名并经过 Apple 公证。
+- **Windows 11**：`computer-use-<版本>-windows-arm64-setup.exe` 或 `…-windows-x64-setup.exe`。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。安装程序未签名，SmartScreen 可能提示“Windows 已保护你的电脑”，确认来自本项目的 Releases 后选“更多信息 → 仍要运行”。
+
+每个文件都附有 `.sha256` 校验文件。同一发布还有便携 ZIP：macOS 一键更新使用它；Windows 便携包解压即可运行，见 [Windows 指南](docs/WINDOWS.md)。安装后的权限与配对步骤与下文从源码构建相同。
 
 ## 快速开始：从源码构建
 
@@ -107,7 +116,7 @@ node scripts/package-windows.mjs --arch x64
 自动检查默认开启，每天最多一次，只读取本仓库 GitHub 上最新的正式版（不含草稿和预发布，也不降级），不上传使用数据；可在“更新”页关闭，或对某个版本选择“跳过”。检查优先使用 GitHub API；未认证的 API 每个 IP 每小时只能调用 60 次，用完或连不上时改读 github.com 的发布页，结果相同。下载的安装包必须与发布里的 SHA-256 校验文件和元数据一致，经 API 读取时还要与 GitHub 记录的摘要一致：
 
 - **macOS**：Developer ID 签名的正式版可一键安装。App 解压新版本后，确认 Bundle ID、版本、签名团队与当前 App 一致并通过 Gatekeeper 检查，经你确认后停止服务、在原位置替换并重新打开，系统权限和已配对客户端保持不变。App 被系统隔离运行（例如下载后未移动就直接打开）或所在文件夹不可写时，改为在访达中显示校验过的新版本，由你手动替换。源码构建的开发版本只能手动检查。
-- **Windows**：便携包未签名，只下载并校验，然后在资源管理器中显示安装包；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。
+- **Windows**：安装版下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。便携版只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。v0.5.0 及更早的版本都是便携版。
 
 两个宿主都通过内置 CLI 完成检查和下载，也可以直接运行 `computer-use update check`，见 [使用说明](docs/USAGE.md#检查更新--updates)。
 

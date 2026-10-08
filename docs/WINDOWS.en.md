@@ -1,12 +1,26 @@
-# Windows ARM64 / x64 development packages and agent setup
+# Windows ARM64 / x64: installation and agent setup
 
 [简体中文](WINDOWS.md) | English · [Home](../README.en.md)
 
-The current ARM64 package using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop**: 66 fixture input cases, one real Mac Codex model regression, and authorization, disconnect and exit checks. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. Packages are development artifacts, not signed installers. Elevated applications and the UAC secure desktop are unsupported.
+The current ARM64 package using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop**: 66 fixture input cases, one real Mac Codex model regression, and authorization, disconnect and exit checks. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. The installer and the portable package are both unsigned. Elevated applications and the UAC secure desktop are unsupported.
 
-## Build and start on Windows
+## Install and uninstall
 
-If someone supplies a portable ZIP, extract the entire package on Windows 11 of the matching architecture and launch `ComputerUse.WindowsHost.exe`. Do not copy only the EXE. Runtime components are bundled; build tools are not required to run the package. Start in your interactive login session. Packages do not include pairing credentials: each user must create and approve their own pairing.
+The recommended download is the release installer `computer-use-<version>-windows-<arm64|x64>-setup.exe` for your Windows architecture. The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; a first install can choose another folder and upgrades keep the original one. It adds a Start menu shortcut, offers an optional desktop shortcut and can start the app when it finishes. Before installing, setup runs `ComputerUse.WindowsHost.exe --quit` so that a tray app running in the current session (installed or portable) stops its service and quits; version 0.5.0 and earlier do not support `--quit`, so the wizard asks you to quit from the tray menu and try again. The installer is unsigned, so SmartScreen may say "Windows protected your PC"; once you have confirmed it came from this project's Releases, choose More info → Run anyway.
+
+Uninstall from Settings → Apps. The uninstaller first has the tray app stop its service and quit, then removes the install folder and a sign-in startup entry that points to it. Pairing credentials, settings and logs in `%LOCALAPPDATA%\Computer Use` are kept; delete that folder yourself when you no longer need them.
+
+For an installed copy the CLI is `bin\node.exe runtime\cli.js` in the install folder; the General page of the settings window copies the full command. The commands below run from the package folder; for an installed copy, enter the install folder first:
+
+```powershell
+Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
+```
+
+You can also use the portable ZIP: extract the entire package on Windows 11 of the matching architecture and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. When you move from a portable copy to the installer, the program location changes, so regenerate agent configuration from the new location; pairing credentials stay valid.
+
+Either way, runtime components are bundled; build tools are not required to run the package. Start in your interactive login session. Packages do not include pairing credentials: each user must create and approve their own pairing.
+
+## Build and start from source
 
 To build, install .NET 10 SDK, Node 24+ and pnpm 10, then obtain the source as described in the [README](../README.en.md). From the repository root in PowerShell:
 
@@ -22,14 +36,32 @@ For ARM64, replace `x64` with `arm64` and use the `Computer Use Windows ARM64` o
 
 Packaging downloads pinned Node 24.21.0 and Cua Driver 0.28.2 artifacts, checks official manifests and pinned SHA-256 values, and installs production dependencies for the selected architecture from the lockfile. It checks host, Node, driver and native SDK architecture and loads the SDK. License files are retained. The bundled CLI is `bin\node.exe runtime\cli.js`; no global Node is required. Quitting the tray stops the service and input. Do not replace a running package. Component checks do not establish desktop screenshot or input correctness.
 
-Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder. The Updates page checks stable GitHub releases once a day (this can be turned off). Portable packages are unsigned, so the host only downloads and verifies a package and shows it in File Explorer. To install it, quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid. Paired clients are stored in `%LOCALAPPDATA%\Computer Use` and are kept.
+The installer is built from the verified portable folder above and requires [Inno Setup](https://jrsoftware.org/isinfo.php) 7.0.2 or later: Simplified Chinese became an official language in that release, and Inno Setup 6 does not include it by default. The script looks for an `ISCC.exe` with Simplified Chinese in `Inno Setup 7`, then `Inno Setup 6`, under Program Files and the current user's programs folder; set `INNO_SETUP_COMPILER` to use another path:
+
+```powershell
+node scripts/package-windows-installer.mjs --arch x64
+node scripts/package-windows-installer.mjs --arch x64 --verify-only --smoke-test
+```
+
+The result is `artifacts\Computer Use Windows x64 Setup.exe`. `--smoke-test` installs silently into a temporary folder, checks the installed components, uninstall registration and Start menu shortcut, then uninstalls silently. It shares the release AppId, so the script refuses to run when Computer Use is installed for the current user; CI runs it on disposable runners.
+
+Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder.
+
+## Updates
+
+The Updates page checks stable GitHub releases once a day (this can be turned off), and downloads must match the release SHA-256 checksum file and metadata. When the program folder is the install folder in the current user's uninstall registration, the copy counts as installed; otherwise it is portable:
+
+- **Installed**: downloads and verifies the new installer; choose Run Installer and follow the setup wizard. Setup first has the tray app stop its service and quit, installs over the original folder and can start the app when it finishes. Cancelling before you choose Install leaves the tray app running.
+- **Portable**: only downloads and verifies the ZIP and shows it in File Explorer. Quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid.
+
+Paired clients and settings are stored in `%LOCALAPPDATA%\Computer Use` and are kept either way.
 
 ## Local Windows agent: stdio MCP
 
 Open an ordinary, non-elevated test application and pair its **full executable path**. The path below is a placeholder: substitute your own disposable test application. Local stdio and remote Mac access are alternatives; you do not need both.
 
 ```powershell
-Set-Location '.\artifacts\Computer Use Windows x64' # For a supplied ZIP, run subsequent commands in its extracted directory
+Set-Location '.\artifacts\Computer Use Windows x64' # Installed copy or supplied ZIP: enter the install or extracted folder instead
 & .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
 ```
 
@@ -45,7 +77,7 @@ Add the output to the Windows user's `~/.codex/config.toml` or a trusted project
 
 ## Remote Mac access: Windows pairing and credentials
 
-From the repository root, enter the portable package directory. Skip `Set-Location` if already there. Create a separate remote client profile and approve it in the tray:
+From the repository root, enter the package directory. Skip `Set-Location` if already there. Create a separate remote client profile and approve it in the tray:
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64'
@@ -85,7 +117,7 @@ ssh -i "$HOME/.ssh/computer_use_windows_ed25519" \
 
 If Mac port 47631 is occupied, stop the local service using it before connecting. The tunnel makes `http://127.0.0.1:47631/mcp` on the Mac reach Windows. Do not use `-g` or bind the forward to `0.0.0.0`.
 
-Copy `helpers/windows-remote-auth.mjs` from the package to `~/.config/computer-use/` on the Mac, or use the repository's `scripts/windows-remote-auth.mjs`. Add the following to Mac user-level `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. Replace all three absolute paths with your actual Node executable, helper script and private JSON paths. The helper returns an Authorization header; the TOML contains no token. Codex supports the helper only in its local execution environment; see the [official MCP guide](https://learn.chatgpt.com/docs/extend/mcp).
+Copy `helpers/windows-remote-auth.mjs` from the install folder or package to `~/.config/computer-use/` on the Mac, or use the repository's `scripts/windows-remote-auth.mjs`. Add the following to Mac user-level `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. Replace all three absolute paths with your actual Node executable, helper script and private JSON paths. The helper returns an Authorization header; the TOML contains no token. Codex supports the helper only in its local execution environment; see the [official MCP guide](https://learn.chatgpt.com/docs/extend/mcp).
 
 ```toml
 [mcp_servers.computer-use-windows]
@@ -103,7 +135,7 @@ If noninteractive `codex exec` fails with `MCP tool call requires approval, but 
 
 Pairing and foreground requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Allow submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
 
-Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, stop cleanup, both translation tables, the settings store, the six settings pages and the client list. Add `-- --screenshots <folder>` to save every settings page as PNG, or `-- --live-update <old-package-folder>` to check and download the real latest release through that package's CLI (network required). This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
+Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, stop cleanup, both translation tables, the settings store, the six settings pages, the client list and the update actions for installed and portable copies. Add `-- --screenshots <folder>` to save every settings page as PNG, or `-- --live-update <old-package-folder>` to check and download the real latest release through that package's CLI, including its installer when the release has one (network required). This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
 
 - `doctor` cannot connect: check that the tray runs in the logged-in desktop and that host and driver versions match.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.

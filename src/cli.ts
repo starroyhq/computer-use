@@ -43,7 +43,7 @@ computer-use config http --out private-config.json
 computer-use browser install
 computer-use credentials remove [--profile default]
 computer-use update check
-computer-use update download --out DIR [--release X.Y.Z] [--progress]
+computer-use update download --out DIR [--release X.Y.Z] [--installer] [--progress]
 
 Methods: ${Object.keys(schemas).join(', ')}
 
@@ -69,6 +69,7 @@ function commandLine() {
         input: { type: 'string' },
         out: { type: 'string' },
         release: { type: 'string' },
+        installer: { type: 'boolean' },
         progress: { type: 'boolean' },
       },
     });
@@ -130,6 +131,7 @@ async function main(): Promise<void> {
       ...options,
       directory: resolve(values.out!),
       ...(values.release !== undefined ? { expectedVersion: values.release } : {}),
+      ...(values.installer ? { installer: true } : {}),
       ...(values.progress
         ? {
             onProgress: (downloaded: number, total: number) =>

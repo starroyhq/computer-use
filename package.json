@@ -22,7 +22,9 @@
     "native:test": "swift test --package-path native",
     "native:build": "swift build --package-path native -c release",
     "package:app": "node scripts/package-app.mjs",
+    "package:dmg": "node scripts/package-dmg.mjs",
     "package:windows": "node scripts/package-windows.mjs",
+    "package:windows-installer": "node scripts/package-windows-installer.mjs",
     "probe": "node dist/probe.js"
   },
   "dependencies": {

@@ -11,7 +11,7 @@ jobs:
   package:
     name: Package ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,10 +51,34 @@ jobs:
       - name: Build macOS development app
         if: runner.os == 'macOS'
         run: pnpm package:app
+      - name: Build macOS disk image
+        if: runner.os == 'macOS'
+        run: node scripts/package-dmg.mjs
       - name: Build Windows portable package
         if: runner.os == 'Windows'
         run: node scripts/package-windows.mjs --arch ${{ matrix.arch }}
-      - name: Archive, extract, verify and checksum
+      # The runner images carry Inno Setup 6, which lacks the Simplified Chinese messages
+      # (official from 7.0.2). Install a pinned, signed release for the current user instead.
+      - name: Install pinned Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $installer
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f') { throw "Unexpected Inno Setup installer hash: $hash" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '^CN=Pyrsys B\.V\.,') { throw 'Unexpected Inno Setup installer signature.' }
+          $directory = Join-Path $env:RUNNER_TEMP 'InnoSetup7'
+          $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', "/DIR=$directory")
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed with exit code $($process.ExitCode)." }
+          "INNO_SETUP_COMPILER=$(Join-Path $directory 'ISCC.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        run: node scripts/package-windows-installer.mjs --arch ${{ matrix.arch }}
+      - name: Archive, verify, smoke-test installer and checksum
         run: node .github/scripts/archive-package.mjs ${{ matrix.platform }}
       - name: Upload verified development package
         uses: actions/upload-artifact@v7

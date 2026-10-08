@@ -31,3 +31,11 @@ node scripts/package-app.mjs --verify-only
 在 Windows 11 上准备 .NET 10 SDK、Node 24+ 与 pnpm 10，运行 `node scripts/package-windows.mjs --arch arm64` 或 `--arch x64`。ARM64 主机也可交叉打包 x64；x64 主机只构建 x64。省略 `--arch` 时使用当前 Node 架构；`--verify-only` 可重验所选架构的包。产物分别为 `artifacts/Computer Use Windows ARM64/` 和 `artifacts/Computer Use Windows x64/`，归属标记独立，互不覆盖。脚本不会触碰 macOS App。
 
 固定组件来自官方校验文件：ARM64 使用 Node.js 24.21.0 `node-v24.21.0-win-arm64.zip`（SHA-256 `8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921`）及 Cua Driver 0.28.2 `cua-driver-rs-0.28.2-windows-arm64-binary.zip`（`578b88ff2dd56f06eb7e984d73aaf5e76f59c6fde9542c967d6a30d00213c680`）；x64 使用 `node-v24.21.0-win-x64.zip`（`158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541`）及 `cua-driver-rs-0.28.2-windows-x86_64-binary.zip`（`1f4bfceeab64cb7f56be7aad774c3dc2d2910d1427e4be1d79939c706e8029ba`）。缓存包每次重算哈希，生产依赖在隔离目录由锁文件安装，Windows 托盘按所选 RID 自包含发布。产物保留 Node、Cua、.NET 与项目许可证；验证检查关键 PE 架构、Node 与驱动版本、CLI 帮助及 Cua 原生 SDK 实际加载，不自动操作桌面。ARM64 已完成桌面验证，x64 仍需在 Win11 x64 上实测；具体启动和 Mac SSH/MCP 接入见 [Windows 说明](../docs/WINDOWS.md)。
+
+## 安装包：macOS DMG 与 Windows 安装程序
+
+安装包只用于首次安装，内容就是上面校验过的 App 或便携目录；macOS 一键更新和 Windows 便携版更新仍使用 ZIP。
+
+macOS 运行 `pnpm package:dmg`，把 `artifacts/Computer Use.app` 做成 `artifacts/Computer Use.dmg`：HFS+、UDZO 压缩，内含 App 与指向 `/Applications` 的快捷方式。身份的来源与 `package-app.mjs` 相同（`--identity`，其次 `.env.local`）；有 Developer ID 时用 `--timestamp` 签名映像，ad-hoc 开发版本的映像不签名。校验会只读挂载映像，确认其中只有 App 与快捷方式并复验 App，签名时再核对映像的签名者；`--verify-only` 只重验已有映像。公证和装订只在发布作业里进行。
+
+Windows 在打好便携目录后运行 `node scripts/package-windows-installer.mjs --arch arm64` 或 `--arch x64`，需要 [Inno Setup](https://jrsoftware.org/isinfo.php) 7.0.2 或更高版本（简体中文从这个版本起是官方语言；先找 `Inno Setup 7`，其次补装过简体中文的 `Inno Setup 6`，也可用 `INNO_SETUP_COMPILER` 指定 `ISCC.exe`）。脚本 `windows/installer/ComputerUse.iss` 必须保存为带 BOM 的 UTF-8，打包脚本会检查。产物为 `artifacts/Computer Use Windows <ARM64|x64> Setup.exe`：按当前用户安装到 `%LOCALAPPDATA%\Programs\Computer Use`，不需要管理员权限，升级前用 `ComputerUse.WindowsHost.exe --quit` 关闭正在运行的托盘程序，卸载保留 `%LOCALAPPDATA%\Computer Use`。打包前会复验便携目录并要求它的版本与源码一致。`--verify-only` 只检查已有安装程序；`--smoke-test` 静默安装到临时目录、复验组件、卸载登记与开始菜单快捷方式后再卸载，因与正式安装共用 AppId，当前用户已安装时拒绝运行。

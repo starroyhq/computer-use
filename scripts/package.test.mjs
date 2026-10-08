@@ -5,6 +5,19 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { sha256 } from './fetch-runtime.mjs';
 import { assertInternalLinks, signingIdentity } from './package-app.mjs';
+import { parseArguments as parseDmgArguments } from './package-dmg.mjs';
+
+test('disk image CLI builds a development image, verifies one, or signs with a Developer ID', () => {
+  assert.deepEqual(parseDmgArguments([]), { verifyOnly: false });
+  assert.deepEqual(parseDmgArguments(['--verify-only']), { verifyOnly: true });
+  assert.deepEqual(parseDmgArguments(['--identity', 'Developer ID Application: Example (ABCDE12345)']), {
+    verifyOnly: false,
+    identity: 'Developer ID Application: Example (ABCDE12345)',
+  });
+  assert.throws(() => parseDmgArguments(['--identity', '-']), /Usage/);
+  assert.throws(() => parseDmgArguments(['--identity']), /Usage/);
+  assert.throws(() => parseDmgArguments(['--verify-only', '--identity', 'Developer ID Application: X (Y)']), /Usage/);
+});
 
 test('signing identity comes from --identity, then the ignored local env file, then ad-hoc', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'computer-use-signing-test-'));

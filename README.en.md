@@ -4,7 +4,7 @@
 
 Give your existing AI agent screenshots and control of authorized application windows through MCP or CLI. Built on [Cua Driver](https://github.com/trycua/cua) and [Playwright](https://github.com/microsoft/playwright), Computer Use provides a macOS menu-bar app and a Windows tray host. Your chosen agent handles task understanding and planning.
 
-**Development preview.** Download the macOS ARM64, Windows ARM64 or x64 portable package from [Releases](https://github.com/starroyhq/computer-use/releases), or build from source below. There is no installer yet; see the platform status below for tested coverage.
+**Development preview.** Download the macOS ARM64 disk image or the Windows ARM64 or x64 installer (portable ZIPs are also available) from [Releases](https://github.com/starroyhq/computer-use/releases); see [Install a release](#install-a-release). You can also build from source below. See the platform status below for tested coverage.
 
 ## Features
 
@@ -22,11 +22,20 @@ Cua Driver supplies desktop capture, accessibility and input; Playwright supplie
 | Platform | Build and connection | Validation |
 |---|---|---|
 | macOS Apple Silicon | macOS 14+ build target; menu-bar app, local CLI / MCP | Previous identifier tested with AppKit Fixture and Codex; current identifier passes build and signature checks, desktop regression pending |
-| Windows 11 ARM64 | Portable tray development package; local CLI / MCP, Mac access over SSH | Current build passed 66 fixture input cases, one Mac Codex model regression, authorization/disconnect/exit checks in one VM |
+| Windows 11 ARM64 | Tray host (installer or portable package); local CLI / MCP, Mac access over SSH | Current build passed 66 fixture input cases, one Mac Codex model regression, authorization/disconnect/exit checks in one VM |
 | Windows 11 x64 | Separate x64 build target | Earlier package passed component checks under x64 emulation on ARM64; native x64 desktop acceptance pending |
 | macOS Intel / Linux | No host package provided by this project | Not validated |
 
 The current application identifier is `com.starroy.computeruse`. Windows ARM64 passed the limited acceptance above; earlier macOS and x64 evidence does not establish current-build acceptance. See the [validation record](docs/validation-results.md) (Chinese) for results and outstanding coverage.
+
+## Install a release
+
+Download the file for your platform from [Releases](https://github.com/starroyhq/computer-use/releases) (`<version>` is the release number):
+
+- **macOS (Apple Silicon)**: `computer-use-<version>-macos-arm64.dmg`. Open it, drag Computer Use to Applications, then open it from Applications. The app and the disk image are signed with Developer ID and notarized by Apple.
+- **Windows 11**: `computer-use-<version>-windows-arm64-setup.exe` or `…-windows-x64-setup.exe`. The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; open it from the Start menu and uninstall it from Settings → Apps. The installer is unsigned, so SmartScreen may say "Windows protected your PC"; once you have confirmed it came from this project's Releases, choose More info → Run anyway.
+
+Every file has a `.sha256` checksum next to it. Each release also has portable ZIPs: macOS one-step updates use them, and the Windows portable package runs from its extracted folder (see the [Windows guide](docs/WINDOWS.en.md)). Permissions and pairing after installation work as described for source builds below.
 
 ## Quick start: build from source
 
@@ -107,7 +116,7 @@ The menu bar icon (the notification-area icon on Windows) shows the service stat
 Automatic checks are on by default and run at most once a day. They read only this repository's latest stable GitHub release (never drafts, prereleases or older versions) and send no usage data. Turn them off on the Updates page or skip a version. Checks use the GitHub API first. The unauthenticated API allows 60 requests per hour per IP; when that is used up or the API is unreachable, the check reads the github.com release page instead, with the same result. A download must match the release's SHA-256 checksum file and metadata, and GitHub's recorded digest when read through the API:
 
 - **macOS**: signed releases install in one step. The app extracts the new version, confirms that its bundle identifier, version and signing team match the running app and that it passes Gatekeeper, then after your confirmation stops the service, replaces the app in place and reopens it; system permissions and paired clients are kept. When the system runs the app from a translocated location (for example, opened straight from Downloads) or its folder is not writable, the verified new version is shown in Finder for a manual replacement instead. Development builds from source only check manually.
-- **Windows**: portable packages are unsigned, so the host downloads and verifies the package and shows it in File Explorer. Quit the tray app, extract the package and replace the current folder with the new one, keeping the same path.
+- **Windows**: an installed copy downloads and verifies the new installer; choose Run Installer and follow the setup wizard. Setup first asks the tray app to stop its service and quit, upgrades keep the original install location, and paired clients and settings are kept. A portable copy only downloads and verifies the ZIP and shows it in File Explorer; quit the tray app, extract the package and replace the current folder with the new one, keeping the same path. Version 0.5.0 and earlier are portable copies.
 
 Both hosts run the check and download through the bundled CLI; you can also run `computer-use update check` directly. See [Usage](docs/USAGE.md#检查更新--updates).
 

@@ -23,14 +23,15 @@ internal static class Program
             PrintProcessPaths(args[1]);
             return 0;
         }
+        // 安装与卸载程序用：请当前会话里正在运行的托盘程序停止服务后退出，并等它退出。
+        if (args.Length == 1 && args[0] == QuitArgument) return QuitRunningInstance();
         // 登录时启动项带 --background：只在托盘运行，不打开设置窗口。
         var background = args.Length == 1 && args[0] == LaunchAtLogin.BackgroundArgument;
         if (args.Length != 0 && !background) return 2;
         if (!Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0) return 1;
-        var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify current user.");
-        var suffix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sid)))[..20];
-        using var singleton = new Mutex(true, $@"Local\ComputerUse.WindowsHost.{suffix}", out var created);
-        using var showSignal = OpenShowSignal(suffix);
+        var suffix = InstanceSuffix();
+        using var singleton = new Mutex(true, MutexName(suffix), out var created);
+        using var showSignal = OpenSignal(SignalName("Show", suffix));
         if (!created)
         {
             // 已在运行：请已运行的实例打开设置窗口，与 macOS 再次打开 App 的行为一致。
@@ -40,16 +41,53 @@ internal static class Program
             return 0;
         }
 
+        using var quitSignal = OpenSignal(SignalName("Quit", suffix));
         ApplicationConfiguration.Initialize();
-        Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal));
+        Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal, quitSignal: quitSignal));
         return 0;
     }
 
-    // 会话内的命名事件（Local 命名空间，名称含当前用户 SID 的哈希）；触发它只会让托盘程序打开设置窗口。
-    private static EventWaitHandle? OpenShowSignal(string suffix)
+    internal const string QuitArgument = "--quit";
+
+    // 名称含当前用户 SID 的哈希，放在会话内的 Local 命名空间：只针对本用户本会话的托盘程序。
+    private static string InstanceSuffix()
     {
-        try { return new EventWaitHandle(false, EventResetMode.AutoReset, $@"Local\ComputerUse.WindowsHost.Show.{suffix}"); }
+        var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify current user.");
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sid)))[..20];
+    }
+
+    private static string MutexName(string suffix) => $@"Local\ComputerUse.WindowsHost.{suffix}";
+    private static string SignalName(string purpose, string suffix) => $@"Local\ComputerUse.WindowsHost.{purpose}.{suffix}";
+
+    // 触发 Show 只会让托盘程序打开设置窗口；触发 Quit 与用户在托盘菜单里选择退出相同。
+    private static EventWaitHandle? OpenSignal(string name)
+    {
+        try { return new EventWaitHandle(false, EventResetMode.AutoReset, name); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { return null; }
+    }
+
+    // 0：没有实例在运行，或它已退出；1：仍在运行（不支持 --quit 的旧版本，或 30 秒内没有退出）。
+    private static int QuitRunningInstance()
+    {
+        var suffix = InstanceSuffix();
+        using var mutex = new Mutex(false, MutexName(suffix));
+        if (Acquire(mutex, TimeSpan.Zero))
+        {
+            mutex.ReleaseMutex();
+            return 0;
+        }
+        if (!EventWaitHandle.TryOpenExisting(SignalName("Quit", suffix), out var signal)) return 1;
+        using (signal) signal.Set();
+        if (!Acquire(mutex, TimeSpan.FromSeconds(30))) return 1;
+        mutex.ReleaseMutex();
+        return 0;
+    }
+
+    private static bool Acquire(Mutex mutex, TimeSpan timeout)
+    {
+        try { return mutex.WaitOne(timeout); }
+        // 持有者退出时没有释放互斥体（进程结束时的正常情况），同样说明它已不在运行。
+        catch (AbandonedMutexException) { return true; }
     }
 
     private static void PrintProcessPaths(string values)

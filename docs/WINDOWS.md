@@ -1,12 +1,26 @@
-# Windows ARM64 / x64 开发包与 Agent 接入
+# Windows ARM64 / x64：安装与 Agent 接入
 
 简体中文 | [English](WINDOWS.en.md) · [返回首页](../README.md)
 
-当前 `com.starroy.computeruse` 的 ARM64 包已在一台 Windows 11 ARM64 虚拟机的**交互式登录桌面**完成限定验收：66 个 Fixture 输入用例、一次真实 Mac Codex 模型回归及授权、断线与退出检查。原生 x64 桌面未验收，完整边界见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。便携包是开发产物，不是已签名安装器；UAC 安全桌面和高完整性应用不在支持范围内。
+当前 `com.starroy.computeruse` 的 ARM64 包已在一台 Windows 11 ARM64 虚拟机的**交互式登录桌面**完成限定验收：66 个 Fixture 输入用例、一次真实 Mac Codex 模型回归及授权、断线与退出检查。原生 x64 桌面未验收，完整边界见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。安装程序与便携包都未签名；UAC 安全桌面和高完整性应用不在支持范围内。
 
-## Windows 构建与启动
+## 安装与卸载
 
-如果拿到预构建的便携 ZIP，请在对应架构的 Windows 11 上完整解压，再从解压目录运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。预构建包已内置运行组件，无需安装下段所述的构建工具。首次运行需在当前用户的交互登录桌面，后续配对命令也在该目录执行。该包不包含别人的配对凭据，需要由使用者在本机新建并批准自己的配对。
+推荐使用发布里的安装程序 `computer-use-<版本>-windows-<arm64|x64>-setup.exe`，按 Windows 的架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；首次安装可以换目录，升级沿用原目录。向导会建立开始菜单快捷方式，桌面快捷方式可选，完成页可直接启动。开始安装前，安装程序用 `ComputerUse.WindowsHost.exe --quit` 让当前会话里正在运行的托盘程序（安装版或便携版）停止服务并退出；v0.5.0 及更早的版本不支持 `--quit`，向导会提示先从托盘菜单退出再重试。安装程序未签名，SmartScreen 可能提示“Windows 已保护你的电脑”，确认来自本项目的 Releases 后选“更多信息 → 仍要运行”。
+
+在系统“设置 → 应用”中卸载。卸载程序先让托盘程序停止服务并退出，再删除安装目录和指向它的登录启动项；`%LOCALAPPDATA%\Computer Use` 里的配对凭据、设置与日志保留，不再需要时可手动删除。
+
+安装版的 CLI 为安装目录下的 `bin\node.exe runtime\cli.js`，设置窗口“通用”页可复制完整命令。下文的命令都在包目录中执行；安装版先进入安装目录：
+
+```powershell
+Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
+```
+
+也可以使用便携 ZIP：在对应架构的 Windows 11 上完整解压，再从解压目录运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。从便携版改用安装版时，程序位置会变，需要在新位置重新生成 Agent 配置；配对凭据不变。
+
+无论哪种方式，预构建包都已内置运行组件，无需安装下节所述的构建工具。首次运行需在当前用户的交互登录桌面。包内不含别人的配对凭据，需要由使用者在本机新建并批准自己的配对。
+
+## 从源码构建与启动
 
 在 Windows 11 x64 或 ARM64 上安装 .NET 10 SDK、Node 24+ 和 pnpm 10，获取本项目后于 PowerShell 中运行。ARM64 主机也可交叉打包 x64：.NET 发布目标、内置 Node/Cua 和 pnpm 原生可选依赖都按 x64 选择，再借助 Windows 11 的 x64 模拟运行包内检查。以 x64 包为例；构建 ARM64 包时将 `x64` 改为 `arm64`，包目录改为 `Computer Use Windows ARM64`。x64 主机不能构建 ARM64 包。
 
@@ -20,14 +34,32 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 
 省略 `--arch` 时默认使用当前 Node 的架构。打包脚本从官方来源下载对应架构的固定 Node 24.21.0 与 Cua Driver 0.28.2 包，同时核对官方清单和固定 SHA-256；在隔离目录按锁文件安装该架构的生产依赖。它检查托盘程序、Node、驱动与原生 SDK 的架构，实际加载 SDK，并保留 Node、Cua 与项目的许可文件。包内 CLI 为 `bin\node.exe runtime\cli.js`，无需全局 Node。退出托盘会停止服务和输入；便携包运行时不要覆盖。x64 构建和静态校验通过后，还需在 x64 桌面验证配对、截图与输入，才能视作 x64 验收。
 
-运行后会打开设置窗口；关闭窗口后服务仍在托盘运行，双击托盘图标或再次运行程序可重新打开。“通用”页可勾选“登录 Windows 时启动”（写入当前用户的启动项，登录后只在托盘运行）；移动便携目录后需重新勾选。“更新”页每天检查一次 GitHub 正式版（可关闭）；便携包未签名，宿主只下载并校验安装包，然后在资源管理器中显示。安装新版本：退出托盘程序，完整解压，用新文件夹替换当前文件夹并保持同一路径，这样 Agent 配置中的绝对路径仍然有效；已配对的客户端保存在 `%LOCALAPPDATA%\Computer Use`，不受影响。
+安装程序由上面校验过的便携目录生成，需要 [Inno Setup](https://jrsoftware.org/isinfo.php) 7.0.2 或更高版本：简体中文从这个版本起才是官方语言，Inno Setup 6 默认不带。脚本在 Program Files 与当前用户的程序目录下依次查找 `Inno Setup 7` 与 `Inno Setup 6` 中带简体中文的 `ISCC.exe`，也可用环境变量 `INNO_SETUP_COMPILER` 指定：
+
+```powershell
+node scripts/package-windows-installer.mjs --arch x64
+node scripts/package-windows-installer.mjs --arch x64 --verify-only --smoke-test
+```
+
+产物为 `artifacts\Computer Use Windows x64 Setup.exe`。`--smoke-test` 静默安装到临时目录，复验安装后的组件、卸载登记与开始菜单快捷方式，再静默卸载。它与正式安装共用同一 AppId，当前用户已安装 Computer Use 时脚本拒绝运行，CI 在一次性 runner 上自动执行。
+
+运行后会打开设置窗口；关闭窗口后服务仍在托盘运行，双击托盘图标或再次运行程序可重新打开。“通用”页可勾选“登录 Windows 时启动”（写入当前用户的启动项，登录后只在托盘运行）；移动便携目录后需重新勾选。
+
+## 更新
+
+“更新”页每天检查一次 GitHub 正式版（可关闭），下载的文件须与发布里的 SHA-256 校验文件和元数据一致。程序所在目录就是当前用户卸载登记里的安装目录时按安装版处理，否则按便携版处理：
+
+- **安装版**：下载并校验新版本的安装程序，点“运行安装程序”后按向导完成。安装程序先让托盘程序停止服务并退出，再覆盖安装到原目录，完成页可直接启动；在点“安装”之前取消，托盘程序照常运行。
+- **便携版**：只下载并校验 ZIP，然后在资源管理器中显示。退出托盘程序，完整解压，用新文件夹替换当前文件夹并保持同一路径，这样 Agent 配置中的绝对路径仍然有效。
+
+已配对的客户端和设置保存在 `%LOCALAPPDATA%\Computer Use`，两种方式都不受影响。
 
 ## Windows 本机 Agent：stdio MCP
 
 打开希望控制的普通权限应用，用其**完整可执行文件路径**配对。以下测试程序路径是占位符，须替换为自己的测试应用路径。本节与后面的 Mac 远程接入是两种选择，无需都做。
 
 ```powershell
-Set-Location '.\artifacts\Computer Use Windows x64' # 预构建 ZIP：直接在解压目录执行后续命令
+Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP：改为进入安装目录或解压目录
 & .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
 ```
 
@@ -45,10 +77,10 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 预构建 ZIP：直接在�
 
 ## Mac 远程接入：Windows 配对与凭据
 
-以下从仓库根目录进入便携包目录；如果已在包目录中，跳过 `Set-Location`。另建远程客户端 profile，并在托盘批准：
+以下从仓库根目录进入包目录；如果已在包目录中，跳过 `Set-Location`。另建远程客户端 profile，并在托盘批准：
 
 ```powershell
-Set-Location '.\artifacts\Computer Use Windows x64' # 使用预构建 ZIP 时跳过此行，直接在解压目录执行
+Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP：改为进入安装目录或解压目录
 & .\bin\node.exe .\runtime\cli.js pair --profile mac-codex --name 'Mac Codex' --app 'C:\path\to\ComputerUseFixture.exe'
 & .\bin\node.exe .\runtime\cli.js doctor --profile mac-codex
 & .\bin\node.exe .\runtime\cli.js targets --profile mac-codex
@@ -76,7 +108,7 @@ ssh -i "$HOME/.ssh/computer_use_windows_ed25519" \
 
 Mac 的 47631 端口若已被占用，请先关闭占用它的本机服务。隧道建立后，Mac 上 `http://127.0.0.1:47631/mcp` 才会到达 Windows。不要使用 `-g` 或将转发绑定到 `0.0.0.0`。
 
-将以下配置加入 Mac 的用户级 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`。预构建 ZIP 的 `helpers/windows-remote-auth.mjs` 可复制到 Mac 的 `~/.config/computer-use/`；源码构建也可直接使用仓库 `scripts/windows-remote-auth.mjs`。把 helper 命令中的三个绝对路径换成 Mac 的实际 Node、helper 脚本和私有 JSON 路径；`http_headers_helper` 是一条本地命令，输出 `{"Authorization":"Bearer …"}`，配置本身不含令牌。Codex 仅在**本地执行环境**支持该 helper，详见[官方 MCP 配置](https://learn.chatgpt.com/docs/extend/mcp)。
+将以下配置加入 Mac 的用户级 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`。安装目录或预构建 ZIP 中的 `helpers/windows-remote-auth.mjs` 可复制到 Mac 的 `~/.config/computer-use/`；源码构建也可直接使用仓库 `scripts/windows-remote-auth.mjs`。把 helper 命令中的三个绝对路径换成 Mac 的实际 Node、helper 脚本和私有 JSON 路径；`http_headers_helper` 是一条本地命令，输出 `{"Authorization":"Bearer …"}`，配置本身不含令牌。Codex 仅在**本地执行环境**支持该 helper，详见[官方 MCP 配置](https://learn.chatgpt.com/docs/extend/mcp)。
 
 ```toml
 [mcp_servers.computer-use-windows]
@@ -100,6 +132,6 @@ tool_timeout_sec = 90
 
 自动化测试和真实 Windows 虚拟机结果分别记在 [验证记录](validation-results.md)；静态打包检查不代表截图和输入已通过实测。
 
-授权窗口与设置窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝、停止清理、两种语言的文案表、托盘偏好存储、6 个设置页与客户端列表，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。加 `-- --screenshots <目录>` 可把每个设置页保存为 PNG；加 `-- --live-update <旧版本便携包目录>` 会通过该包的 CLI 联网检查并下载真实的最新发布（需要网络）。
+授权窗口与设置窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝、停止清理、两种语言的文案表、托盘偏好存储、6 个设置页与客户端列表、安装版与便携版的更新操作，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。加 `-- --screenshots <目录>` 可把每个设置页保存为 PNG；加 `-- --live-update <旧版本便携包目录>` 会通过该包的 CLI 联网检查并下载真实的最新发布（发布带安装程序时也下载校验安装程序；需要网络）。
 
 Windows 元素定向输入与点击始终使用后台辅助功能路径，包括已批准的前台会话；拒绝或不确定时不自动切换或重发。无元素 ID 的前台长文本、画布和终端不在完整性保证范围内。具体动作语义见[使用说明](USAGE.md)。

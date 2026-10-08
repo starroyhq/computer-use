@@ -49,6 +49,8 @@ export function targetForArch(arch) {
   return {
     ...target,
     output: join(ROOT, 'artifacts', `Computer Use Windows ${target.label}`),
+    // 由 scripts/package-windows-installer.mjs 从上面的便携目录生成。
+    installer: join(ROOT, 'artifacts', `Computer Use Windows ${target.label} Setup.exe`),
     node: { ...NODE_COMMON, ...target.node },
     cua: { ...CUA_COMMON, ...target.cua },
   };

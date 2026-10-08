@@ -41,21 +41,32 @@ unset APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY APPLE_CERTIFICATE APP
 
 node scripts/package-app.mjs --identity "$identity"
 
+# Submit one file, wait for the result and require Accepted.
+notarize() {
+  local file=$1 result=$2
+  xcrun notarytool submit "$file" \
+    --key "$api_key" --key-id "$api_key_id" --issuer "$api_issuer" \
+    --wait --timeout 30m --output-format json > "$result"
+  node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const response = JSON.parse(readFileSync(process.argv[1], "utf8"));
+    if (response.status !== "Accepted") {
+      console.error(`Notarization status: ${response.status ?? "unknown"}; submission: ${response.id ?? "unknown"}`);
+      process.exit(1);
+    }
+    console.log(`Notarization accepted: ${response.id}`);
+  ' "$result"
+}
+
 app='artifacts/Computer Use.app'
 submission="$temporary/submission.zip"
-result="$temporary/notary-result.json"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
-xcrun notarytool submit "$submission" \
-  --key "$api_key" --key-id "$api_key_id" --issuer "$api_issuer" \
-  --wait --timeout 30m --output-format json > "$result"
-node --input-type=module -e '
-  import { readFileSync } from "node:fs";
-  const response = JSON.parse(readFileSync(process.argv[1], "utf8"));
-  if (response.status !== "Accepted") {
-    console.error(`Notarization status: ${response.status ?? "unknown"}; submission: ${response.id ?? "unknown"}`);
-    process.exit(1);
-  }
-  console.log(`Notarization accepted: ${response.id}`);
-' "$result"
+notarize "$submission" "$temporary/notary-result.json"
 xcrun stapler staple "$app"
+
+# The disk image for first installs holds the stapled app; it is signed, notarized and stapled on its own.
+dmg='artifacts/Computer Use.dmg'
+node scripts/package-dmg.mjs --identity "$identity"
+notarize "$dmg" "$temporary/notary-dmg-result.json"
+xcrun stapler staple "$dmg"
 APPLE_SIGNING_IDENTITY="$identity" APPLE_TEAM_ID="$team" node .github/scripts/archive-package.mjs macos-arm64 --notarized

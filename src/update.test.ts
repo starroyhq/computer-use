@@ -11,6 +11,7 @@ const WEB_LATEST_PATH = '/starroyhq/computer-use/releases/latest';
 const NOTES_PATH = '/raw/starroyhq/computer-use/v0.5.0/.github/release-notes/v0.5.0.md';
 const RELEASE_NOTES = '## 更新\r\n- 修复\u0007\u202e问题';
 const zipName = 'computer-use-0.5.0-macos-arm64.zip';
+const dmgName = 'computer-use-0.5.0-macos-arm64.dmg';
 let server: Server;
 let base: string;
 let directory: string;
@@ -21,6 +22,7 @@ let web: { status: number; location?: string };
 let files: Map<string, Buffer>;
 let routes: Map<string, (response: import('node:http').ServerResponse) => void>;
 let packageBytes: Buffer;
+let installerBytes: Buffer;
 
 function sha256(value: Buffer | string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -37,10 +39,15 @@ function metadata(overrides: Record<string, unknown> = {}): string {
     signing: 'developer-id-notarized',
     notarization: 'stapled',
     verification: 'test',
+    installer: { name: dmgName, bytes: installerBytes.length, sha256: sha256(installerBytes) },
     ...overrides,
   });
 }
-function releaseBody(overrides: Record<string, unknown> = {}, assetOverrides: Record<string, unknown> = {}): string {
+function releaseBody(
+  overrides: Record<string, unknown> = {},
+  assetOverrides: Record<string, unknown> = {},
+  installerOverrides: Record<string, unknown> = {},
+): string {
   const asset = (name: string, content: Buffer | string, extra: Record<string, unknown> = {}) => ({
     name,
     size: Buffer.byteLength(content),
@@ -58,6 +65,8 @@ function releaseBody(overrides: Record<string, unknown> = {}, assetOverrides: Re
       asset(zipName, packageBytes, { digest: `sha256:${sha256(packageBytes)}`, ...assetOverrides }),
       asset(`${zipName}.sha256`, files.get(`${zipName}.sha256`)!),
       asset('computer-use-0.5.0-macos-arm64.json', files.get('computer-use-0.5.0-macos-arm64.json')!),
+      asset(dmgName, installerBytes, { digest: `sha256:${sha256(installerBytes)}`, ...installerOverrides }),
+      asset(`${dmgName}.sha256`, files.get(`${dmgName}.sha256`)!),
       asset('computer-use-0.5.0-windows-x64.zip', 'other platform'),
     ],
     ...overrides,
@@ -110,10 +119,13 @@ afterAll(async () => {
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'cu-update-test-'));
   packageBytes = randomBytes(200_000);
+  installerBytes = randomBytes(150_000);
   routes = new Map();
   files = new Map();
   files.set(zipName, packageBytes);
   files.set(`${zipName}.sha256`, Buffer.from(`${sha256(packageBytes)}  ${zipName}\n`));
+  files.set(dmgName, installerBytes);
+  files.set(`${dmgName}.sha256`, Buffer.from(`${sha256(installerBytes)}  ${dmgName}\n`));
   files.set('computer-use-0.5.0-macos-arm64.json', Buffer.from(metadata()));
   release = { status: 200, body: releaseBody() };
   web = { status: 302, location: `${base}/starroyhq/computer-use/releases/tag/v0.5.0` };
@@ -149,6 +161,7 @@ describe('update check', () => {
       publishedAt: '2026-10-01T08:00:00Z',
       notes: '## 更新\n- 修复问题',
       asset: { name: zipName, size: packageBytes.length, sha256: sha256(packageBytes) },
+      installer: { name: dmgName, size: installerBytes.length, sha256: sha256(installerBytes) },
     });
     expect((await checkForUpdate(options({ current: '0.5.0' }))).available).toBe(false);
     // 不降级：最新正式版比当前还旧时不提供。
@@ -314,13 +327,74 @@ describe('update download', () => {
       files.set(zipName, packageBytes);
       files.set(`${zipName}.sha256`, Buffer.from(`${sha256(packageBytes)}  ${zipName}\n`));
       files.set('computer-use-0.5.0-macos-arm64.json', Buffer.from(metadata()));
-      release.body = releaseBody();
+      release = { status: 200, body: releaseBody() };
       arrange();
       await expect(downloadUpdate({ ...options(), directory }), name).rejects.toMatchObject({
         message: expect.stringContaining(message),
       });
       expect(await readdir(directory), name).toEqual([]);
     }
+  });
+
+  it('downloads the installer instead of the ZIP when asked, with the same checks through the API or the release page', async () => {
+    for (const label of ['api', 'release page']) {
+      if (label === 'release page') release = { status: 403, body: '{}' };
+      const result = await downloadUpdate({ ...options(), directory, installer: true, expectedVersion: '0.5.0' });
+      expect(result, label).toMatchObject({ path: join(directory, dmgName), sha256: sha256(installerBytes), bytes: installerBytes.length });
+      expect((await readFile(result.path)).equals(installerBytes), label).toBe(true);
+      expect(await readdir(directory), label).toEqual([dmgName]);
+      await rm(result.path);
+    }
+    release = { status: 200, body: releaseBody() };
+    const cases: Array<[string, () => void, string]> = [
+      ['tampered installer', () => files.set(dmgName, randomBytes(installerBytes.length)), 'SHA-256'],
+      [
+        'installer checksum naming another file',
+        () => files.set(`${dmgName}.sha256`, Buffer.from(`${sha256(installerBytes)}  other.dmg\n`)),
+        'checksum file',
+      ],
+      [
+        'metadata describing another installer',
+        () =>
+          files.set(
+            'computer-use-0.5.0-macos-arm64.json',
+            Buffer.from(metadata({ installer: { name: dmgName, bytes: installerBytes.length, sha256: sha256('other') } })),
+          ),
+        'metadata does not match',
+      ],
+      ['installer API digest mismatch', () => (release.body = releaseBody({}, {}, { digest: `sha256:${sha256('other')}` })), 'digest'],
+    ];
+    for (const [name, arrange, message] of cases) {
+      files.set(dmgName, installerBytes);
+      files.set(`${dmgName}.sha256`, Buffer.from(`${sha256(installerBytes)}  ${dmgName}\n`));
+      files.set('computer-use-0.5.0-macos-arm64.json', Buffer.from(metadata()));
+      release.body = releaseBody();
+      arrange();
+      await expect(downloadUpdate({ ...options(), directory, installer: true }), name).rejects.toMatchObject({
+        message: expect.stringContaining(message),
+      });
+      expect(await readdir(directory), name).toEqual([]);
+    }
+
+    // 早于安装包的发布：检查结果没有 installer，按安装包下载时报告不存在，ZIP 照常可用。
+    files.set('computer-use-0.5.0-macos-arm64.json', Buffer.from(metadata({ installer: undefined })));
+    release.body = JSON.stringify({
+      ...JSON.parse(releaseBody()),
+      assets: JSON.parse(releaseBody()).assets.filter((asset: { name: string }) => !asset.name.startsWith(dmgName)),
+    });
+    for (const label of ['api', 'release page']) {
+      if (label === 'release page') release = { status: 403, body: '{}' };
+      expect((await checkForUpdate(options())).installer, label).toBeUndefined();
+      await expect(downloadUpdate({ ...options(), directory, installer: true }), label).rejects.toMatchObject({ code: 'not_found' });
+      expect((await downloadUpdate({ ...options(), directory })).path, label).toBe(join(directory, zipName));
+      await rm(join(directory, zipName));
+    }
+    // 发布页路径同样拒绝描述了别的安装包名称的元数据。
+    files.set(
+      'computer-use-0.5.0-macos-arm64.json',
+      Buffer.from(metadata({ installer: { name: 'other.dmg', bytes: installerBytes.length, sha256: sha256(installerBytes) } })),
+    );
+    await expect(checkForUpdate(options())).rejects.toMatchObject({ message: expect.stringContaining('metadata does not match') });
   });
 
   it('refuses when there is nothing newer, the release changed, or the destination is not usable', async () => {

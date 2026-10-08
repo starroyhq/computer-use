@@ -17,6 +17,18 @@ internal static class Program
             LiveUpdate(args[1]);
             return;
         }
+        // 装好（或卸载）安装程序之后，人工验证托盘程序按卸载登记识别安装版。
+        if (args.Length == 2 && args[0] == "--installed")
+        {
+            CheckInstalled(args[1]);
+            return;
+        }
+        if (args.Length == 1 && args[0] == "--not-installed")
+        {
+            Check(UpdateService.RegisteredInstallLocation() is null, "no install location is registered");
+            Console.WriteLine("PASS: no installation is registered for the current user");
+            return;
+        }
         var screenshots = args.Length == 2 && args[0] == "--screenshots" ? args[1] : null;
         CheckTranslations();
         CheckHelpers();
@@ -30,6 +42,7 @@ internal static class Program
             {
                 CheckAuthorizationLifecycle(host);
                 CheckSettingsWindow(host);
+                CheckUpdatePage(host);
                 if (screenshots is not null) Screenshots(host, screenshots);
             }
             finally { Invoke(host, "ExitAsync").GetAwaiter().GetResult(); }
@@ -164,9 +177,88 @@ internal static class Program
              "url":"https://github.com/starroyhq/computer-use/releases/tag/v0.5.0","notes":"n",
              "asset":{"name":"computer-use-0.5.0-windows-arm64.zip","size":10,"sha256":"ab"}}
             """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
-        Check(check.Latest == "0.5.0" && check.Asset?.Size == 10 && check.ReleasePage is not null, "update check output parsed");
+        Check(check.Latest == "0.5.0" && check.Asset?.Size == 10 && check.ReleasePage is not null && check.Installer is null,
+            "update check output parsed; releases before 0.6.0 have no installer");
         Check((check with { Url = "https://example.com/x" }).ReleasePage is null, "only the project's release page opens");
+        Check(InstallerCheck().Installer is { Name: "computer-use-0.6.0-windows-arm64-setup.exe", Size: 20, Sha256: "cd" },
+            "update check output includes the installer");
+        Check(new UpdateFailure("not_found", "The latest release has no installer for windows-arm64.").Describe() == L10n.T(Msg.UpdateErrorNoPackage),
+            "missing installer localized");
+        Check(UpdateService.IsInstalledAt(@"C:\Users\A\AppData\Local\Programs\Computer Use\", @"c:\users\a\appdata\local\programs\computer use")
+            && UpdateService.IsInstalledAt("\"C:\\Apps\\Computer Use\"", @"C:\Apps\Computer Use\"), "installed copy recognized by its registered location");
+        Check(!UpdateService.IsInstalledAt(null, @"C:\Apps\Computer Use") && !UpdateService.IsInstalledAt(" ", @"C:\Apps\Computer Use")
+            && !UpdateService.IsInstalledAt(@"C:\Apps\Computer Use", @"C:\Portable\Computer Use")
+            && !UpdateService.IsInstalledAt(@"C:\Apps\Computer Use", @"C:\Apps\Computer Use Old"), "other folders are portable copies");
         Console.WriteLine("PASS: Windows update and settings helpers");
+    }
+
+    /// <summary>安装程序登记的位置就是这个目录：读取真实的卸载登记，换成别的目录则不算安装版。</summary>
+    private static void CheckInstalled(string directory)
+    {
+        var registered = UpdateService.RegisteredInstallLocation();
+        Console.WriteLine($"registered install location: {registered}");
+        Check(UpdateService.IsInstalledAt(registered, directory), "the registered install location is the installed folder");
+        Check(!UpdateService.IsInstalledAt(registered, Path.Combine(directory, "other")), "another folder is not an installed copy");
+        Console.WriteLine("PASS: installed copy recognized from the uninstall registration");
+    }
+
+    private static UpdateCheck InstallerCheck() => JsonSerializer.Deserialize<UpdateCheck>("""
+        {"current":"0.5.0","latest":"0.6.0","available":true,"platform":"windows-arm64","tag":"v0.6.0",
+         "url":"https://github.com/starroyhq/computer-use/releases/tag/v0.6.0",
+         "notes":"## Computer Use v0.6.0\n\n- Windows 安装程序\n- macOS DMG",
+         "asset":{"name":"computer-use-0.6.0-windows-arm64.zip","size":10,"sha256":"ab"},
+         "installer":{"name":"computer-use-0.6.0-windows-arm64-setup.exe","size":20,"sha256":"cd"}}
+        """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+    /// <summary>
+    /// 更新页按安装方式给出操作：安装版下载安装程序并提供“运行安装程序”，便携版下载 ZIP 并提示手动替换。
+    /// 安装方式由卸载登记决定，这里用反射分别模拟两种情况。
+    /// </summary>
+    private static void CheckUpdatePage(HostApplication host)
+    {
+        const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
+        var window = (SettingsForm)Field(host, "_window")!;
+        var updates = host.Updates;
+        var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
+        var original = installed.GetValue(updates);
+        bool Shown(string name) => ((Control)typeof(SettingsForm).GetField(name, members)!.GetValue(window)!).Visible;
+        void Show(UpdatePhase phase)
+        {
+            typeof(UpdateService).GetProperty("Phase", members)!.SetValue(updates, phase);
+            window.RefreshAll();
+            Pump();
+        }
+        var check = InstallerCheck();
+        typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, check);
+        window.ShowPage(SettingsPage.Updates);
+        Pump();
+        try
+        {
+            installed.SetValue(updates, false);
+            Check(updates.Package == check.Asset, "portable copies download the ZIP");
+            Show(UpdatePhase.Available);
+            Check(Shown("_download") && Shown("_manualHint") && !Shown("_installerHint") && !Shown("_runInstaller"), "portable copy explains the manual replacement");
+            Show(UpdatePhase.Downloaded);
+            Check(Shown("_reveal") && Shown("_manualHint") && !Shown("_runInstaller"), "downloaded ZIP is shown in File Explorer");
+
+            installed.SetValue(updates, true);
+            Check(updates.Package == check.Installer, "installed copies download the installer");
+            Show(UpdatePhase.Available);
+            Check(Shown("_download") && Shown("_installerHint") && !Shown("_manualHint") && !Shown("_runInstaller"), "installed copy explains the setup wizard");
+            Show(UpdatePhase.Downloaded);
+            Check(Shown("_runInstaller") && Shown("_reveal") && Shown("_installerHint") && !Shown("_manualHint"), "downloaded installer can be run");
+
+            typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, check with { Installer = null });
+            Show(UpdatePhase.Available);
+            Check(updates.Package is null && !Shown("_download") && !Shown("_installerHint"), "a release without an installer is not offered to installed copies");
+        }
+        finally
+        {
+            installed.SetValue(updates, original);
+            typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, null);
+            Show(UpdatePhase.Idle);
+        }
+        Console.WriteLine("PASS: Windows update page");
     }
 
     private static void CheckSettingsStore(string directory)
@@ -215,6 +307,17 @@ internal static class Program
             Check(new FileInfo(download.Path).Length == check.Asset!.Size && download.Bytes == check.Asset.Size && last == download.Bytes,
                 "downloaded package matches the published size and progress reaches the end");
             Check(check.Asset.Sha256 is null || check.Asset.Sha256 == download.Sha256, "digest matches the release");
+            // v0.6.0 起的发布才带安装程序。
+            if (check.Installer is { } installer)
+            {
+                var setup = Path.Combine(directory, "installer");
+                Directory.CreateDirectory(setup);
+                var downloaded = command.DownloadAsync(check.Latest, setup, progress, CancellationToken.None, installer: true).GetAwaiter().GetResult();
+                Console.WriteLine($"installer: {downloaded.Path} bytes={downloaded.Bytes} sha256={downloaded.Sha256}");
+                Check(Path.GetFileName(downloaded.Path) == installer.Name && new FileInfo(downloaded.Path).Length == installer.Size
+                    && (installer.Sha256 is null || installer.Sha256 == downloaded.Sha256), "downloaded installer matches the release");
+            }
+            else Console.WriteLine("installer: the latest release has none");
             try
             {
                 command.DownloadAsync("0.0.1", directory, progress, CancellationToken.None).GetAwaiter().GetResult();
@@ -255,24 +358,31 @@ internal static class Program
     {
         Directory.CreateDirectory(directory);
         var window = (SettingsForm)Field(host, "_window")!;
-        var check = JsonSerializer.Deserialize<UpdateCheck>("""
-            {"current":"0.4.0","latest":"0.5.0","available":true,"platform":"windows-arm64","tag":"v0.5.0",
-             "url":"https://github.com/starroyhq/computer-use/releases/tag/v0.5.0",
-             "notes":"## Computer Use v0.5.0\n\n- 设置窗口改为 6 个分区\n- 检查更新与下载校验","asset":{"name":"computer-use-0.5.0-windows-arm64.zip","size":125852817}}
-            """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
         const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
-        typeof(UpdateService).GetProperty("Check", members)!.SetValue(host.Updates, check);
+        typeof(UpdateService).GetProperty("Check", members)!.SetValue(host.Updates, InstallerCheck());
         typeof(UpdateService).GetProperty("Phase", members)!.SetValue(host.Updates, UpdatePhase.Available);
-        window.ShowPage(SettingsPage.General);
-        for (var index = 0; index < window.Tabs.TabCount; index++)
+        void Save(string name)
         {
-            window.Tabs.SelectedIndex = index;
             window.RefreshAll();
             Pump();
             using var bitmap = new Bitmap(window.Width, window.Height);
             window.DrawToBitmap(bitmap, new Rectangle(Point.Empty, window.Size));
-            bitmap.Save(Path.Combine(directory, $"{index + 1}-{window.Tabs.TabPages[index].Text}.png"), ImageFormat.Png);
+            bitmap.Save(Path.Combine(directory, name + ".png"), ImageFormat.Png);
         }
+        window.ShowPage(SettingsPage.General);
+        for (var index = 0; index < window.Tabs.TabCount; index++)
+        {
+            window.Tabs.SelectedIndex = index;
+            Save($"{index + 1}-{window.Tabs.TabPages[index].Text}");
+        }
+        // 安装版下载完安装程序后的更新页。
+        var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
+        var original = installed.GetValue(host.Updates);
+        installed.SetValue(host.Updates, true);
+        typeof(UpdateService).GetProperty("Phase", members)!.SetValue(host.Updates, UpdatePhase.Downloaded);
+        window.ShowPage(SettingsPage.Updates);
+        Save($"{window.Tabs.SelectedIndex + 1}-{window.Tabs.SelectedTab!.Text}-installer");
+        installed.SetValue(host.Updates, original);
         Console.WriteLine($"Saved settings screenshots to {directory}");
     }
 

@@ -22,7 +22,8 @@ async function main(directory, tag) {
   if (release.tag_name !== tag || !release.draft || release.prerelease) throw new Error('Expected a draft full release for the tag.');
   const files = (await readdir(directory)).sort();
   const assets = new Map(release.assets.map(asset => [asset.name, asset]));
-  if (files.length !== 9 || assets.size !== 9 || files.some(file => !assets.has(file))) throw new Error('Release asset list differs from verified files.');
+  // 每个平台 5 个：ZIP、安装包（DMG / 安装程序）、各自的 .sha256，以及构建元数据。
+  if (files.length !== 15 || assets.size !== 15 || files.some(file => !assets.has(file))) throw new Error('Release asset list differs from verified files.');
   for (const file of files) {
     const path = join(directory, file);
     const asset = assets.get(file);

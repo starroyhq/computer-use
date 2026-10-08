@@ -1,15 +1,17 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32;
 
 namespace ComputerUse.WindowsHost;
 
 internal sealed record UpdateAsset(string Name, long Size, string? Sha256);
 
-/// <summary><c>update check</c> 的输出。</summary>
+/// <summary><c>update check</c> 的输出。Asset 是便携 ZIP，Installer 是安装程序（v0.6.0 起的发布才有）。</summary>
 internal sealed record UpdateCheck(string Current, string Latest, bool Available, string Platform, string Tag, string Url,
-    string? PublishedAt, string Notes, UpdateAsset? Asset)
+    string? PublishedAt, string Notes, UpdateAsset? Asset, UpdateAsset? Installer = null)
 {
     /// <summary>只打开本项目的 GitHub 发布页。</summary>
     internal Uri? ReleasePage =>
@@ -31,6 +33,7 @@ internal sealed class UpdateFailure(string code, string message) : Exception(mes
         ("GitHub rate limit reached", Msg.UpdateErrorRateLimit),
         ("The latest release changed", Msg.UpdateErrorChanged),
         ("The latest release has no package", Msg.UpdateErrorNoPackage),
+        ("The latest release has no installer", Msg.UpdateErrorNoPackage),
         ("This build is already up to date", Msg.UpdateErrorUpToDate),
     ];
 
@@ -86,11 +89,14 @@ internal sealed class UpdateCommand(string node, string cli)
     }
 
     /// <summary>下载用户确认过的版本到已存在的私有目录；最新版在此期间变化时由 CLI 拒绝。</summary>
+    /// <param name="installer">下载安装程序（安装版）而不是便携 ZIP。</param>
     internal async Task<UpdateDownload> DownloadAsync(string version, string directory, IProgress<(long Downloaded, long Total)> progress,
-        CancellationToken cancellation)
+        CancellationToken cancellation, bool installer = false)
     {
-        var download = await RunAsync<UpdateDownload>(["update", "download", "--out", directory, "--release", version, "--progress"],
-            progress, cancellation);
+        string[] arguments = installer
+            ? ["update", "download", "--out", directory, "--release", version, "--installer", "--progress"]
+            : ["update", "download", "--out", directory, "--release", version, "--progress"];
+        var download = await RunAsync<UpdateDownload>(arguments, progress, cancellation);
         var expected = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar);
         if (download.Version != version || string.IsNullOrEmpty(download.Path) ||
             !string.Equals(Path.GetDirectoryName(Path.GetFullPath(download.Path)), expected, StringComparison.OrdinalIgnoreCase))
@@ -165,7 +171,8 @@ internal sealed class UpdateCommand(string node, string cli)
 internal enum UpdatePhase { Idle, Checking, UpToDate, Available, Downloading, Downloaded, Failed }
 
 /// <summary>
-/// 检查与下载更新的状态机。Windows 包未签名，这里只下载并校验，然后在资源管理器中显示，由用户手动替换。
+/// 检查与下载更新的状态机。这里只下载并校验：安装版由用户运行下载的安装程序（普通安装向导），
+/// 便携版在资源管理器中显示 ZIP，由用户手动替换文件夹。
 /// 所有方法在界面线程调用，Changed 也在界面线程触发。
 /// </summary>
 internal sealed class UpdateService : IDisposable
@@ -183,12 +190,14 @@ internal sealed class UpdateService : IDisposable
     private CancellationTokenSource? _operation;
     private bool _cancelRequested;
 
-    internal UpdateService(string packageRoot, HostSettingsStore settings, UpdateCommand? command = null)
+    /// <param name="installed">测试程序用来指定安装版或便携版；托盘程序按卸载登记判断。</param>
+    internal UpdateService(string packageRoot, HostSettingsStore settings, UpdateCommand? command = null, bool? installed = null)
     {
         _command = command ?? UpdateCommand.ForPackage(packageRoot);
         _settings = settings;
         _stages = Path.Combine(settings.DirectoryPath, "Updates");
         Version = ReadVersion(packageRoot);
+        Installed = installed ?? IsInstalledAt(RegisteredInstallLocation(), packageRoot);
         _hourly.Tick += (_, _) => CheckIfDue();
         _first.Tick += (_, _) =>
         {
@@ -209,6 +218,34 @@ internal sealed class UpdateService : IDisposable
     internal HostSettings Settings => _settings.Current;
     internal bool IsSkipped => Check is { } check && Phase == UpdatePhase.Available && _settings.Current.SkippedVersion == check.Latest;
     internal bool CanCheck => Phase is not (UpdatePhase.Checking or UpdatePhase.Downloading or UpdatePhase.Downloaded);
+    /// <summary>这份程序由安装程序安装：更新下载安装程序；否则是便携版，下载 ZIP。</summary>
+    internal bool Installed { get; }
+    /// <summary>本机这份程序要下载的更新包；最新版没有对应的包时为空。</summary>
+    internal UpdateAsset? Package => Installed ? Check?.Installer : Check?.Asset;
+
+    // 与安装脚本 windows/installer/ComputerUse.iss 的 AppId 一致；安装程序把卸载信息登记在当前用户下。
+    internal const string InstallerAppId = "{6C2B9F4E-4B7A-4E0F-9C59-3B1D2F8A7E41}";
+
+    internal static string? RegisteredInstallLocation()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{InstallerAppId}_is1");
+            return key?.GetValue("InstallLocation") as string;
+        }
+        catch (Exception error) when (error is System.Security.SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    /// <summary>登记的安装位置就是程序所在目录（不区分大小写，忽略末尾的分隔符）。</summary>
+    internal static bool IsInstalledAt(string? installLocation, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(installLocation) || string.IsNullOrWhiteSpace(directory)) return false;
+        try { return string.Equals(NormalizeDirectory(installLocation), NormalizeDirectory(directory), StringComparison.OrdinalIgnoreCase); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+    }
+
+    private static string NormalizeDirectory(string path) =>
+        Path.GetFullPath(path.Trim().Trim('"')).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
     internal void Start()
     {
@@ -279,7 +316,7 @@ internal sealed class UpdateService : IDisposable
     internal async Task DownloadAsync()
     {
         if (Phase != UpdatePhase.Available || Check is not { } check) return;
-        if (check.Asset is null)
+        if (Package is not { } package)
         {
             Phase = UpdatePhase.Failed;
             Error = L10n.T(Msg.UpdatesNoPackage);
@@ -289,7 +326,7 @@ internal sealed class UpdateService : IDisposable
         var stage = Path.Combine(_stages, $"{check.Latest}-{Guid.NewGuid():N}");
         _cancelRequested = false;
         Phase = UpdatePhase.Downloading;
-        Progress = (0, check.Asset.Size);
+        Progress = (0, package.Size);
         Changed?.Invoke();
         using var operation = new CancellationTokenSource(TimeSpan.FromMinutes(25));
         _operation = operation;
@@ -302,9 +339,10 @@ internal sealed class UpdateService : IDisposable
         try
         {
             Directory.CreateDirectory(stage);
-            Download = await _command.DownloadAsync(check.Latest, stage, progress, operation.Token);
+            Download = await _command.DownloadAsync(check.Latest, stage, progress, operation.Token, installer: Installed);
             Phase = UpdatePhase.Downloaded;
-            Reveal();
+            // 便携版需要手动替换文件夹，直接在资源管理器中显示；安装版等用户点“运行安装程序”。
+            if (!Installed) Reveal();
         }
         catch (Exception error)
         {
@@ -335,6 +373,22 @@ internal sealed class UpdateService : IDisposable
         if (Download is not { } download || !File.Exists(download.Path)) return;
         try { Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{download.Path}\"") { UseShellExecute = false }); }
         catch { }
+    }
+
+    /// <summary>
+    /// 打开下载并校验过的安装程序，由用户按向导完成。用户点“安装”后，安装程序才用 --quit 请托盘程序
+    /// 停止服务并退出；在此之前取消，托盘程序照常运行。
+    /// </summary>
+    internal void RunInstaller()
+    {
+        if (!Installed || Phase != UpdatePhase.Downloaded || Download is not { } download || !File.Exists(download.Path)) return;
+        try { Process.Start(new ProcessStartInfo(download.Path) { UseShellExecute = true }); }
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
+        {
+            Phase = UpdatePhase.Failed;
+            Error = L10n.F(Msg.UpdateErrorGeneric, error.Message);
+            Changed?.Invoke();
+        }
     }
 
     internal void OpenReleasePage() => Open(Check?.ReleasePage ?? ReleasesPage);

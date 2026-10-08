@@ -81,7 +81,9 @@ internal sealed class SettingsForm : Form
     private readonly Button _skip = MakeButton(Msg.UpdatesSkip);
     private readonly Button _reveal = MakeButton(Msg.UpdatesReveal);
     private readonly Button _retry = MakeButton(Msg.UpdatesRetry);
+    private readonly Button _runInstaller = MakeButton(Msg.UpdatesRunInstaller);
     private readonly Label _manualHint = MakeNote();
+    private readonly Label _installerHint = MakeNote();
     private readonly Label _notesLabel = new() { Text = L10n.T(Msg.UpdatesNotes), AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right, Margin = new Padding(3, 6, 6, 3) };
     private readonly TextBox _notes = new()
     {
@@ -304,9 +306,10 @@ internal sealed class SettingsForm : Form
         Row(grid, null, _updateStatus);
         _progressRow = Flow(_progress, _cancel);
         Row(grid, null, _progressRow);
-        _updateActions = Flow(_download, _release, _skip, _reveal, _retry);
+        _updateActions = Flow(_runInstaller, _download, _release, _skip, _reveal, _retry);
         Row(grid, null, _updateActions);
         Row(grid, null, _manualHint.With(Msg.UpdatesManualHint));
+        Row(grid, null, _installerHint.With(Msg.UpdatesInstallerHint));
         Row(grid, null, _notes, gap: 4, labelControl: _notesLabel);
         _automatic.CheckedChanged += (_, _) =>
         {
@@ -319,6 +322,7 @@ internal sealed class SettingsForm : Form
         _release.Click += (_, _) => _host.Updates.OpenReleasePage();
         _skip.Click += (_, _) => _host.Updates.Skip();
         _reveal.Click += (_, _) => _host.Updates.Reveal();
+        _runInstaller.Click += (_, _) => _host.Updates.RunInstaller();
         return grid;
     }
 
@@ -474,7 +478,9 @@ internal sealed class SettingsForm : Form
         string? notes = null;
         var buttons = new HashSet<Button>();
         var showProgress = false;
+        // 安装版提示运行安装程序，便携版提示手动替换文件夹。
         var manual = false;
+        var installer = false;
         var check = updates.Check;
         switch (updates.Phase)
         {
@@ -487,12 +493,13 @@ internal sealed class SettingsForm : Form
             case UpdatePhase.Available when check is not null:
                 status = L10n.F(Msg.UpdatesAvailable, check.Latest, check.Current);
                 if (updates.IsSkipped) status += "\n" + L10n.F(Msg.UpdatesSkipped, check.Latest);
-                if (check.Asset is null) status += "\n" + L10n.T(Msg.UpdatesNoPackage);
+                if (updates.Package is null) status += "\n" + L10n.T(Msg.UpdatesNoPackage);
                 else buttons.Add(_download);
                 buttons.Add(_release);
                 if (!updates.IsSkipped) buttons.Add(_skip);
                 notes = check.Notes;
-                manual = check.Asset is not null;
+                installer = updates.Package is not null && updates.Installed;
+                manual = updates.Package is not null && !updates.Installed;
                 break;
             case UpdatePhase.Downloading when check is not null:
                 var (downloaded, total) = updates.Progress;
@@ -503,10 +510,12 @@ internal sealed class SettingsForm : Form
                 break;
             case UpdatePhase.Downloaded when check is not null:
                 status = L10n.F(Msg.UpdatesDownloaded, check.Latest);
+                if (updates.Installed) buttons.Add(_runInstaller);
                 buttons.Add(_reveal);
                 buttons.Add(_release);
                 notes = check.Notes;
-                manual = true;
+                installer = updates.Installed;
+                manual = !updates.Installed;
                 break;
             case UpdatePhase.Failed:
                 status = L10n.F(Msg.UpdatesFailed, updates.Error ?? "");
@@ -517,9 +526,10 @@ internal sealed class SettingsForm : Form
         _updateStatus.Text = status ?? "";
         _updateStatus.Visible = status is not null;
         _progressRow.Visible = showProgress;
-        foreach (var button in new[] { _download, _release, _skip, _reveal, _retry }) button.Visible = buttons.Contains(button);
+        foreach (var button in new[] { _runInstaller, _download, _release, _skip, _reveal, _retry }) button.Visible = buttons.Contains(button);
         _updateActions.Visible = buttons.Count > 0;
         _manualHint.Visible = manual;
+        _installerHint.Visible = installer;
         var text = string.IsNullOrWhiteSpace(notes) ? "" : Readable(notes).Replace("\n", "\r\n");
         if (_notes.Text != text) _notes.Text = text;
         _notes.Visible = _notesLabel.Visible = text.Length > 0;
