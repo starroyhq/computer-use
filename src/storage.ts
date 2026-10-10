@@ -34,7 +34,12 @@ const clientSchema = z.object({
   id: z.string(),
   name: z.string(),
   tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
-  grant: z.object({ appIds: z.array(z.string()), browser: z.boolean(), foreground: z.boolean().default(false) }),
+  grant: z.object({
+    appIds: z.array(z.string()),
+    allApps: z.boolean().default(false),
+    browser: z.boolean(),
+    foreground: z.boolean().default(false),
+  }),
 });
 export class ClientStore {
   readonly clients = new Map<string, Client>();

@@ -38,8 +38,9 @@ export type BackendObservation = {
 export type Point = { x: number; y: number };
 export type Action = z.infer<typeof actionSchema>;
 export type Condition = z.infer<typeof conditionSchema>;
+// allApps 仅覆盖桌面应用；缺失时沿用旧配对的 appIds，不能自动扩权。
 // foreground 在配对批准时一并授予并持久化；缺失表示旧版配对，需要重新配对才能使用前台。
-export type Grant = { appIds: string[]; browser: boolean; foreground?: boolean };
+export type Grant = { appIds: string[]; allApps?: boolean; browser: boolean; foreground?: boolean };
 export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> };
 export type BackendExecution = { effect: 'confirmed' | 'unconfirmed' };
 export interface Backend {
@@ -101,17 +102,20 @@ export function errorResult(error: unknown): { code: ErrorCode; message: string 
 }
 export type Client = { id: string; name: string; tokenHash: string; grant: Grant };
 export type HostEvent =
-  | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; browser: boolean; foreground: boolean }
+  | { event: 'pair_request'; clientId: string; name: string; appIds: string[]; allApps?: boolean; browser: boolean; foreground: boolean }
   | { event: 'foreground_request'; sessionId: string; clientName: string; targetTitle: string }
   | { event: 'decision_finished'; requestId: string; approved: boolean }
   // 宿主的客户端列表：授权范围只用于展示，不含凭据。
-  | { event: 'clients'; clients: Array<{ id: string; name: string; appIds: string[]; browser: boolean; foreground: boolean }> }
+  | {
+      event: 'clients';
+      clients: Array<{ id: string; name: string; appIds: string[]; allApps?: boolean; browser: boolean; foreground: boolean }>;
+    }
   | { event: 'ready' }
   | { event: 'control_begin' | 'control_end'; pid: number }
   | { event: 'rpc_response'; id: string; result?: unknown; error?: { code: ErrorCode; message: string } }
   | { event: 'status' | 'fatal'; message: string };
 export type HostCommand =
-  | { command: 'pair_allow' | 'pair_deny'; clientId: string }
+  | { command: 'pair_allow' | 'pair_deny'; clientId: string; allApps?: boolean | undefined }
   | { command: 'foreground_allow' | 'foreground_deny'; sessionId: string }
   | { command: 'revoke'; clientId: string }
   | { command: 'pause' | 'resume' | 'stop' | 'http_enable' | 'http_disable' }

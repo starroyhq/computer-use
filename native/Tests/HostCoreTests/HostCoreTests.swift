@@ -62,7 +62,14 @@ final class HostCoreTests: XCTestCase {
 
     func testAuthorizationEventsRequireExplicitIdentityAndScope() throws {
         let valid = Data(#"{"event":"pair_request","clientId":"agent-1","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false}"#.utf8)
-        XCTAssertEqual(try HostEvent.parse(valid).appIds, ["com.apple.TextEdit"])
+        let restricted = try HostEvent.parse(valid)
+        XCTAssertEqual(restricted.appIds, ["com.apple.TextEdit"])
+        XCTAssertNil(restricted.allApps)
+        let all = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"all","name":"Agent","appIds":[],"allApps":true,"browser":false,"foreground":true}"#.utf8))
+        XCTAssertEqual(all.allApps, true)
+        XCTAssertEqual(all.appIds, [])
+        XCTAssertEqual(all.browser, false)
+        XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"all","name":"Agent","appIds":[],"allApps":"true","browser":false}"#.utf8)))
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"pair_request","name":"Agent"}"#.utf8)))
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"foreground_request","sessionId":"s","clientName":"a"}"#.utf8)))
         XCTAssertThrowsError(try HostEvent.parse(Data(#"{"event":"unknown"}"#.utf8)))
@@ -98,6 +105,21 @@ final class HostCoreTests: XCTestCase {
         XCTAssertEqual(frame.filter { $0 == 10 }.count, 1)
         let object = try JSONSerialization.jsonObject(with: frame) as? [String: String]
         XCTAssertEqual(object?["clientId"], "id\nwith\"quotes")
+    }
+
+    func testAllAppsApprovalRequiresAnExplicitConfirmationField() throws {
+        let confirmed = try HostControl.encode("pair_allow", clientID: "all", allApps: true)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: confirmed) as? [String: Any])
+        XCTAssertEqual(object["command"] as? String, "pair_allow")
+        XCTAssertEqual(object["clientId"] as? String, "all")
+        XCTAssertEqual(object["allApps"] as? Bool, true)
+        XCTAssertEqual(object.count, 3)
+        XCTAssertEqual(confirmed.last, 10)
+        for command in ["pair_allow", "pair_deny", "foreground_allow", "revoke", "pause", "stop"] {
+            let unchanged = try HostControl.encode(command)
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: unchanged) as? [String: Any])
+            XCTAssertNil(encoded["allApps"], "\(command) must not confirm all apps implicitly")
+        }
     }
 
     func testConfigurationPreservesSpacesInExecutablePath() throws {

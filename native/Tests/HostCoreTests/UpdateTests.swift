@@ -19,13 +19,16 @@ final class UpdateTests: XCTestCase {
     // MARK: 客户端与版本
 
     func testClientListCarriesGrantsAndAcceptsOlderRuntimes() throws {
-        let event = try HostEvent.parse(Data(#"{"event":"clients","clients":[{"id":"a","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false,"foreground":true},{"id":"b","name":"Old"}]}"#.utf8))
+        let event = try HostEvent.parse(Data(#"{"event":"clients","clients":[{"id":"a","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false,"foreground":true},{"id":"b","name":"Old"},{"id":"c","name":"All apps","appIds":[],"allApps":true,"browser":false,"foreground":true},{"id":"d","name":"Restricted","appIds":["com.apple.Notes"],"allApps":false,"browser":false,"foreground":true}]}"#.utf8))
         XCTAssertEqual(event.clients, [
             ClientRecord(id: "a", name: "Agent", appIds: ["com.apple.TextEdit"], browser: false, foreground: true),
             ClientRecord(id: "b", name: "Old"),
+            ClientRecord(id: "c", name: "All apps", appIds: [], allApps: true, browser: false, foreground: true),
+            ClientRecord(id: "d", name: "Restricted", appIds: ["com.apple.Notes"], allApps: false, browser: false, foreground: true),
         ])
         let pair = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"c","name":"Agent","appIds":[],"browser":true,"foreground":true}"#.utf8))
         XCTAssertEqual(pair.foreground, true)
+        XCTAssertNil(pair.allApps)
     }
 
     func testReleaseVersionsCompareNumericallyAndRejectOtherForms() throws {

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { access, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { release as osRelease } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -68,6 +69,25 @@ export function parseArguments(args, hostArch = process.arch) {
     else throw new Error('Usage: node scripts/package-windows.mjs [--arch arm64|x64] [--verify-only]');
   }
   return { target: targetForArch(arch), verifyOnly };
+}
+
+export function assertExecutionHost(target, { platform = process.platform, arch = process.arch, release = osRelease() } = {}) {
+  const native = arch === target.npmArch;
+  const emulatedX64 = arch === 'arm64' && target.npmArch === 'x64';
+  if (platform !== 'win32' || (!native && !emulatedX64)) {
+    throw new Error(
+      `Build and verify the Windows ${target.label} package inside Windows ${target.label}${target.npmArch === 'x64' ? ' or Windows 11 ARM64' : ''}.`,
+    );
+  }
+  if (emulatedX64) {
+    // Windows 11 仍报告版本 10.0；Windows 10 ARM64 不能运行校验所需的 x64 组件。
+    const [major, , build] = release.split('.').map(Number);
+    if (!(major > 10 || (major === 10 && build >= 22000))) {
+      throw new Error(
+        'Building or verifying a Windows x64 package on Windows ARM64 requires Windows 11 (build 22000 or newer) for x64 emulation. Use --arch arm64 on Windows 10 ARM64.',
+      );
+    }
+  }
 }
 
 function run(command, args, options = {}) {
@@ -163,6 +183,7 @@ export async function assertPeMachine(path, target) {
 }
 
 export async function verify(bundle, target) {
+  assertExecutionHost(target);
   const receipt = JSON.parse(await readFile(join(bundle, 'build-receipt.json'), 'utf8'));
   if (
     receipt.owner !== target.marker ||
@@ -218,13 +239,7 @@ export async function verify(bundle, target) {
 }
 
 async function build(target) {
-  const native = process.arch === target.npmArch;
-  const emulatedX64 = process.arch === 'arm64' && target.npmArch === 'x64';
-  if (process.platform !== 'win32' || (!native && !emulatedX64)) {
-    throw new Error(
-      `Build the Windows ${target.label} package inside Windows ${target.label}${target.npmArch === 'x64' ? ' or Windows ARM64' : ''}.`,
-    );
-  }
+  assertExecutionHost(target);
   await mkdir(join(ROOT, '.cache'), { recursive: true });
   await mkdir(dirname(target.output), { recursive: true });
   const stage = await mkdtemp(join(ROOT, '.cache', 'package-windows-'));

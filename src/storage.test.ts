@@ -55,12 +55,30 @@ describe('private persisted state', () => {
     expect(await readFile(file, 'utf8')).not.toContain(token);
     const restored = new ClientStore(file);
     await restored.load();
-    // 旧版配对没有 foreground 字段：按未授予前台加载，不会被静默提升。
-    expect(restored.authenticate(token)).toEqual({ ...client, grant: { ...client.grant, foreground: false } });
+    // 旧配对缺失的权限字段按未授予加载，不能升级成全应用或前台授权。
+    expect(restored.authenticate(token)).toEqual({ ...client, grant: { ...client.grant, allApps: false, foreground: false } });
     for (const invalid of [undefined, '', 'bad', 'x'.repeat(513)]) expect(() => restored.authenticate(invalid)).toThrow();
     expect(matchesHash(token, 'invalid')).toBe(false);
     expect(matchesHash(token, hash(token))).toBe(true);
     await atomicJson(file, [{ ...client, tokenHash: 'invalid' }]);
+    await expect(new ClientStore(file).load()).rejects.toMatchObject({ code: 'unavailable' });
+  });
+
+  it('persists all-app authorization explicitly and rejects malformed scope flags', async () => {
+    const file = join(directory, 'clients.json');
+    const store = new ClientStore(file);
+    const client = {
+      id: 'all-apps',
+      name: 'All apps',
+      tokenHash: hash('all-apps-test-token'),
+      grant: { appIds: [], allApps: true, browser: false, foreground: true },
+    };
+    store.clients.set(client.id, client);
+    await store.save();
+    const restored = new ClientStore(file);
+    await restored.load();
+    expect(restored.authenticate('all-apps-test-token')).toEqual(client);
+    await atomicJson(file, [{ ...client, grant: { ...client.grant, allApps: 'true' } }]);
     await expect(new ClientStore(file).load()).rejects.toMatchObject({ code: 'unavailable' });
   });
 

@@ -34,7 +34,7 @@ node scripts/package-app.mjs --verify-only
 
 ## 安装包：macOS DMG 与 Windows 安装程序
 
-安装包只用于首次安装，内容就是上面校验过的 App 或便携目录；macOS 一键更新和 Windows 便携版更新仍使用 ZIP。
+v0.6.0 提供 macOS ARM64、Windows ARM64 和 x64 的 ZIP，以及 macOS DMG 和两种 Windows 架构的安装程序。每个二进制产物附 `.sha256` 校验文件，每个平台另附 JSON 元数据，共 15 个发布附件。macOS DMG 用于首次安装，Windows 安装程序用于首次安装和安装版升级；macOS 一键更新和 Windows 便携版更新仍使用 ZIP。正式发布工作流要求同一提交的 CI 成功，分别完成 macOS App 与 DMG 的 Developer ID 签名、公证、装订和校验，再核对全部发布附件；开发 CI 产物不等同于已公证的正式包。Windows 安装器与便携包仍未签名，本地 Windows 11 ARM64 覆盖安装已验收，从真实发布下载到完成安装版升级的完整流程仍待验证，见 [验收记录](../docs/validation-results.md)。Windows 10 与原生 x64 桌面尚无实机验收。
 
 macOS 运行 `pnpm package:dmg`，把 `artifacts/Computer Use.app` 做成 `artifacts/Computer Use.dmg`：HFS+、UDZO 压缩，内含 App 与指向 `/Applications` 的快捷方式。身份的来源与 `package-app.mjs` 相同（`--identity`，其次 `.env.local`）；有 Developer ID 时用 `--timestamp` 签名映像，ad-hoc 开发版本的映像不签名。校验会只读挂载映像，确认其中只有 App 与快捷方式并复验 App，签名时再核对映像的签名者；`--verify-only` 只重验已有映像。公证和装订只在发布作业里进行。
 

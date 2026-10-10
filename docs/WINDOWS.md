@@ -2,11 +2,19 @@
 
 简体中文 | [English](WINDOWS.en.md) · [返回首页](../README.md)
 
-当前 `com.starroy.computeruse` 的 ARM64 包已在一台 Windows 11 ARM64 虚拟机的**交互式登录桌面**完成限定验收：66 个 Fixture 输入用例、一次真实 Mac Codex 模型回归及授权、断线与退出检查。原生 x64 桌面未验收，完整边界见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。安装程序与便携包都未签名；UAC 安全桌面和高完整性应用不在支持范围内。
+当前 `com.starroy.computeruse` 的 ARM64 本地安装包于 2026-10-10 在一台 Windows 11 ARM64 虚拟机的**交互式登录桌面**完成限定验收：一次全应用配对、两个 Fixture 的三个窗口、7 轮后台输入及暂停、恢复、紧停、重启、撤销和覆盖安装。早期 66 个 Fixture 输入用例与一次真实 Mac Codex 模型回归保留为历史记录；原生 x64 桌面未验收，完整边界见[验证记录](validation-results.md)。Computer Use 在 Windows 内运行，本机 Agent 可使用 stdio MCP；Mac 可通过 SSH 本地转发访问 Windows HTTP MCP。HTTP 只监听 Windows 的 `127.0.0.1:47631`，无需开放该端口到局域网。安装程序与便携包都未签名；UAC 安全桌面和高完整性应用不在支持范围内。
+
+v0.6.0 的桌面兼容目标为 Windows 10 1809（build 17763）及之后版本、Windows 11，提供 x64 与 ARM64 包。安装器最低版本与 WinForms 的 `net10.0-windows10.0.17763.0` 目标对齐；**Windows 10 尚无实机验收**，安装门槛不等于桌面功能已通过测试。
+
+独立浏览器另有边界：当前 Playwright 后端的[上游要求为 Windows 11 或更高版本](https://playwright.dev/docs/intro#system-requirements)。Windows 10 ARM64 没有 x64 模拟，不能运行此后端所用的 x64 Chromium。桌面全应用授权不包含独立浏览器，Windows 10 桌面兼容目标也不代表独立浏览器兼容。
 
 ## 安装与卸载
 
-推荐使用发布里的安装程序 `computer-use-<版本>-windows-<arm64|x64>-setup.exe`，按 Windows 的架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；首次安装可以换目录，升级沿用原目录。向导会建立开始菜单快捷方式，桌面快捷方式可选，完成页可直接启动。开始安装前，安装程序用 `ComputerUse.WindowsHost.exe --quit` 让当前会话里正在运行的托盘程序（安装版或便携版）停止服务并退出；v0.5.0 及更早的版本不支持 `--quit`，向导会提示先从托盘菜单退出再重试。安装程序未签名，SmartScreen 可能提示“Windows 已保护你的电脑”，确认来自本项目的 Releases 后选“更多信息 → 仍要运行”。
+从 [v0.6.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0) 下载对应架构的 `computer-use-0.6.0-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.6.0-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
+
+v0.6.0 开始提供安装程序，v0.5.0 及更早版本只提供便携包。本地 ARM64 覆盖安装已验收，但从真实发布下载到完成安装版升级的完整流程、原生 x64 安装和 SmartScreen 表现仍待验证，见[验证记录](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10)。
+
+安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；首次安装可以换目录，升级沿用原目录。向导会建立开始菜单快捷方式，桌面快捷方式可选，完成页可直接启动。开始安装前，安装程序用 `ComputerUse.WindowsHost.exe --quit` 让当前会话里正在运行的托盘程序（安装版或便携版）停止服务并退出；v0.5.0 及更早的版本不支持 `--quit`，向导会提示先从托盘菜单退出再重试。安装程序未签名，SmartScreen 可能提示“Windows 已保护你的电脑”，确认来自本项目的 Releases 后选“更多信息 → 仍要运行”。
 
 在系统“设置 → 应用”中卸载。卸载程序先让托盘程序停止服务并退出，再删除安装目录和指向它的登录启动项；`%LOCALAPPDATA%\Computer Use` 里的配对凭据、设置与日志保留，不再需要时可手动删除。
 
@@ -16,13 +24,13 @@
 Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
 ```
 
-也可以使用便携 ZIP：在对应架构的 Windows 11 上完整解压，再从解压目录运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。从便携版改用安装版时，程序位置会变，需要在新位置重新生成 Agent 配置；配对凭据不变。
+从便携版改用安装版时，程序位置会变，需要在新位置重新生成 Agent 配置；配对凭据不变。
 
 无论哪种方式，预构建包都已内置运行组件，无需安装下节所述的构建工具。首次运行需在当前用户的交互登录桌面。包内不含别人的配对凭据，需要由使用者在本机新建并批准自己的配对。
 
 ## 从源码构建与启动
 
-在 Windows 11 x64 或 ARM64 上安装 .NET 10 SDK、Node 24+ 和 pnpm 10，获取本项目后于 PowerShell 中运行。ARM64 主机也可交叉打包 x64：.NET 发布目标、内置 Node/Cua 和 pnpm 原生可选依赖都按 x64 选择，再借助 Windows 11 的 x64 模拟运行包内检查。以 x64 包为例；构建 ARM64 包时将 `x64` 改为 `arm64`，包目录改为 `Computer Use Windows ARM64`。x64 主机不能构建 ARM64 包。
+在 Windows x64 或 ARM64 上安装对应架构的 .NET 10 SDK、Node 24+ 和 pnpm 10，获取本项目后于 PowerShell 中运行。Windows 10 ARM64 构建与验证使用原生 ARM64 组件；ARM64 主机交叉打包或验证 x64 包要求 Windows 11（build 22000 起）的 x64 模拟，脚本会在不满足时提前报错。以 x64 包为例；构建 ARM64 包时将 `x64` 改为 `arm64`，包目录改为 `Computer Use Windows ARM64`。x64 主机不能构建 ARM64 包。
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -45,27 +53,31 @@ node scripts/package-windows-installer.mjs --arch x64 --verify-only --smoke-test
 
 运行后会打开设置窗口；关闭窗口后服务仍在托盘运行，双击托盘图标或再次运行程序可重新打开。“通用”页可勾选“登录 Windows 时启动”（写入当前用户的启动项，登录后只在托盘运行）；移动便携目录后需重新勾选。
 
+v0.6.0 的窗口采用状态、客户端、接入、通用、更新、关于 6 区侧栏，紧急停止在每一页常驻。状态页展示服务与配对数量，可进入接入页复制配对命令，再复制 stdio 配置；客户端页可查看范围并撤销授权。配对窗口分区列出客户端身份、桌面范围、独立浏览器、前台权限、有效期与执行方式，长内容可以滚动，决定按钮保持可见。默认按钮与初始焦点仍为拒绝；关闭窗口或按 Esc 不会授权，超时或请求撤回会关闭提示，允许决定以运行时确认为准。
+
 ## 更新
 
-“更新”页每天检查一次 GitHub 正式版（可关闭），下载的文件须与发布里的 SHA-256 校验文件和元数据一致。程序所在目录就是当前用户卸载登记里的安装目录时按安装版处理，否则按便携版处理：
+“更新”页每天检查一次 GitHub 正式版（可关闭），下载的文件须与发布里的 SHA-256 校验文件和元数据一致。v0.6.0 支持安装版和便携版两种更新流程；v0.5.0 及更早版本使用便携版流程。从真实发布下载并运行安装程序的完整流程仍待验收。程序所在目录就是当前用户卸载登记里的安装目录时按安装版处理，否则按便携版处理：
 
-- **安装版**：下载并校验新版本的安装程序，点“运行安装程序”后按向导完成。安装程序先让托盘程序停止服务并退出，再覆盖安装到原目录，完成页可直接启动；在点“安装”之前取消，托盘程序照常运行。
+- **安装版**：发布包含安装程序时，下载并校验新版本的安装程序，点“运行安装程序”后按向导完成。安装程序先让托盘程序停止服务并退出，再覆盖安装到原目录，完成页可直接启动；在点“安装”之前取消，托盘程序照常运行。
 - **便携版**：只下载并校验 ZIP，然后在资源管理器中显示。退出托盘程序，完整解压，用新文件夹替换当前文件夹并保持同一路径，这样 Agent 配置中的绝对路径仍然有效。
 
 已配对的客户端和设置保存在 `%LOCALAPPDATA%\Computer Use`，两种方式都不受影响。
 
 ## Windows 本机 Agent：stdio MCP
 
-打开希望控制的普通权限应用，用其**完整可执行文件路径**配对。以下测试程序路径是占位符，须替换为自己的测试应用路径。本节与后面的 Mac 远程接入是两种选择，无需都做。
+v0.6.0 新配对默认首次一次授权所有桌面应用，无需填写应用路径；已有受限客户端不会自动扩大范围。本节与后面的 Mac 远程接入是两种选择，无需都做。
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP：改为进入安装目录或解压目录
-& .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
+& .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex'
 ```
 
-配对和前台授权请求须在 60 秒内处理。过期或失效后弹窗自动关闭，排队的失效请求不会再次弹出。点击“允许”仅提交决定，宿主收到运行时确认后才显示“已批准请求”；未授权时需由 Agent 发起新请求。关闭弹窗或按默认按钮均为拒绝。
+配对请求须在 60 秒内处理。过期或失效后弹窗自动关闭，排队的失效请求不会再次弹出。点击“允许”仅提交决定，宿主收到运行时确认后才显示“已批准请求”；未授权时需由 Agent 发起新请求。关闭弹窗或按默认按钮均为拒绝。
 
-在托盘批准配对，然后运行：
+在托盘批准“所有应用”后，新应用、新窗口及重启都不需要再次批准。前台权限在配对时一并授予，会话默认后台，使用前台需显式指定，不自动切换。设置中的撤销、菜单中的暂停/恢复与紧急停止继续有效。旧配对保留原范围；改为全应用的步骤见[使用说明](USAGE.md#配对范围--pairing-scope)。
+
+打开一个普通权限的测试应用，然后运行：
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js doctor --profile codex
@@ -75,18 +87,20 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP�
 
 将输出添加到 Windows 用户的 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`，重新加载客户端配置后按[首页的只读任务](../README.md#接入-agent-与首次观察)验证。配置不含凭据，不需要启用 HTTP 或 SSH。本机 Windows Codex 的真实模型验证仍待完成；已有跨机器实测使用 Mac Codex。其他客户端可将 `config codex` 换为 `config stdio` 获取通用 JSON。
 
+需要只授权 Fixture 的验收 profile 时，另用 `pair --profile fixture --name 'Fixture Agent' --app 'C:\path\to\ComputerUseFixture.exe'`，把占位路径替换为真实完整路径。后续命令和 Agent 配置统一使用 `fixture`；可重复 `--app` 限定多个应用。独立浏览器单独授权，详见[配对范围](USAGE.md#配对范围--pairing-scope)。
+
 ## Mac 远程接入：Windows 配对与凭据
 
 以下从仓库根目录进入包目录；如果已在包目录中，跳过 `Set-Location`。另建远程客户端 profile，并在托盘批准：
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP：改为进入安装目录或解压目录
-& .\bin\node.exe .\runtime\cli.js pair --profile mac-codex --name 'Mac Codex' --app 'C:\path\to\ComputerUseFixture.exe'
+& .\bin\node.exe .\runtime\cli.js pair --profile mac-codex --name 'Mac Codex'
 & .\bin\node.exe .\runtime\cli.js doctor --profile mac-codex
 & .\bin\node.exe .\runtime\cli.js targets --profile mac-codex
 ```
 
-在 Windows 托盘中批准配对。只批准明确的应用路径；撤销后 Mac 的旧凭据应立即失效。Windows 宿主及 CLI 的管道、凭据和日志位于当前用户的 `%LOCALAPPDATA%\Computer Use`，不要从服务账号或未登录的后台会话启动宿主。
+在 Windows 托盘中批准此客户端的全应用配对；如只做 Fixture 验收，在配对命令加 `--app 'C:\path\to\ComputerUseFixture.exe'` 限定范围。撤销后 Mac 的旧凭据应立即失效。Windows 宿主及 CLI 的管道、凭据和日志位于当前用户的 `%LOCALAPPDATA%\Computer Use`，不要从服务账号或未登录的后台会话启动宿主。
 
 在设置窗口的“接入”页启用本机 HTTP MCP（仅本次运行有效），然后生成供 Mac 使用的私有配置文件：
 
@@ -120,7 +134,7 @@ tool_timeout_sec = 90
 
 重启 Codex 并查看 `/mcp` 或 `codex mcp list`。实际调用按 `doctor → targets → session_open → observe → act → observe → session_close`；每次动作带 UUID `requestId` 和最新 `snapshotId`。跨隧道断线时，未收到确定结果的动作视为 `unknown`，重连后先查 `action_status` 并重新观察，不能自动重放。目标截图会发送给所选 Agent；默认日志不保存截图和输入。
 
-非交互 `codex exec` 若在 `targets` 报 `MCP tool call requires approval, but approval policy is never`，可在**仅用于已配对测试程序的临时配置**中为此服务器加 `default_tools_approval_mode = "approve"`；不要因此改动用户级配置。该设置只处理 Codex 的 MCP 工具审批，Windows 托盘的配对和前台批准仍然生效。交互运行时可按提示批准工具调用。Codex 支持的字段见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+非交互 `codex exec` 若在 `targets` 报 `MCP tool call requires approval, but approval policy is never`，可在**仅连接 `--app` 受限 Fixture profile 的临时配置**中为此服务器加 `default_tools_approval_mode = "approve"`；不要因此改动用户级配置。该设置只处理 Codex 的 MCP 工具审批，Windows 托盘的首次配对批准仍然生效。交互运行时可按提示批准工具调用。Codex 支持的字段见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 ## 故障排查
 
@@ -128,10 +142,12 @@ tool_timeout_sec = 90
 - Codex 连接拒绝：检查 Windows 设置窗口“接入”页是否已启用 HTTP、SSH 隧道是否仍在运行，以及 Mac 47631 端口是否由隧道占用。不要为排错开放 Windows MCP 防火墙端口。
 - `targets` 被 MCP 工具审批阻止：检查当前 Codex 审批策略；非交互专用测试可按上文只为临时服务器配置工具审批。
 - `401`：确认 Mac 私有 JSON 来自当前配对、文件权限为 `0600`，设置窗口“客户端”页中未撤销该客户端；在 Mac 直接运行 helper 应只输出一个 JSON header 对象，勿将输出粘贴到日志或聊天。
-- 配对程序不可见或动作拒绝：确认可执行文件路径、窗口所属进程及应用权限级别。后台动作不能送达时，可显式打开前台会话（配对时已授予，不再逐次批准）；不会自动切换。
+- 应用不可见或动作拒绝：检查窗口所属进程及应用权限级别；受限配对另核对完整可执行文件路径，旧配对不会自动获得全应用范围。后台动作不能送达时，可显式打开前台会话（配对时已授予，不再逐次批准）；不会自动切换。
 
 自动化测试和真实 Windows 虚拟机结果分别记在 [验证记录](validation-results.md)；静态打包检查不代表截图和输入已通过实测。
 
-授权窗口与设置窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。该程序使用隔离的运行时替身，覆盖超时关闭、过期队列、确认结果、默认拒绝、停止清理、两种语言的文案表、托盘偏好存储、6 个设置页与客户端列表、安装版与便携版的更新操作，不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。加 `-- --screenshots <目录>` 可把每个设置页保存为 PNG；加 `-- --live-update <旧版本便携包目录>` 会通过该包的 CLI 联网检查并下载真实的最新发布（发布带安装程序时也下载校验安装程序；需要网络）。
+授权窗口与设置窗口回归测试可在 Windows 交互桌面运行 `dotnet run --project validation/windows/ComputerUse.WindowsHostTests`。默认测试使用隔离的假后端，覆盖超时关闭、请求撤回、过期队列、确认结果、默认拒绝、停止清理、托盘偏好存储、6 区侧栏与客户端列表、安装版与便携版的更新操作，并检查中英文在正常和最小窗口尺寸下的布局及常驻紧急停止。它不授予真实权限或操作其他应用；运行时授权语义由 `pnpm test` 覆盖。
+
+加 `-- --screenshots <目录>` 会保存中英文的全部 6 页、安装版更新状态、客户端/接入/更新的窄窗口，以及全应用与多路径受限配对窗口 PNG；这些截图使用模拟数据，不构成 Windows 10 或桌面输入验收。加 `-- --live-update <旧版本便携包目录>` 则通过该包的 CLI 联网检查并下载真实的最新发布（发布带安装程序时也下载校验安装程序；需要网络）。运行方式见[窗口测试说明](../validation/windows/README.md)。
 
 Windows 元素定向输入与点击始终使用后台辅助功能路径，包括已批准的前台会话；拒绝或不确定时不自动切换或重发。无元素 ID 的前台长文本、画布和终端不在完整性保证范围内。具体动作语义见[使用说明](USAGE.md)。

@@ -32,7 +32,10 @@ async function pruneScreenshots(directory: string): Promise<void> {
 
 const help = `Computer Use ${VERSION} — local desktop runtime
 
-computer-use pair --name "My Agent" --app com.apple.TextEdit [--browser]
+computer-use pair --name "My Agent" [--profile default]
+computer-use pair --name "My Agent" --all-apps --browser
+computer-use pair --name "Scoped Agent" --app com.apple.TextEdit
+computer-use pair --name "Browser Agent" --browser
 computer-use <method> --json '<JSON>' [--profile default]
 computer-use call <method> --input request.json
 computer-use schema <method>
@@ -48,6 +51,10 @@ computer-use update download --out DIR [--release X.Y.Z] [--installer] [--progre
 Methods: ${Object.keys(schemas).join(', ')}
 
 Global options: --socket PATH, --profile NAME
+Pairing without scope flags requests all desktop apps, including future apps and
+windows. --app keeps an explicit scope; --browser alone grants only the isolated
+browser. --all-apps can be combined with --browser, but not with --app.
+Approval persists until revoked. Sessions default to background execution.
 Pairing requires local app approval. Enable HTTP in the app before using its
 loopback endpoint. Credentials are stored in private files, never printed.
 CLI operation does not depend on MCP. Images are written to private files.
@@ -64,6 +71,7 @@ function commandLine() {
         profile: { type: 'string', default: 'default' },
         name: { type: 'string' },
         app: { type: 'string', multiple: true },
+        'all-apps': { type: 'boolean' },
         browser: { type: 'boolean' },
         json: { type: 'string' },
         input: { type: 'string' },
@@ -149,7 +157,12 @@ async function main(): Promise<void> {
       throw new CuError('invalid_request', 'Profile already exists; choose another profile or remove it explicitly.');
     const client = await connect();
     const result = pairResultSchema.parse(
-      await client.call(undefined, 'pair', { name: values.name ?? profile, appIds: values.app ?? [], browser: values.browser ?? false }),
+      await client.call(undefined, 'pair', {
+        name: values.name ?? profile,
+        appIds: values.app ?? [],
+        ...(values['all-apps'] !== undefined ? { allApps: values['all-apps'] } : {}),
+        browser: values.browser ?? false,
+      }),
     );
     await privateDirectory(credentialDir);
     await atomicJson(credentialsPath, result);

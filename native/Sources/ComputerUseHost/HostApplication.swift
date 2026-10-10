@@ -394,6 +394,14 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         RunLoop.main.add(timer, forMode: .modalPanel)
     }
 
+    static func pairingMessage(_ event: HostEvent) -> String {
+        let apps = event.allApps == true ? tr(.approvalAllApps) : (event.appIds ?? []).joined(separator: "\n")
+        return tr(.approvalPairBody, event.name ?? "", event.clientId ?? "",
+                  apps.isEmpty ? tr(.approvalNone) : apps,
+                  event.browser == true ? tr(.approvalAllowed) : tr(.approvalNotAllowed),
+                  event.foreground == false ? tr(.approvalNotAllowed) : tr(.approvalForegroundAllowed))
+    }
+
     private func showApproval(_ event: HostEvent, token: UUID) {
         defer {
             alertActive = false
@@ -405,11 +413,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         let alert = NSAlert()
         if event.event == "pair_request" {
             alert.messageText = tr(.approvalPairTitle)
-            let apps = (event.appIds ?? []).joined(separator: "\n")
-            alert.informativeText = tr(.approvalPairBody, event.name ?? "", event.clientId ?? "",
-                                       apps.isEmpty ? tr(.approvalNone) : apps,
-                                       event.browser == true ? tr(.approvalAllowed) : tr(.approvalNotAllowed),
-                                       event.foreground == false ? tr(.approvalNotAllowed) : tr(.approvalForegroundAllowed))
+            alert.informativeText = Self.pairingMessage(event)
         } else {
             alert.messageText = tr(.approvalForegroundTitle)
             alert.informativeText = tr(.approvalForegroundBody, event.clientName ?? "", event.targetTitle ?? "", event.sessionId ?? "")
@@ -422,7 +426,9 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         // 弹窗被撤回（请求已过期或已处理）时，运行时不再接受决定。
         guard generation == token, !stopping, !approvals.activeWithdrawn else { return }
         let prefix = event.event == "pair_request" ? "pair" : "foreground"
-        send("\(prefix)_\(allowed ? "allow" : "deny")", clientID: event.clientId, sessionID: event.sessionId)
+        // 确认宿主已展示全应用范围，避免忽略新字段的旧宿主误批扩大授权。
+        let allApps: Bool? = allowed && event.event == "pair_request" && event.allApps == true ? true : nil
+        send("\(prefix)_\(allowed ? "allow" : "deny")", clientID: event.clientId, sessionID: event.sessionId, allApps: allApps)
     }
 
     // 只结束审批弹窗自己的模态循环，不影响同时打开的其他提示框；
@@ -431,9 +437,9 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         if let alert = activeAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
     }
 
-    private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil) {
+    private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) {
         guard let input else { return }
-        do { try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid)) }
+        do { try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps)) }
         catch { if !stopping { fail(tr(.failureSendControl)) } }
     }
 

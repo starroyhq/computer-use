@@ -41,7 +41,10 @@ internal static class Program
             try
             {
                 CheckAuthorizationLifecycle(host);
+                CheckPairingScopes(host);
                 CheckSettingsWindow(host);
+                CheckSettingsInteractions(host);
+                CheckSettingsLayouts(host);
                 CheckUpdatePage(host);
                 if (screenshots is not null) Screenshots(host, screenshots);
             }
@@ -67,6 +70,7 @@ internal static class Program
         ClickAllow(host);
         Check(Status(host) == L10n.T(Msg.StatusDecisionSent), "pipe write is not approval");
         Check(HostRuntime.Commands.Last() == "foreground_allow:late", "one decision sent");
+        Check(HostRuntime.AllAppsAcknowledgments.Last() is null, "foreground decisions do not acknowledge all-app pairing");
         Finish(host, "late", false);
         Check(Status(host) == L10n.T(Msg.StatusRequestInvalid), "late approval reported as invalid");
 
@@ -98,37 +102,275 @@ internal static class Program
         // Approval grants every requested path, so the dialog must list all of them.
         var paths = Enumerable.Range(1, 25).Select(index => $@"C:\Apps\App{index}.exe").ToArray();
         Event(host, new { @event = "pair_request", clientId = "many-apps", name = "Many apps", appIds = paths, browser = false, foreground = true });
-        var text = Dialog(host)?.Controls.OfType<TextBox>().Single().Text ?? "";
+        var text = Dialog(host)?.ExplanationText ?? "";
         Check(text.Contains(L10n.F(Msg.ApprovalPathCount, 25)) && paths.All(text.Contains), "pair dialog lists every requested application");
+        Check(Dialog(host)!.ContentViewport.AutoScroll, "long application lists have a scrollable content area");
+        CheckApprovalLayout(Dialog(host)!, "many-apps");
         Finish(host, "many-apps", false);
         Check(Dialog(host) is null, "expired pair prompt withdrawn");
         Console.WriteLine("PASS: Windows authorization dialog lifecycle");
     }
 
+    private static void CheckPairingScopes(HostApplication host)
+    {
+        var chinese = L10n.Chinese;
+        try
+        {
+            foreach (var language in new[] { false, true })
+            {
+                L10n.Chinese = language;
+                Event(host, new
+                {
+                    @event = "pair_request", clientId = "all-apps", name = "All desktop apps",
+                    appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = true
+                });
+                var dialog = Dialog(host)!;
+                var text = dialog.ExplanationText;
+                Check(text.Contains(L10n.T(Msg.ApprovalDesktopScope)) && text.Contains(L10n.T(Msg.ClientsAllApps))
+                    && text.Contains(L10n.T(Msg.ApprovalAllAppsDetail))
+                    && !text.Contains(L10n.F(Msg.ApprovalPathCount, 0)), "all-app pairing explains future apps instead of showing an empty scope");
+                Check(text.Contains(L10n.T(Msg.ApprovalBrowser) + "\n" + L10n.T(Msg.ApprovalNotAllowed)),
+                    "all-app pairing does not imply browser permission");
+                Check(text.Contains(L10n.T(Msg.ApprovalPairBehavior)) && text.Contains(L10n.T(Msg.ApprovalPairLifetime)),
+                    "pairing explains background operation and persistent approval in both languages");
+                Check(text.Contains(L10n.T(Msg.ApprovalForegroundAllowed)), "pairing includes the requested foreground permission");
+                Check(dialog.AcceptButton == dialog.DenyButton && dialog.CancelButton == dialog.DenyButton,
+                    "all-app pairing still defaults to denial");
+                Check(Descendants(dialog).OfType<TextBox>().All(control => control.ReadOnly), "approval text cannot be edited");
+                CheckApprovalLayout(dialog, language ? "zh-all-apps" : "en-all-apps");
+                ClickAllow(host);
+                Check(HostRuntime.Commands.Last() == "pair_allow:all-apps" && Status(host) == L10n.T(Msg.StatusDecisionSent),
+                    "all-app pairing waits for the runtime to confirm the decision");
+                Check(HostRuntime.AllAppsAcknowledgments.Last() == true, "all-app approval explicitly acknowledges the displayed scope");
+                Finish(host, "all-apps", true);
+                Check(Status(host) == L10n.T(Msg.StatusApproved), "runtime confirmation completes all-app pairing");
+
+                Event(host, new
+                {
+                    @event = "pair_request", clientId = "browser-only", name = "Browser only",
+                    appIds = Array.Empty<string>(), browser = true, foreground = false
+                });
+                text = Dialog(host)!.ExplanationText;
+                Check(text.Contains(L10n.F(Msg.ApprovalPathCount, 0)) && !text.Contains(L10n.T(Msg.ApprovalAllAppsDetail)),
+                    "missing allApps keeps a browser-only request free of desktop permission");
+                Check(text.Contains(L10n.T(Msg.ApprovalBrowser) + "\n" + L10n.T(Msg.ApprovalAllowed))
+                    && text.Contains(L10n.T(Msg.ApprovalForeground) + "\n" + L10n.T(Msg.ApprovalNotAllowed)),
+                    "browser and foreground permissions remain separate");
+                ClickAllow(host);
+                Check(HostRuntime.Commands.Last() == "pair_allow:browser-only" && HostRuntime.AllAppsAcknowledgments.Last() is null,
+                    "legacy limited-scope approval does not send an all-app acknowledgment");
+                Finish(host, "browser-only", false);
+            }
+        }
+        finally { L10n.Chinese = chinese; }
+        Console.WriteLine("PASS: Windows pairing scopes");
+    }
+
     private static void CheckSettingsWindow(HostApplication host)
     {
         var window = (SettingsForm)Field(host, "_window")!;
-        var titles = window.Tabs.TabPages.Cast<TabPage>().Select(page => page.Text).ToArray();
+        var titles = window.PageTitles;
         var expected = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T);
         Check(titles.SequenceEqual(expected), "settings window has the six pages in order");
-        Event(host, new
+        Check(!Descendants(window).OfType<TabControl>().Any(), "settings use sidebar navigation rather than tabs");
+        foreach (var page in Enum.GetValues<SettingsPage>())
         {
-            @event = "clients",
-            clients = new object[]
-            {
-                new { id = "a", name = "Codex", appIds = new[] { @"win32:c:\apps\fixture.exe" }, browser = false, foreground = true },
-                new { id = "b", name = "Legacy" },
-            }
-        });
+            var title = window.PageTitles[(int)page];
+            Descendants(window).OfType<Button>().Single(button => button.AccessibleName == title || button.Text == title).PerformClick();
+            Pump();
+            Check(window.SelectedPage == page, $"sidebar navigation selects {page}");
+        }
+        window.ShowPage(SettingsPage.Clients);
+        Pump();
+        var revoke = ControlField<Button>(window, "_revoke");
+        Check(!revoke.Enabled, "revoke is disabled without a selected client");
+        var allAppsClient = new { id = "c", name = "All apps", appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = true };
+        var clients = new object[]
+        {
+            new { id = "a", name = "Codex", appIds = new[] { @"win32:c:\apps\fixture&tool.exe" }, browser = false, foreground = true },
+            new { id = "b", name = "Legacy" },
+            allAppsClient,
+            new { id = "d", name = "Browser", appIds = Array.Empty<string>(), allApps = false, browser = true, foreground = false },
+        };
+        Event(host, new { @event = "clients", clients });
         var items = window.ClientList.Items.Cast<ListViewItem>().ToArray();
-        Check(items.Length == 2, "client list shows every paired client");
-        Check(items[0].SubItems[1].Text == @"c:\apps\fixture.exe" && items[0].SubItems[3].Text == L10n.T(Msg.ClientsYes),
+        Check(items.Length == 4 && window.ClientList.Columns.Count == 4, "client list shows every paired client with the four scope columns");
+        Check(items[0].SubItems[1].Text == @"c:\apps\fixture&tool.exe" && items[0].SubItems[3].Text == L10n.T(Msg.ClientsYes),
             "client list shows the authorized paths without the internal prefix");
         Check(items[1].SubItems[1].Text == L10n.T(Msg.ClientsNo), "older runtimes without grant fields still list the client");
+        Check(host.Clients.Select(client => client.AllApps).SequenceEqual(new[] { false, false, true, false }),
+            "only an explicit allApps grant is parsed as all desktop apps");
+        Check(items[2].SubItems[1].Text == L10n.T(Msg.ClientsAllApps) && items[2].SubItems[2].Text == L10n.T(Msg.ClientsNo),
+            "client list shows all desktop apps without granting browser access");
+        Check(items[3].SubItems[1].Text == L10n.T(Msg.ClientsNo) && items[3].SubItems[2].Text == L10n.T(Msg.ClientsYes),
+            "browser-only clients still have no desktop apps");
+        items[0].Selected = true;
+        Pump();
+        var scope = ControlField<Label>(window, "_clientScope");
+        Check(scope.Text == @"c:\apps\fixture&tool.exe" && !scope.UseMnemonic,
+            "selected application paths display ampersands literally rather than as shortcut markers");
+        items[2].Selected = true;
+        Pump();
+        Check(revoke.Enabled, "selecting one client enables revocation");
+        clients[2] = new { id = "c", name = "All apps", appIds = Array.Empty<string>(), allApps = false, browser = false, foreground = true };
+        Event(host, new { @event = "clients", clients });
+        Check(window.ClientList.Items[2].SubItems[1].Text == L10n.T(Msg.ClientsNo), "scope-only changes refresh the client list");
+        Check(window.ClientList.SelectedItems.Count == 1 && (string?)window.ClientList.SelectedItems[0].Tag == "c" && revoke.Enabled,
+            "scope refresh preserves the selected client identity");
+        Event(host, new { @event = "clients", clients = clients.Where((_, index) => index != 2).ToArray() });
+        Check(window.ClientList.SelectedItems.Count == 0 && !revoke.Enabled, "removing the selected client disables revocation");
+        clients[2] = allAppsClient;
+        Event(host, new { @event = "clients", clients });
         Event(host, new { @event = "status", message = "Local MCP: http://127.0.0.1:47631/mcp" });
         Check(host.HttpStatus == "Local MCP: http://127.0.0.1:47631/mcp" && host.ServiceStatus != host.HttpStatus,
             "HTTP listener status goes to the Connect page, not the service status");
+        window.ShowPage(SettingsPage.Connect);
+        Check(ControlField<TextBox>(window, "_pairCommand").Text == SettingsForm.PairCommand(host.PackageRoot)
+            && ControlField<TextBox>(window, "_pairCommand").ReadOnly,
+            "Connect displays the generated pairing command as read-only text");
         Console.WriteLine("PASS: Windows settings window");
+    }
+
+    private static void CheckSettingsInteractions(HostApplication host)
+    {
+        var window = (SettingsForm)Field(host, "_window")!;
+        Event(host, new { @event = "ready" });
+        window.ShowPage(SettingsPage.Status);
+        Pump();
+        var pause = ControlField<Button>(window, "_pause");
+        var stop = ControlField<Button>(window, "_stop");
+        var restart = ControlField<Button>(window, "_restart");
+        Check(pause.AccessibilityObject.Name == pause.Text, "ready button accessibility name matches its visible action");
+        CheckDisclosureAccessibility(window, Msg.StatusDiagnostics);
+        var commands = HostRuntime.Commands.Count;
+        pause.PerformClick();
+        Pump();
+        Check(host.IsPaused && pause.Text == L10n.T(Msg.TrayResume)
+            && HostRuntime.Commands.Skip(commands).SequenceEqual(new[] { "pause:" }),
+            "Pause sends one runtime command and changes the next action to Resume");
+        Check(pause.AccessibilityObject.Name == pause.Text, "paused button accessibility name changes to Resume with its text");
+        pause.PerformClick();
+        Pump();
+        Check(!host.IsPaused && pause.Text == L10n.T(Msg.TrayPause)
+            && HostRuntime.Commands.Skip(commands).SequenceEqual(new[] { "pause:", "resume:" }),
+            "Resume sends one runtime command and restores the ready controls");
+        Check(pause.AccessibilityObject.Name == pause.Text, "resumed button accessibility name changes back to Pause with its text");
+
+        var starts = HostRuntime.StartCount;
+        var disposals = HostRuntime.DisposeCount;
+        restart.PerformClick();
+        Pump();
+        Check(host.IsRunning && HostRuntime.StartCount == starts + 1 && HostRuntime.DisposeCount == disposals + 1,
+            "Restart disposes the previous runtime and starts exactly one replacement");
+
+        window.ShowPage(SettingsPage.Connect);
+        Pump();
+        CheckDisclosureAccessibility(window, Msg.ConnectAdvanced);
+        Check(stop.Visible && stop.Enabled, "Emergency Stop stays available away from the Status page");
+        stop.PerformClick();
+        Pump();
+        Check(!host.IsRunning && HostRuntime.DisposeCount == disposals + 2
+            && host.ServiceStatus == L10n.T(Msg.StatusEmergencyStopped),
+            "Emergency Stop from Connect stops the runtime");
+        window.ShowPage(SettingsPage.Status);
+        Check(!pause.Enabled && !stop.Enabled && restart.Enabled, "stopped controls offer Restart without Pause or Stop");
+        window.ShowPage(SettingsPage.Clients);
+        Check(window.ClientList.Items.Count == 0 && !ControlField<Button>(window, "_revoke").Enabled,
+            "stopped services cannot revoke a stale selected client");
+        window.ShowPage(SettingsPage.Status);
+        restart.PerformClick();
+        Pump();
+        Check(host.IsRunning && HostRuntime.StartCount == starts + 2, "Restart recovers the stopped service");
+        Console.WriteLine("PASS: Windows settings control interactions");
+    }
+
+    private static void CheckDisclosureAccessibility(SettingsForm window, Msg title)
+    {
+        var toggle = Descendants(window).OfType<Button>().Single(button => button.Text == L10n.T(title));
+        Check(toggle.AccessibilityObject.Name == toggle.Text, "collapsed disclosure accessibility name matches its visible action");
+        toggle.PerformClick();
+        Pump();
+        Check(toggle.Text == L10n.T(Msg.DetailsHide) && toggle.AccessibilityObject.Name == toggle.Text,
+            "expanded disclosure accessibility name changes to Hide Details with its text");
+        toggle.PerformClick();
+        Pump();
+        Check(toggle.Text == L10n.T(title) && toggle.AccessibilityObject.Name == toggle.Text,
+            "collapsed disclosure restores both the visible and accessible action");
+    }
+
+    private static void CheckSettingsLayouts(HostApplication host)
+    {
+        var chinese = L10n.Chinese;
+        try
+        {
+            foreach (var language in new[] { false, true })
+            {
+                L10n.Chinese = language;
+                Event(host, new { @event = "ready" });
+                using var window = new SettingsForm(host);
+                var expected = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T);
+                Check(window.PageTitles.SequenceEqual(expected), "sidebar titles match the selected language");
+                window.ShowPage(SettingsPage.General);
+                Pump();
+                var defaultSize = window.Size;
+                foreach (var size in new[] { defaultSize, window.MinimumSize })
+                {
+                    Check(size.Width > 0 && size.Height > 0, "settings define a usable minimum window size");
+                    window.Size = size;
+                    foreach (var page in Enum.GetValues<SettingsPage>())
+                    {
+                        window.ShowPage(page);
+                        Pump();
+                        Check(window.SelectedPage == page, "ShowPage follows the enum order in both languages");
+                        CheckHorizontalLayout(window, $"{(language ? "zh" : "en")}/{page}/{size.Width}");
+                        Check(FullyWithinWindow(window, ControlField<Button>(window, "_stop")),
+                            "Emergency Stop remains fully reachable on every page at the minimum size");
+                    }
+                }
+            }
+        }
+        finally { L10n.Chinese = chinese; Event(host, new { @event = "ready" }); }
+        Console.WriteLine("PASS: Windows bilingual settings layouts at normal and minimum sizes");
+    }
+
+    // Vertical scrolling is intentional; a control must not need horizontal scrolling to be read or used.
+    private static void CheckHorizontalLayout(Control root, string context)
+    {
+        foreach (var control in Descendants(root).Where(control => control.Visible
+            && (control is Label or Button or CheckBox or TextBox or ListView)))
+        {
+            if (control.Parent is not { } parent) continue;
+            Check(control.Left >= -1 && control.Right <= parent.ClientSize.Width + 1,
+                $"{context}: {control.GetType().Name} '{control.AccessibleName ?? control.Text}' fits its content width");
+        }
+    }
+
+    private static void CheckApprovalLayout(ApprovalDialog dialog, string context)
+    {
+        var originalSize = dialog.Size;
+        try
+        {
+            foreach (var size in new[] { originalSize, dialog.MinimumSize })
+            {
+                dialog.Size = size;
+                Pump();
+                CheckHorizontalLayout(dialog, context);
+                Check(dialog.AllowButton.Visible && dialog.DenyButton.Visible
+                    && !Descendants(dialog.ContentViewport).Contains(dialog.AllowButton)
+                    && !Descendants(dialog.ContentViewport).Contains(dialog.DenyButton)
+                    && FullyWithinWindow(dialog, dialog.AllowButton) && FullyWithinWindow(dialog, dialog.DenyButton),
+                    "approval decision buttons stay outside the scrolling scope details");
+                var allowPosition = dialog.AllowButton.PointToScreen(Point.Empty);
+                var denyPosition = dialog.DenyButton.PointToScreen(Point.Empty);
+                dialog.ContentViewport.AutoScrollPosition = new Point(0, dialog.ContentViewport.VerticalScroll.Maximum);
+                Pump();
+                Check(dialog.AllowButton.PointToScreen(Point.Empty) == allowPosition
+                    && dialog.DenyButton.PointToScreen(Point.Empty) == denyPosition,
+                    "scrolling long approval text keeps both decisions reachable");
+                dialog.ContentViewport.AutoScrollPosition = Point.Empty;
+            }
+        }
+        finally { dialog.Size = originalSize; Pump(); }
     }
 
     private static void CheckTranslations()
@@ -172,6 +414,15 @@ internal static class Program
         Check(server.GetProperty("command").GetString() == @"C:\Portable\bin\node.exe"
             && server.GetProperty("args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(new[] { @"C:\Portable\runtime\cli.js", "mcp", "stdio" }),
             "stdio configuration uses the bundled node and CLI");
+        var pair = SettingsForm.PairCommand(@"C:\Portable");
+        Check(SettingsForm.CliCommand(@"C:\O'Brien\$tools`") ==
+            @"& 'C:\O''Brien\$tools`\bin\node.exe' 'C:\O''Brien\$tools`\runtime\cli.js'",
+            "copied PowerShell commands preserve apostrophes, dollar signs and backticks in installation paths");
+        Check(pair.StartsWith(SettingsForm.CliCommand(@"C:\Portable") + " pair ", StringComparison.Ordinal)
+            && pair.Contains("--name", StringComparison.Ordinal) && !pair.Contains("--app", StringComparison.Ordinal)
+            && !pair.Contains("--profile", StringComparison.Ordinal)
+            && !server.GetProperty("args").EnumerateArray().Any(value => value.GetString() == "--profile"),
+            "pairing and stdio share the default profile and bundled CLI without restricting applications");
         var check = JsonSerializer.Deserialize<UpdateCheck>("""
             {"current":"0.4.0","latest":"0.5.0","available":true,"platform":"windows-arm64","tag":"v0.5.0",
              "url":"https://github.com/starroyhq/computer-use/releases/tag/v0.5.0","notes":"n",
@@ -353,41 +604,109 @@ internal static class Program
         public void Report((long Downloaded, long Total) value) => report(value);
     }
 
-    /// <summary>把每个设置页渲染成 PNG，便于在不同 DPI 下人工检查布局。</summary>
+    /// <summary>用运行时替身的就绪状态渲染两种语言的设置与授权窗口，不沿用生命周期测试的错误状态。</summary>
     private static void Screenshots(HostApplication host, string directory)
     {
         Directory.CreateDirectory(directory);
-        var window = (SettingsForm)Field(host, "_window")!;
         const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
-        typeof(UpdateService).GetProperty("Check", members)!.SetValue(host.Updates, InstallerCheck());
-        typeof(UpdateService).GetProperty("Phase", members)!.SetValue(host.Updates, UpdatePhase.Available);
-        void Save(string name)
+        var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
+        var originalInstalled = installed.GetValue(host.Updates);
+        var check = typeof(UpdateService).GetProperty("Check", members)!;
+        var phase = typeof(UpdateService).GetProperty("Phase", members)!;
+        var originalCheck = check.GetValue(host.Updates);
+        var originalPhase = phase.GetValue(host.Updates);
+        var chinese = L10n.Chinese;
+        void Save(Form form, string name)
         {
-            window.RefreshAll();
             Pump();
-            using var bitmap = new Bitmap(window.Width, window.Height);
-            window.DrawToBitmap(bitmap, new Rectangle(Point.Empty, window.Size));
+            using var bitmap = new Bitmap(form.Width, form.Height);
+            form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
             bitmap.Save(Path.Combine(directory, name + ".png"), ImageFormat.Png);
         }
-        window.ShowPage(SettingsPage.General);
-        for (var index = 0; index < window.Tabs.TabCount; index++)
+        try
         {
-            window.Tabs.SelectedIndex = index;
-            Save($"{index + 1}-{window.Tabs.TabPages[index].Text}");
+            foreach (var language in new[] { false, true })
+            {
+                L10n.Chinese = language;
+                var prefix = language ? "zh" : "en";
+                Event(host, new { @event = "ready" });
+                Event(host, new
+                {
+                    @event = "clients", clients = new[]
+                    {
+                        new { id = "screen-all", name = "Desktop Agent", appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = true },
+                        new { id = "screen-scoped", name = "Fixture Agent", appIds = new[] { @"win32:c:\apps\fixture.exe" }, allApps = false, browser = false, foreground = true },
+                        new { id = "screen-browser", name = "Browser Agent", appIds = Array.Empty<string>(), allApps = false, browser = true, foreground = false },
+                    }
+                });
+                Check(host.ServiceStatus == L10n.T(Msg.StatusReady), "settings screenshots start with ready service state");
+                check.SetValue(host.Updates, InstallerCheck() with
+                {
+                    Notes = language ? "## Computer Use v0.6.0\n\n- Windows 安装程序\n- macOS DMG"
+                        : "## Computer Use v0.6.0\n\n- Windows installer\n- macOS disk image"
+                });
+                installed.SetValue(host.Updates, false);
+                phase.SetValue(host.Updates, UpdatePhase.Available);
+                using (var window = new SettingsForm(host))
+                {
+                    foreach (var page in Enum.GetValues<SettingsPage>())
+                    {
+                        window.ShowPage(page);
+                        Save(window, $"{prefix}-{(int)page + 1}-{page}");
+                    }
+                    installed.SetValue(host.Updates, true);
+                    phase.SetValue(host.Updates, UpdatePhase.Downloaded);
+                    window.ShowPage(SettingsPage.Updates);
+                    Save(window, $"{prefix}-5-Updates-installer");
+                    window.Size = window.MinimumSize;
+                    foreach (var page in new[] { SettingsPage.Clients, SettingsPage.Connect, SettingsPage.Updates })
+                    {
+                        window.ShowPage(page);
+                        Save(window, $"{prefix}-{(int)page + 1}-{page}-narrow");
+                    }
+                }
+                foreach (var allApps in new[] { true, false })
+                {
+                    Event(host, new { @event = "ready" });
+                    var id = $"screenshot-{prefix}-{allApps}";
+                    Event(host, new
+                    {
+                        @event = "pair_request", clientId = id, name = allApps ? "Desktop Agent" : "Fixture Agent",
+                        appIds = allApps ? Array.Empty<string>()
+                            : Enumerable.Range(1, 25).Select(index => $@"C:\Program Files\Example Applications\App {index}\Application.exe").ToArray(),
+                        allApps, browser = false, foreground = true
+                    });
+                    var dialog = Dialog(host)!;
+                    Save(dialog, $"{prefix}-pairing-{(allApps ? "all-apps" : "scoped-paths")}");
+                    Finish(host, id, false);
+                }
+            }
         }
-        // 安装版下载完安装程序后的更新页。
-        var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
-        var original = installed.GetValue(host.Updates);
-        installed.SetValue(host.Updates, true);
-        typeof(UpdateService).GetProperty("Phase", members)!.SetValue(host.Updates, UpdatePhase.Downloaded);
-        window.ShowPage(SettingsPage.Updates);
-        Save($"{window.Tabs.SelectedIndex + 1}-{window.Tabs.SelectedTab!.Text}-installer");
-        installed.SetValue(host.Updates, original);
-        Console.WriteLine($"Saved settings screenshots to {directory}");
+        finally
+        {
+            L10n.Chinese = chinese;
+            installed.SetValue(host.Updates, originalInstalled);
+            check.SetValue(host.Updates, originalCheck);
+            phase.SetValue(host.Updates, originalPhase);
+            Event(host, new { @event = "ready" });
+        }
+        Console.WriteLine($"Saved bilingual settings and pairing screenshots to {directory}");
     }
 
     private static void Pump() { Application.DoEvents(); Application.DoEvents(); }
     private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+    private static T ControlField<T>(SettingsForm window, string name) where T : Control =>
+        (T)typeof(SettingsForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+    private static bool FullyWithinWindow(Form form, Control control) => control.Visible
+        && form.ClientRectangle.Contains(form.RectangleToClient(control.RectangleToScreen(control.ClientRectangle)));
+    private static IEnumerable<Control> Descendants(Control parent)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            yield return child;
+            foreach (var descendant in Descendants(child)) yield return descendant;
+        }
+    }
     private static object? Field(HostApplication host, string name) => typeof(HostApplication).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host);
     private static ApprovalDialog? Dialog(HostApplication host) => (ApprovalDialog?)Field(host, "_approvalDialog");
     private static string Status(HostApplication host) => (string)Field(host, "_status")!;
@@ -402,7 +721,7 @@ internal static class Program
     private static void ClickAllow(HostApplication host)
     {
         var dialog = Dialog(host)!;
-        dialog.Controls.OfType<FlowLayoutPanel>().Single().Controls.OfType<Button>().Single(b => b.Text == L10n.T(Msg.ApprovalAllow)).PerformClick();
+        dialog.AllowButton.PerformClick();
         Pump();
     }
 }
@@ -414,14 +733,18 @@ namespace ComputerUse.WindowsHost
     internal sealed class HostRuntime : IAsyncDisposable
     {
         internal static readonly List<string> Commands = [];
+        internal static readonly List<bool?> AllAppsAcknowledgments = [];
+        internal static int StartCount { get; private set; }
+        internal static int DisposeCount { get; private set; }
         internal string PipeName => "isolated-test";
         internal HostRuntime(Action<JsonElement> onEvent) { }
-        internal Task StartAsync() => Task.CompletedTask;
-        internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null)
+        internal Task StartAsync() { StartCount++; return Task.CompletedTask; }
+        internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null)
         {
             Commands.Add(command + ":" + (clientId ?? sessionId));
+            AllAppsAcknowledgments.Add(allApps);
             return Task.CompletedTask;
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() { DisposeCount++; return ValueTask.CompletedTask; }
     }
 }

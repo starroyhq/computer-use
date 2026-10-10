@@ -34,7 +34,7 @@ public enum L10nKey: String, CaseIterable {
     case errorUnsafeDirectory, errorAlreadyRunning, errorResourcesUnavailable, errorLineTooLong, errorInvalidEvent
     case errorSocketPathTooLong, errorSocketOccupied
     // 审批
-    case approvalPairTitle, approvalPairBody, approvalForegroundAllowed, approvalNone, approvalAllowed, approvalNotAllowed
+    case approvalPairTitle, approvalPairBody, approvalAllApps, approvalForegroundAllowed, approvalNone, approvalAllowed, approvalNotAllowed
     case approvalForegroundTitle, approvalForegroundBody, approvalDeny, approvalAllow
     case commonOK, commonCancel
     // 设置窗口
@@ -48,7 +48,7 @@ public enum L10nKey: String, CaseIterable {
     case statusService, statusAccessibility, statusScreenRecording, statusGranted, statusDenied, statusOpenSystemSettings
     case statusRequestPermissions, statusPermissionsHint, statusControl, permissionsTitle, permissionsBody
     // 客户端
-    case clientsName, clientsApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
+    case clientsName, clientsApps, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
     case clientsEmpty, clientsNotRunning, clientsHint, clientsRevokeTitle, clientsRevokeBody
     // 接入
     case connectHTTP, connectHTTPToggle, connectHTTPHint, connectHTTPAddress, connectCopyAddress
@@ -122,8 +122,9 @@ public enum L10n {
         .errorSocketPathTooLong: "本地服务 socket 路径过长。",
         .errorSocketOccupied: "本地服务 socket 路径已被其他文件占用，已保留原文件。",
 
-        .approvalPairTitle: "允许客户端操作这些应用？",
-        .approvalPairBody: "客户端：%@\n标识：%@\n应用标识：\n%@\n独立受控浏览器：%@\n前台操作：%@\n\n批准后长期有效，重启 App 也不再询问；在设置的“客户端”中撤销该客户端即可收回全部权限。",
+        .approvalPairTitle: "允许客户端操作应用？",
+        .approvalPairBody: "客户端：%@\n标识：%@\n桌面应用范围：\n%@\n独立受控浏览器：%@\n前台操作：%@\n\n默认使用后台操作。批准后长期有效，重启 App 也不再询问；可随时暂停或紧急停止，在设置的“客户端”中撤销即可收回全部权限。",
+        .approvalAllApps: "所有应用，包括之后打开或安装的应用及其窗口",
         .approvalForegroundAllowed: "允许（可能切换焦点、移动鼠标并模拟键盘）",
         .approvalNone: "无",
         .approvalAllowed: "允许",
@@ -176,6 +177,7 @@ public enum L10n {
 
         .clientsName: "名称",
         .clientsApps: "应用",
+        .clientsAllApps: "所有应用",
         .clientsBrowser: "受控浏览器",
         .clientsForeground: "前台操作",
         .clientsYes: "允许",
@@ -183,7 +185,7 @@ public enum L10n {
         .clientsRevoke: "撤销…",
         .clientsEmpty: "还没有已配对的客户端。在终端运行 computer-use pair 发起配对。",
         .clientsNotRunning: "服务未运行，暂时无法读取客户端列表。",
-        .clientsHint: "授权范围在配对时确定；需要改变范围时，撤销后重新配对。",
+        .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。旧配对保持原范围；需要改变时，撤销后重新配对。",
         .clientsRevokeTitle: "撤销“%@”？",
         .clientsRevokeBody: "该客户端的凭据会立即失效，需要重新配对才能再次使用。",
 
@@ -198,7 +200,7 @@ public enum L10n {
         .connectCopiedBody: "先使用 computer-use pair 完成客户端授权，再将配置添加到 Agent。",
         .connectCopyFailed: "无法复制配置",
         .connectPairing: "配对：",
-        .connectPairingHint: "在终端运行 computer-use pair --name \"My Agent\" --app <Bundle ID>，然后在弹出的确认框中批准。Codex 可用 computer-use config codex 生成配置片段。",
+        .connectPairingHint: "在终端运行 computer-use pair --name \"My Agent\"，批准后即可操作所有桌面应用，默认使用后台操作。独立受控浏览器需另行申请。Codex 可用 computer-use config codex 生成配置片段。",
 
         .updatesVersion: "当前版本：",
         .updatesAutomatic: "自动检查：",
@@ -297,8 +299,9 @@ public enum L10n {
         .errorSocketPathTooLong: "The local service socket path is too long.",
         .errorSocketOccupied: "Another file occupies the local service socket path; it was left untouched.",
 
-        .approvalPairTitle: "Allow this client to control these apps?",
-        .approvalPairBody: "Client: %@\nID: %@\nApp IDs:\n%@\nIsolated controlled browser: %@\nForeground actions: %@\n\nApproval stays in effect, including after the app restarts. Revoke the client under Settings > Clients to withdraw every permission.",
+        .approvalPairTitle: "Allow this client to control apps?",
+        .approvalPairBody: "Client: %@\nID: %@\nDesktop app scope:\n%@\nIsolated controlled browser: %@\nForeground actions: %@\n\nActions use background mode by default. Approval stays in effect after the app restarts. You can pause or emergency stop at any time; revoke the client under Settings > Clients to withdraw every permission.",
+        .approvalAllApps: "All apps, including apps opened or installed later and their windows",
         .approvalForegroundAllowed: "Allowed (may switch focus, move the pointer and simulate the keyboard)",
         .approvalNone: "None",
         .approvalAllowed: "Allowed",
@@ -351,6 +354,7 @@ public enum L10n {
 
         .clientsName: "Name",
         .clientsApps: "Apps",
+        .clientsAllApps: "All apps",
         .clientsBrowser: "Browser",
         .clientsForeground: "Foreground",
         .clientsYes: "Allowed",
@@ -358,7 +362,7 @@ public enum L10n {
         .clientsRevoke: "Revoke…",
         .clientsEmpty: "No clients are paired yet. Run computer-use pair in Terminal to pair one.",
         .clientsNotRunning: "The service is not running, so the client list is unavailable.",
-        .clientsHint: "Scopes are fixed at pairing. To change them, revoke the client and pair again.",
+        .clientsHint: "All apps includes apps opened or installed later and their windows. Existing pairings keep their scope; revoke and pair again to change it.",
         .clientsRevokeTitle: "Revoke “%@”?",
         .clientsRevokeBody: "Its credentials stop working immediately. It must pair again to reconnect.",
 
@@ -373,7 +377,7 @@ public enum L10n {
         .connectCopiedBody: "Pair the client with computer-use pair first, then add the configuration to the agent.",
         .connectCopyFailed: "Cannot Copy the Configuration",
         .connectPairing: "Pairing:",
-        .connectPairingHint: "Run computer-use pair --name \"My Agent\" --app <bundle ID> in Terminal, then approve the confirmation that appears. For Codex, computer-use config codex prints a configuration snippet.",
+        .connectPairingHint: "Run computer-use pair --name \"My Agent\" in Terminal and approve access to all desktop apps, using background mode by default. Request the isolated browser separately. For Codex, computer-use config codex prints a configuration snippet.",
 
         .updatesVersion: "Current version:",
         .updatesAutomatic: "Automatic checks:",

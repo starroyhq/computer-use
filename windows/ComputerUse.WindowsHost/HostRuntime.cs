@@ -112,11 +112,12 @@ internal sealed class HostRuntime : IAsyncDisposable
         }
     }
 
-    internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null)
+    internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null)
     {
-        var message = new Dictionary<string, string> { ["command"] = command };
+        var message = new Dictionary<string, object> { ["command"] = command };
         if (clientId is not null) message["clientId"] = clientId;
         if (sessionId is not null) message["sessionId"] = sessionId;
+        if (allApps is not null) message["allApps"] = allApps.Value;
         return WriteWorkerAsync(JsonSerializer.Serialize(message));
     }
 

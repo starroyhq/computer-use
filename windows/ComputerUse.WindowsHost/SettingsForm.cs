@@ -7,7 +7,7 @@ using System.Windows.Forms;
 
 namespace ComputerUse.WindowsHost;
 
-internal sealed record ClientInfo(string Id, string Name, IReadOnlyList<string> AppIds, bool Browser, bool Foreground);
+internal sealed record ClientInfo(string Id, string Name, IReadOnlyList<string> AppIds, bool AllApps, bool Browser, bool Foreground);
 
 /// <summary>设置窗口读取的托盘程序状态与可以执行的操作。</summary>
 internal interface ISettingsHost
@@ -15,6 +15,7 @@ internal interface ISettingsHost
     string ServiceStatus { get; }
     bool IsRunning { get; }
     bool IsPaused { get; }
+    bool IsBusy { get; }
     string? PipeName { get; }
     IReadOnlyList<ClientInfo> Clients { get; }
     bool HttpEnabled { get; }
@@ -30,69 +31,71 @@ internal interface ISettingsHost
 
 internal enum SettingsPage { General, Status, Clients, Connect, Updates, About }
 
-/// <summary>
-/// 设置窗口：6 个标签页，与 macOS 设置窗口的分区一一对应（Windows 没有系统权限，第二页只显示状态）。
-/// 尺寸按 96 DPI 书写，窗体创建时按显示器 DPI 缩放。
-/// </summary>
+/// <summary>跨 Windows 10/11 的设置窗口；保留系统窗口框架与标准键盘交互。</summary>
 internal sealed class SettingsForm : Form
 {
-    private const int TextWidth = 430;
-    private const int ListWidth = 580;
     private readonly ISettingsHost _host;
-    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill, Padding = new Point(14, 5) };
+    private readonly Panel _content = new() { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(24) };
+    private readonly VerticalStack[] _pages = new VerticalStack[6];
+    private readonly Dictionary<SettingsPage, Button> _navigation = new();
+    private readonly string[] _pageTitles = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T).ToArray();
     private bool _refreshing;
     private string _shownClients = "";
 
     private readonly CheckBox _launch = MakeCheckBox(Msg.GeneralLaunchAtLogin);
     private readonly Label _launchNote = MakeNote();
-    private readonly TextBox _cliCommand = new() { ReadOnly = true, Width = 330, Margin = new Padding(3, 6, 6, 3) };
+    private readonly TextBox _cliCommand = CommandBox();
     private readonly Button _copyCli = MakeButton(Msg.GeneralCopy);
-
-    private readonly Label _service = MakeValue();
+    private readonly Label _cliCopied = MakeFeedback();
+    private readonly Label _service = MakeNote();
+    private readonly Label _serviceTitle = MakeValue();
+    private readonly Label _sidebarState = MakeNote();
+    private readonly Label _pairedCount = MakeValue();
     private readonly Label _pipe = MakeValue();
-    private readonly Button _pause = MakeButton(Msg.TrayPause);
-    private readonly Button _stop = MakeButton(Msg.TrayEmergencyStop);
+    private readonly Button _pause = MakeButton(Msg.TrayPause, ButtonTone.Primary);
+    private readonly Button _stop = MakeButton(Msg.TrayEmergencyStop, ButtonTone.Danger);
     private readonly Button _restart = MakeButton(Msg.TrayRestart);
-
     private readonly ListView _clients = new()
     {
         View = View.Details, FullRowSelect = true, MultiSelect = false, HideSelection = false, ShowItemToolTips = true,
-        HeaderStyle = ColumnHeaderStyle.Nonclickable, Size = new Size(ListWidth, 210), Margin = new Padding(3, 3, 3, 8)
+        HeaderStyle = ColumnHeaderStyle.Nonclickable, Height = 220, BorderStyle = BorderStyle.None, Margin = new Padding(0, 4, 0, 16)
     };
-    private readonly Button _revoke = MakeButton(Msg.ClientsRevoke);
-    private readonly Label _clientsNote = MakeNote(ListWidth);
-
+    private readonly Button _revoke = MakeButton(Msg.ClientsRevoke, ButtonTone.Danger);
+    private readonly Label _clientsNote = MakeNote();
+    private readonly Label _clientScope = MakeNote();
     private readonly CheckBox _http = MakeCheckBox(Msg.ConnectHttpToggle);
-    private readonly Label _httpAddress = MakeValue(margin: new Padding(3, 10, 6, 3));
+    private readonly Label _httpAddress = MakeValue();
     private readonly Button _copyAddress = MakeButton(Msg.ConnectCopyAddress);
-    private readonly Button _copyStdio = MakeButton(Msg.ConnectCopy);
-    private readonly Label _copied = MakeNote();
+    private readonly Button _copyStdio = MakeButton(Msg.ConnectCopy, ButtonTone.Primary);
+    private readonly TextBox _pairCommand = CommandBox();
+    private readonly Button _copyPair = MakeButton(Msg.ConnectCopyPair, ButtonTone.Primary);
+    private readonly Label _pairCopied = MakeFeedback();
+    private readonly Label _copied = MakeFeedback();
     private FlowLayoutPanel _addressRow = null!;
-
     private readonly Label _version = MakeValue();
     private readonly CheckBox _automatic = MakeCheckBox(Msg.UpdatesAutomaticToggle);
     private readonly Label _lastCheck = MakeValue();
     private readonly Button _check = MakeButton(Msg.UpdatesCheckNow);
     private readonly Label _updateStatus = MakeValue();
-    private readonly ProgressBar _progress = new() { Size = new Size(260, 18), Minimum = 0, Maximum = 1000, Margin = new Padding(3, 10, 8, 3) };
+    private readonly ProgressBar _progress = new() { Width = 260, Height = 18, Minimum = 0, Maximum = 1000, Margin = new Padding(0, 8, 12, 8) };
     private readonly Button _cancel = MakeButton(Msg.UpdatesCancel);
-    private readonly Button _download = MakeButton(Msg.UpdatesDownload);
+    private readonly Button _download = MakeButton(Msg.UpdatesDownload, ButtonTone.Primary);
     private readonly Button _release = MakeButton(Msg.UpdatesViewRelease);
     private readonly Button _skip = MakeButton(Msg.UpdatesSkip);
     private readonly Button _reveal = MakeButton(Msg.UpdatesReveal);
-    private readonly Button _retry = MakeButton(Msg.UpdatesRetry);
-    private readonly Button _runInstaller = MakeButton(Msg.UpdatesRunInstaller);
+    private readonly Button _retry = MakeButton(Msg.UpdatesRetry, ButtonTone.Primary);
+    private readonly Button _runInstaller = MakeButton(Msg.UpdatesRunInstaller, ButtonTone.Primary);
     private readonly Label _manualHint = MakeNote();
     private readonly Label _installerHint = MakeNote();
-    private readonly Label _notesLabel = new() { Text = L10n.T(Msg.UpdatesNotes), AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right, Margin = new Padding(3, 6, 6, 3) };
+    private readonly Label _notesLabel = SectionTitle(Msg.UpdatesNotes);
     private readonly TextBox _notes = new()
     {
-        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Size = new Size(TextWidth, 130), BackColor = SystemColors.Window
+        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 150,
+        BorderStyle = BorderStyle.FixedSingle, BackColor = UiStyle.Surface, ForeColor = UiStyle.Text, Margin = new Padding(0, 4, 0, 8)
     };
     private FlowLayoutPanel _progressRow = null!;
     private FlowLayoutPanel _updateActions = null!;
-
-    private readonly Label _aboutVersion = new() { AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Top, Margin = new Padding(3, 2, 3, 10) };
+    private readonly Label _aboutVersion = MakeNote();
 
     internal SettingsForm(ISettingsHost host)
     {
@@ -101,163 +104,216 @@ internal sealed class SettingsForm : Form
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = L10n.T(Msg.SettingsTitle);
-        ClientSize = new Size(640, 520);
+        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5F);
+        BackColor = UiStyle.Background;
+        ForeColor = UiStyle.Text;
+        ClientSize = new Size(880, 650);
+        MinimumSize = new Size(760, 540);
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
-        _tabs.TabPages.Add(Page(Msg.PaneGeneral, BuildGeneral()));
-        _tabs.TabPages.Add(Page(Msg.PaneStatus, BuildStatus()));
-        _tabs.TabPages.Add(Page(Msg.PaneClients, BuildClients()));
-        _tabs.TabPages.Add(Page(Msg.PaneConnect, BuildConnect()));
-        _tabs.TabPages.Add(Page(Msg.PaneUpdates, BuildUpdates()));
-        _tabs.TabPages.Add(Page(Msg.PaneAbout, BuildAbout()));
-        Controls.Add(_tabs);
-        ResumeLayout(false);
+        _pages[(int)SettingsPage.General] = Page(Msg.PaneGeneral, Msg.GeneralDescription, BuildGeneral());
+        _pages[(int)SettingsPage.Status] = Page(Msg.PaneStatus, Msg.StatusDescription, BuildStatus());
+        _pages[(int)SettingsPage.Clients] = Page(Msg.PaneClients, Msg.ClientsDescription, BuildClients());
+        _pages[(int)SettingsPage.Connect] = Page(Msg.PaneConnect, Msg.ConnectDescription, BuildConnect());
+        _pages[(int)SettingsPage.Updates] = Page(Msg.PaneUpdates, Msg.UpdatesDescription, BuildUpdates());
+        _pages[(int)SettingsPage.About] = Page(Msg.PaneAbout, Msg.AboutDescription, BuildAbout());
+        foreach (var page in _pages) { page.Visible = false; _content.Controls.Add(page); }
+        var shell = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 176));
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        shell.Controls.Add(BuildNavigation(), 0, 0);
+        shell.Controls.Add(_content, 1, 0);
+        Controls.Add(shell);
+        SelectPage(SettingsPage.Status);
         Activated += (_, _) => RefreshAll();
-        _tabs.SelectedIndexChanged += (_, _) => RefreshAll();
+        ResumeLayout(true);
     }
 
-    internal TabControl Tabs => _tabs;
+    internal SettingsPage SelectedPage { get; private set; }
+    internal IReadOnlyList<string> PageTitles => _pageTitles;
     internal ListView ClientList => _clients;
 
     internal void ShowPage(SettingsPage? page = null)
     {
-        if (page is { } value) _tabs.SelectedIndex = (int)value;
+        if (page is { } value) SelectPage(value);
         RefreshAll();
         if (!Visible) Show();
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Activate();
     }
 
-    // MARK: 布局
-
-    private static TabPage Page(Msg title, Control content)
+    private void SelectPage(SettingsPage page)
     {
-        var page = new TabPage(L10n.T(title)) { AutoScroll = true, Padding = new Padding(10), UseVisualStyleBackColor = true };
-        page.Controls.Add(content);
+        SelectedPage = page;
+        foreach (var item in _navigation)
+        {
+            var selected = item.Key == page;
+            item.Value.BackColor = selected ? UiStyle.Accent : UiStyle.Surface;
+            item.Value.ForeColor = selected ? SystemColors.HighlightText : UiStyle.Text;
+            item.Value.AccessibleDescription = selected ? L10n.T(Msg.NavigationSelected) : "";
+        }
+        for (var i = 0; i < _pages.Length; i++) _pages[i].Visible = i == (int)page;
+        _content.AutoScrollPosition = Point.Empty;
+    }
+
+    private Control BuildNavigation()
+    {
+        var side = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, BackColor = UiStyle.Surface, ColumnCount = 1, RowCount = 2,
+            Padding = new Padding(12, 24, 12, 16), Margin = Padding.Empty
+        };
+        side.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var links = new VerticalStack();
+        var brand = MakeValue("Computer Use");
+        brand.Font = UiStyle.SectionFont;
+        brand.Margin = new Padding(10, 0, 0, 6);
+        links.Add(brand);
+        _sidebarState.Margin = new Padding(10, 0, 0, 24);
+        links.Add(_sidebarState);
+        foreach (var page in new[] { SettingsPage.Status, SettingsPage.Clients, SettingsPage.Connect, SettingsPage.General, SettingsPage.Updates, SettingsPage.About })
+        {
+            var button = new Button { Text = _pageTitles[(int)page], AccessibleName = _pageTitles[(int)page], TextAlign = ContentAlignment.MiddleLeft };
+            UiStyle.StyleButton(button);
+            button.FlatAppearance.BorderSize = 0;
+            button.Margin = new Padding(0, 0, 0, 4);
+            button.Padding = new Padding(12, 7, 8, 7);
+            button.Click += (_, _) => { SelectPage(page); RefreshAll(); };
+            _navigation.Add(page, button);
+            links.Add(button);
+        }
+        side.Controls.Add(links, 0, 0);
+        var controls = new VerticalStack();
+        controls.Add(_stop);
+        _stop.Margin = new Padding(0, 0, 0, 8);
+        controls.Add(MakeNote().With(Msg.EmergencyHint));
+        side.Controls.Add(controls, 0, 1);
+        return side;
+    }
+
+    private static VerticalStack Page(Msg title, Msg description, params Control[] sections)
+    {
+        var page = new VerticalStack();
+        var heading = MakeValue(L10n.T(title));
+        heading.Font = UiStyle.HeadingFont;
+        heading.Margin = new Padding(0, 0, 0, 8);
+        page.Add(heading);
+        var summary = MakeNote().With(description);
+        summary.Margin = new Padding(0, 0, 0, 24);
+        page.Add(summary);
+        foreach (var section in sections) page.Add(section);
         return page;
     }
 
-    private static TableLayoutPanel Grid(int columns = 2)
+    private static VerticalStack Card(params Control[] controls)
     {
-        var grid = new TableLayoutPanel
-        {
-            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = columns, Dock = DockStyle.Top,
-            Padding = new Padding(8, 10, 8, 8)
-        };
-        for (var i = 0; i < columns; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        return grid;
+        var card = new VerticalStack { BackColor = UiStyle.Surface, Padding = new Padding(20), Margin = new Padding(0, 0, 0, 16) };
+        foreach (var control in controls) card.Add(control);
+        return card;
     }
 
-    /// <summary>添加一行：左列右对齐的标签，右列控件。标签的上边距按控件类型对齐文字。</summary>
-    private static void Row(TableLayoutPanel grid, Msg? label, Control content, int gap = 0, Label? labelControl = null)
+    private static VerticalStack Stack(params Control[] controls)
     {
-        var row = grid.RowCount++;
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var offset = content switch
+        var stack = new VerticalStack();
+        foreach (var control in controls) stack.Add(control);
+        return stack;
+    }
+
+    private static Control Disclosure(Msg title, Control details)
+    {
+        var toggle = MakeButton(title);
+        toggle.AccessibleDescription = L10n.T(Msg.DetailsCollapsed);
+        details.Visible = false;
+        toggle.Click += (_, _) =>
         {
-            TextBox { Multiline: true } => 3,
-            Button or FlowLayoutPanel or TextBox => 10,
-            CheckBox => 5,
-            _ => 3,
+            details.Visible = !details.Visible;
+            toggle.Text = L10n.T(details.Visible ? Msg.DetailsHide : title);
+            toggle.AccessibleDescription = L10n.T(details.Visible ? Msg.DetailsExpanded : Msg.DetailsCollapsed);
         };
-        var caption = labelControl ?? (label is { } key
-            ? new Label { Text = L10n.T(key), AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right }
-            : null);
-        if (caption is not null)
-        {
-            caption.Margin = new Padding(3, offset + gap, 6, 3);
-            grid.Controls.Add(caption, 0, row);
-        }
-        content.Margin = new Padding(content.Margin.Left, content.Margin.Top + gap, content.Margin.Right, content.Margin.Bottom);
-        grid.Controls.Add(content, 1, row);
+        return Stack(Flow(toggle), details);
     }
 
     private static FlowLayoutPanel Flow(params Control[] controls)
     {
         var flow = new FlowLayoutPanel
         {
-            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, FlowDirection = FlowDirection.LeftToRight,
-            Margin = new Padding(0), Padding = new Padding(0)
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true,
+            FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 2, 0, 4)
         };
         flow.Controls.AddRange(controls);
         return flow;
     }
 
-    private static Label MakeNote(int width = TextWidth) => new()
+    private static Label MakeNote() => new() { AutoSize = true, UseMnemonic = false, ForeColor = UiStyle.Muted, Margin = new Padding(0, 0, 0, 10) };
+    private static Label MakeValue(string text = "") => new() { Text = text, AutoSize = true, UseMnemonic = false, ForeColor = UiStyle.Text, Margin = new Padding(0, 0, 0, 10) };
+    private static Label MakeFeedback()
     {
-        AutoSize = true, MaximumSize = new Size(width, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(3, 0, 3, 6)
-    };
-
-    private static Label MakeValue(string text = "", Padding? margin = null) => new()
+        var label = MakeNote();
+        label.Visible = false;
+        return label;
+    }
+    private static Label SectionTitle(Msg text) => new() { Text = L10n.T(text).TrimEnd(':', '：'), Font = UiStyle.SectionFont, AutoSize = true, ForeColor = UiStyle.Text, Margin = new Padding(0, 0, 0, 12) };
+    private static Button MakeButton(Msg text, ButtonTone tone = ButtonTone.Normal)
     {
-        Text = text, AutoSize = true, MaximumSize = new Size(TextWidth, 0), Margin = margin ?? new Padding(3, 3, 3, 3)
-    };
-
-    private static Button MakeButton(Msg text) => new()
+        var button = new Button { Text = L10n.T(text) };
+        UiStyle.StyleButton(button, tone);
+        return button;
+    }
+    private static CheckBox MakeCheckBox(Msg text) => new() { Text = L10n.T(text), AutoSize = true, Margin = new Padding(0, 0, 0, 12) };
+    private static TextBox CommandBox() => new()
     {
-        Text = L10n.T(text), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, MinimumSize = new Size(90, 30),
-        Padding = new Padding(6, 0, 6, 0), Margin = new Padding(3, 3, 6, 3), UseVisualStyleBackColor = true
+        Multiline = true, ReadOnly = true, WordWrap = true, ScrollBars = ScrollBars.Vertical, Height = 64,
+        BorderStyle = BorderStyle.FixedSingle, BackColor = UiStyle.Background, ForeColor = UiStyle.Text, Margin = new Padding(0, 0, 0, 12)
     };
-
-    private static CheckBox MakeCheckBox(Msg text) => new() { Text = L10n.T(text), AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
 
     private Control BuildGeneral()
     {
-        var grid = Grid();
-        Row(grid, Msg.GeneralStartup, _launch);
-        Row(grid, null, _launchNote);
         _cliCommand.Text = CliCommand(_host.PackageRoot);
-        Row(grid, Msg.GeneralCli, Flow(_cliCommand, _copyCli), gap: 10);
-        Row(grid, null, MakeNote().With(Msg.GeneralCliHint));
-        Row(grid, Msg.GeneralLanguage, MakeValue(L10n.T(Msg.GeneralLanguageValue)), gap: 10);
+        _cliCommand.AccessibleName = L10n.T(Msg.GeneralCli);
         _launch.CheckedChanged += (_, _) =>
         {
             if (_refreshing) return;
-            try
-            {
-                if (_launch.Checked) LaunchAtLogin.Enable();
-                else LaunchAtLogin.Disable();
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(this, error.Message, L10n.T(Msg.GeneralLaunchFailed), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
+            try { if (_launch.Checked) LaunchAtLogin.Enable(); else LaunchAtLogin.Disable(); }
+            catch (Exception error) { MessageBox.Show(this, error.Message, L10n.T(Msg.GeneralLaunchFailed), MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             RefreshAll();
         };
-        _copyCli.Click += (_, _) => CopyText(_cliCommand.Text);
-        return grid;
+        _copyCli.Click += (_, _) => CopyWithFeedback(_cliCommand.Text, _cliCopied);
+        return Stack(
+            Card(SectionTitle(Msg.GeneralStartup), _launch, _launchNote, MakeNote().With(Msg.GeneralBackgroundHint)),
+            Card(SectionTitle(Msg.GeneralCli), MakeNote().With(Msg.GeneralCliHint), _cliCommand, Flow(_copyCli), _cliCopied),
+            Card(SectionTitle(Msg.GeneralLanguage), MakeValue(L10n.T(Msg.GeneralLanguageValue))));
     }
 
     private Control BuildStatus()
     {
-        var grid = Grid();
-        Row(grid, Msg.StatusService, _service);
-        Row(grid, Msg.StatusPipe, _pipe);
-        Row(grid, Msg.StatusControl, Flow(_pause, _stop, _restart), gap: 10);
-        Row(grid, null, MakeNote().With(Msg.StatusHint));
+        _serviceTitle.Font = UiStyle.SectionFont;
         _pause.Click += async (_, _) => await _host.TogglePauseAsync();
         _stop.Click += async (_, _) => await _host.EmergencyStopAsync();
         _restart.Click += async (_, _) => await _host.RestartServicesAsync();
-        return grid;
+        var connect = MakeButton(Msg.ConnectAddClient);
+        connect.Click += (_, _) => ShowPage(SettingsPage.Connect);
+        return Stack(
+            Card(_serviceTitle, MakeNote().With(Msg.StatusBackground), Flow(_pause, _restart), MakeNote().With(Msg.StatusHint)),
+            Card(_pairedCount, MakeNote().With(Msg.StatusPairing), Flow(connect)),
+            Disclosure(Msg.StatusDiagnostics, Card(SectionTitle(Msg.StatusLatestEvent), _service, SectionTitle(Msg.StatusPipe), _pipe)));
     }
 
     private Control BuildClients()
     {
-        foreach (var (title, share) in new[] { (Msg.ClientsName, 0.26), (Msg.ClientsApps, 0.40), (Msg.ClientsBrowser, 0.17), (Msg.ClientsForeground, 0.17) })
+        foreach (var (title, share) in new[] { (Msg.ClientsName, 0.24), (Msg.ClientsApps, 0.34), (Msg.ClientsBrowser, 0.21), (Msg.ClientsForeground, 0.21) })
             _clients.Columns.Add(new ColumnHeader { Text = L10n.T(title), Tag = share });
-        // 列宽按比例分配；列宽不随窗体 DPI 自动缩放，所以在句柄创建和尺寸变化时重新计算。
         _clients.HandleCreated += (_, _) => FitColumns();
         _clients.Resize += (_, _) => FitColumns();
-        var grid = Grid(columns: 1);
-        foreach (var control in new Control[] { _clients, Flow(_revoke), _clientsNote, MakeNote(ListWidth).With(Msg.ClientsHint) })
-        {
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            grid.Controls.Add(control, 0, grid.RowCount++);
-        }
-        _clients.SelectedIndexChanged += (_, _) => _revoke.Enabled = _host.IsRunning && _clients.SelectedItems.Count == 1;
+        _clients.ForeColor = UiStyle.Text;
+        _clients.BackColor = UiStyle.Surface;
+        _clients.AccessibleName = L10n.T(Msg.PaneClients);
+        _clients.SelectedIndexChanged += (_, _) => RefreshClientSelection();
         _revoke.Click += async (_, _) => await RevokeSelectedAsync();
-        return grid;
+        var connect = MakeButton(Msg.ConnectAddClient, ButtonTone.Primary);
+        connect.Click += (_, _) => ShowPage(SettingsPage.Connect);
+        return Card(Flow(connect, _revoke), _clientsNote, _clients, _clientScope, MakeNote().With(Msg.ClientsHint));
     }
 
     private void FitColumns()
@@ -267,54 +323,33 @@ internal sealed class SettingsForm : Form
         foreach (ColumnHeader column in _clients.Columns) column.Width = (int)(width * (double)column.Tag!);
     }
 
+    private void RefreshClientSelection()
+    {
+        _revoke.Enabled = _host.IsRunning && _clients.SelectedItems.Count == 1;
+        var id = _clients.SelectedItems.Count == 1 ? _clients.SelectedItems[0].Tag as string : null;
+        var client = id is null ? null : _host.Clients.FirstOrDefault(value => value.Id == id);
+        _clientScope.Text = client is null ? "" : client.AllApps ? L10n.T(Msg.ApprovalAllAppsDetail) : string.Join("\n", client.AppIds.Select(DisplayAppId));
+        _clientScope.Visible = _clientScope.Text.Length > 0;
+    }
+
     private Control BuildConnect()
     {
-        var grid = Grid();
-        Row(grid, Msg.ConnectHttp, _http);
-        Row(grid, null, MakeNote().With(Msg.ConnectHttpHint));
+        _pairCommand.Text = PairCommand(_host.PackageRoot);
+        _pairCommand.AccessibleName = L10n.T(Msg.ConnectPairing);
+        _copyPair.Click += (_, _) => CopyWithFeedback(_pairCommand.Text, _pairCopied);
+        _copyStdio.Click += (_, _) => CopyWithFeedback(StdioConfiguration(_host.PackageRoot), _copied);
+        _http.CheckedChanged += async (_, _) => { if (!_refreshing) await _host.SetHttpAsync(_http.Checked); };
+        _copyAddress.Click += (_, _) => { if (HttpAddress(_host.HttpStatus) is { } address) CopyWithFeedback(address, _copied); };
         _addressRow = Flow(_httpAddress, _copyAddress);
-        Row(grid, null, _addressRow);
-        Row(grid, Msg.ConnectStdio, Flow(_copyStdio), gap: 10);
-        Row(grid, null, _copied);
-        Row(grid, Msg.ConnectPairing, MakeNote().With(Msg.ConnectPairingHint), gap: 10);
-        _http.CheckedChanged += async (_, _) =>
-        {
-            if (!_refreshing) await _host.SetHttpAsync(_http.Checked);
-        };
-        _copyAddress.Click += (_, _) =>
-        {
-            if (HttpAddress(_host.HttpStatus) is { } address) CopyText(address);
-        };
-        _copyStdio.Click += (_, _) =>
-        {
-            if (!CopyText(StdioConfiguration(_host.PackageRoot))) return;
-            _copied.Text = L10n.T(Msg.ConnectCopied);
-            _copied.Visible = true;
-        };
-        _copied.Visible = false;
-        return grid;
+        return Stack(
+            Card(SectionTitle(Msg.ConnectStepPair), MakeNote().With(Msg.ConnectPairingHint), _pairCommand, Flow(_copyPair), _pairCopied),
+            Card(SectionTitle(Msg.ConnectStepConfig), MakeNote().With(Msg.ConnectConfigHint), Flow(_copyStdio), _copied),
+            Disclosure(Msg.ConnectAdvanced, Card(SectionTitle(Msg.ConnectHttp), _http, MakeNote().With(Msg.ConnectHttpHint), _addressRow)));
     }
 
     private Control BuildUpdates()
     {
-        var grid = Grid();
-        Row(grid, Msg.UpdatesVersion, _version);
-        Row(grid, Msg.UpdatesAutomatic, _automatic, gap: 10);
-        Row(grid, null, MakeNote().With(Msg.UpdatesAutomaticHint));
-        Row(grid, Msg.UpdatesLastCheck, _lastCheck, gap: 10);
-        Row(grid, null, Flow(_check));
-        Row(grid, null, _updateStatus);
-        _progressRow = Flow(_progress, _cancel);
-        Row(grid, null, _progressRow);
-        _updateActions = Flow(_runInstaller, _download, _release, _skip, _reveal, _retry);
-        Row(grid, null, _updateActions);
-        Row(grid, null, _manualHint.With(Msg.UpdatesManualHint));
-        Row(grid, null, _installerHint.With(Msg.UpdatesInstallerHint));
-        Row(grid, null, _notes, gap: 4, labelControl: _notesLabel);
-        _automatic.CheckedChanged += (_, _) =>
-        {
-            if (!_refreshing) _host.Updates.SetAutomatic(_automatic.Checked);
-        };
+        _automatic.CheckedChanged += (_, _) => { if (!_refreshing) _host.Updates.SetAutomatic(_automatic.Checked); };
         _check.Click += async (_, _) => await _host.Updates.CheckAsync(manual: true);
         _retry.Click += async (_, _) => await _host.Updates.CheckAsync(manual: true);
         _download.Click += async (_, _) => await _host.Updates.DownloadAsync();
@@ -323,44 +358,28 @@ internal sealed class SettingsForm : Form
         _skip.Click += (_, _) => _host.Updates.Skip();
         _reveal.Click += (_, _) => _host.Updates.Reveal();
         _runInstaller.Click += (_, _) => _host.Updates.RunInstaller();
-        return grid;
+        _progressRow = Flow(_progress, _cancel);
+        _updateActions = Flow(_runInstaller, _download, _release, _skip, _reveal, _retry);
+        return Stack(
+            Card(Flow(MakeNote().With(Msg.UpdatesVersion), _version), _updateStatus, _progressRow, _updateActions,
+                _manualHint.With(Msg.UpdatesManualHint), _installerHint.With(Msg.UpdatesInstallerHint),
+                _notesLabel, _notes, Flow(_check), Flow(MakeNote().With(Msg.UpdatesLastCheck), _lastCheck)),
+            Card(SectionTitle(Msg.UpdatesAutomatic), _automatic, MakeNote().With(Msg.UpdatesAutomaticHint)));
     }
 
     private Control BuildAbout()
     {
-        var grid = Grid(columns: 1);
-        grid.Dock = DockStyle.None;
-        grid.Anchor = AnchorStyles.Top;
-        var title = new Label
-        {
-            Text = "Computer Use", AutoSize = true, Anchor = AnchorStyles.Top, Margin = new Padding(3, 24, 3, 2),
-            Font = new Font((SystemFonts.MessageBoxFont ?? DefaultFont).FontFamily, 14F, FontStyle.Bold)
-        };
-        var summary = new Label
-        {
-            Text = L10n.T(Msg.AboutDescription), AutoSize = true, MaximumSize = new Size(500, 0), TextAlign = ContentAlignment.MiddleCenter,
-            Anchor = AnchorStyles.Top, Margin = new Padding(3, 0, 3, 14)
-        };
-        var links = Flow(
+        var title = MakeValue("Computer Use");
+        title.Font = UiStyle.HeadingFont;
+        return Card(title, _aboutVersion, MakeNote().With(Msg.AboutLocal), Flow(
             Link(Msg.AboutWebsite, () => UpdateService.Open(UpdateService.ProjectPage)),
             Link(Msg.AboutReleases, () => UpdateService.Open(UpdateService.ReleasesPage)),
-            Link(Msg.AboutLicenses, () => OpenFolder(Path.Combine(_host.PackageRoot, "licenses"))));
-        links.Anchor = AnchorStyles.Top;
-        foreach (var control in new Control[] { title, _aboutVersion, summary, links })
-        {
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            grid.Controls.Add(control, 0, grid.RowCount++);
-        }
-        // 关于页内容水平居中。
-        var host = new Panel { Dock = DockStyle.Fill };
-        host.Controls.Add(grid);
-        host.Layout += (_, _) => grid.Left = Math.Max(0, (host.ClientSize.Width - grid.Width) / 2);
-        return host;
+            Link(Msg.AboutLicenses, () => OpenFolder(Path.Combine(_host.PackageRoot, "licenses")))));
     }
 
     private static LinkLabel Link(Msg text, Action open)
     {
-        var link = new LinkLabel { Text = L10n.T(text), AutoSize = true, Margin = new Padding(8, 3, 8, 3) };
+        var link = new LinkLabel { Text = L10n.T(text), AutoSize = true, LinkColor = UiStyle.Accent, Margin = new Padding(0, 4, 16, 8) };
         link.LinkClicked += (_, _) => open();
         return link;
     }
@@ -403,18 +422,24 @@ internal sealed class SettingsForm : Form
 
     private void RefreshStatus()
     {
+        var state = _host.IsBusy ? Msg.StatusBusyLabel : _host.IsRunning
+            ? _host.IsPaused ? Msg.StatusPausedLabel : Msg.StatusRunningLabel : Msg.StatusOfflineLabel;
+        _serviceTitle.Text = _sidebarState.Text = L10n.T(state);
+        _serviceTitle.ForeColor = _host.IsRunning && !_host.IsPaused ? UiStyle.Accent : UiStyle.Text;
+        _pairedCount.Text = L10n.F(Msg.StatusClientCount, _host.Clients.Count);
         _service.Text = _host.ServiceStatus;
         _pipe.Text = _host.PipeName ?? L10n.T(Msg.StatusPipeNotReady);
         _pause.Text = L10n.T(_host.IsPaused ? Msg.TrayResume : Msg.TrayPause);
         _pause.Enabled = _host.IsRunning;
-        _stop.Enabled = _host.IsRunning;
+        _stop.Enabled = _host.IsRunning || _host.IsBusy;
+        _restart.Enabled = !_host.IsBusy;
     }
 
     private void RefreshClients()
     {
         IReadOnlyList<ClientInfo> clients = _host.IsRunning ? _host.Clients : Array.Empty<ClientInfo>();
         var signature = string.Join("\n", clients.Select(client =>
-            $"{client.Id}\t{client.Name}\t{string.Join(";", client.AppIds)}\t{client.Browser}\t{client.Foreground}"));
+            $"{client.Id}\t{client.Name}\t{string.Join(";", client.AppIds)}\t{client.AllApps}\t{client.Browser}\t{client.Foreground}"));
         if (signature != _shownClients)
         {
             var selected = _clients.SelectedItems.Count == 1 ? _clients.SelectedItems[0].Tag as string : null;
@@ -422,7 +447,8 @@ internal sealed class SettingsForm : Form
             _clients.Items.Clear();
             foreach (var client in clients)
             {
-                var apps = client.AppIds.Count == 0 ? L10n.T(Msg.ClientsNo) : string.Join("; ", client.AppIds.Select(DisplayAppId));
+                var apps = client.AllApps ? L10n.T(Msg.ClientsAllApps)
+                    : client.AppIds.Count == 0 ? L10n.T(Msg.ClientsNo) : string.Join("; ", client.AppIds.Select(DisplayAppId));
                 var item = new ListViewItem(new[] { client.Name, apps, Mark(client.Browser), Mark(client.Foreground) })
                 {
                     Tag = client.Id, ToolTipText = apps
@@ -435,7 +461,8 @@ internal sealed class SettingsForm : Form
         }
         _clientsNote.Text = !_host.IsRunning ? L10n.T(Msg.ClientsNotRunning) : clients.Count == 0 ? L10n.T(Msg.ClientsEmpty) : "";
         _clientsNote.Visible = _clientsNote.Text.Length > 0;
-        _revoke.Enabled = _host.IsRunning && _clients.SelectedItems.Count == 1;
+        _clients.Visible = clients.Count > 0;
+        RefreshClientSelection();
     }
 
     private static string Mark(bool allowed) => L10n.T(allowed ? Msg.ClientsYes : Msg.ClientsNo);
@@ -555,7 +582,12 @@ internal sealed class SettingsForm : Form
     }
 
     internal static string CliCommand(string root) =>
-        $"& \"{Path.Combine(root, "bin", "node.exe")}\" \"{Path.Combine(root, "runtime", "cli.js")}\"";
+        $"& {PowerShellLiteral(Path.Combine(root, "bin", "node.exe"))} {PowerShellLiteral(Path.Combine(root, "runtime", "cli.js"))}";
+
+    // Single-quoted PowerShell literals also preserve $ and backticks in user-selected install paths.
+    private static string PowerShellLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    internal static string PairCommand(string root) => CliCommand(root) + " pair --name 'My Agent'";
 
     /// <summary>与 macOS“复制 stdio 配置”相同的通用 JSON：使用默认 profile，不含凭据。</summary>
     internal static string StdioConfiguration(string root) => JsonSerializer.Serialize(
@@ -579,6 +611,14 @@ internal sealed class SettingsForm : Form
         {
             return false;
         }
+    }
+
+    private void CopyWithFeedback(string text, Label feedback)
+    {
+        var copied = CopyText(text);
+        feedback.Text = L10n.T(copied ? Msg.CommonCopied : Msg.CommonCopyFailed);
+        feedback.ForeColor = copied ? UiStyle.Accent : UiStyle.Danger;
+        feedback.Visible = true;
     }
 
     private static void OpenFolder(string path)

@@ -34,6 +34,38 @@ final class SettingsLayoutTests: XCTestCase {
                        "Computer Use v0.5.0\n\n- 新增：设置窗口\n#tag 保留")
     }
 
+    func testPairingMessageDistinguishesAllAppsFromExistingRestrictedScope() throws {
+        let all = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"all","name":"Agent","appIds":[],"allApps":true,"browser":false,"foreground":true}"#.utf8))
+        let restricted = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"old","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false,"foreground":true}"#.utf8))
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let allMessage = HostApplication.pairingMessage(all)
+            XCTAssertTrue(allMessage.contains(tr(.approvalAllApps)))
+            XCTAssertTrue(allMessage.contains(tr(.approvalNotAllowed)), "All desktop apps does not grant the isolated browser")
+            XCTAssertTrue(allMessage.contains(tr(.approvalForegroundAllowed)))
+            let restrictedMessage = HostApplication.pairingMessage(restricted)
+            XCTAssertTrue(restrictedMessage.contains("com.apple.TextEdit"))
+            XCTAssertFalse(restrictedMessage.contains(tr(.approvalAllApps)), "Older grants must not appear expanded")
+        }
+    }
+
+    func testClientScopeCellsShowAllAppsRestrictedAppsAndBrowserOnly() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let pane = ClientsPane(context: FakeContext.states()[1].1)
+            _ = pane.view
+            pane.refresh()
+            let table = NSTableView()
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("apps"))
+            let expected = [tr(.clientsAllApps), "com.apple.TextEdit, com.apple.Notes", tr(.clientsNo)]
+            XCTAssertEqual(pane.numberOfRows(in: table), expected.count)
+            for (row, label) in expected.enumerated() {
+                let cell = try XCTUnwrap(pane.tableView(table, viewFor: column, row: row) as? NSTableCellView)
+                XCTAssertEqual(cell.textField?.stringValue, label)
+            }
+        }
+    }
+
     func testEveryPaneFitsThePageInBothLanguagesAndStates() throws {
         let directory = ProcessInfo.processInfo.environment["CU_SETTINGS_SNAPSHOTS"].map { URL(fileURLWithPath: $0, isDirectory: true) }
         if let directory { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -156,8 +188,9 @@ private final class FakeContext: HostContext {
 
         let busy = FakeContext()
         busy.clients = [
-            ClientRecord(id: "1", name: "Codex", appIds: ["com.apple.TextEdit", "com.apple.Notes"], browser: false, foreground: true),
-            ClientRecord(id: "2", name: "Browser Agent", appIds: [], browser: true, foreground: true),
+            ClientRecord(id: "1", name: "Codex", appIds: [], allApps: true, browser: false, foreground: true),
+            ClientRecord(id: "2", name: "Restricted Agent", appIds: ["com.apple.TextEdit", "com.apple.Notes"], browser: false, foreground: true),
+            ClientRecord(id: "3", name: "Browser Agent", appIds: [], browser: true, foreground: true),
         ]
         busy.httpEnabled = true
         busy.httpStatus = "Local MCP: http://127.0.0.1:47631/mcp"

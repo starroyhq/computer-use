@@ -88,13 +88,15 @@ public struct ClientRecord: Decodable, Equatable {
     public let name: String
     /// 授权范围只用于展示；旧版运行时不发送这些字段。
     public let appIds: [String]?
+    public let allApps: Bool?
     public let browser: Bool?
     public let foreground: Bool?
 
-    public init(id: String, name: String, appIds: [String]? = nil, browser: Bool? = nil, foreground: Bool? = nil) {
+    public init(id: String, name: String, appIds: [String]? = nil, allApps: Bool? = nil, browser: Bool? = nil, foreground: Bool? = nil) {
         self.id = id
         self.name = name
         self.appIds = appIds
+        self.allApps = allApps
         self.browser = browser
         self.foreground = foreground
     }
@@ -105,6 +107,7 @@ public struct HostEvent: Decodable {
     public let clientId: String?
     public let name: String?
     public let appIds: [String]?
+    public let allApps: Bool?
     public let browser: Bool?
     public let foreground: Bool?
     public let sessionId: String?
@@ -174,11 +177,12 @@ public struct LineFramer {
 }
 
 public enum HostControl {
-    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil) throws -> Data {
+    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) throws -> Data {
         var object: [String: Any] = ["command": command]
         if let clientID { object["clientId"] = clientID }
         if let sessionID { object["sessionId"] = sessionID }
         if let pid { object["pid"] = pid }
+        if let allApps { object["allApps"] = allApps }
         var result = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         result.append(10)
         return result

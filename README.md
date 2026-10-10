@@ -4,13 +4,13 @@
 
 让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
 
-**开发预览。** 可从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载 macOS ARM64 的 DMG、Windows ARM64 和 x64 的安装程序（另有便携 ZIP），见[安装正式版](#安装正式版)；也可按下文从源码构建。已验证范围见下表。
+**开发预览。** v0.6.0 提供 macOS ARM64、Windows ARM64 和 x64 的 ZIP 包，以及 macOS DMG 和 Windows 安装程序，见[安装正式版](#安装正式版)。也可按下文从源码构建。已验证范围见下表。
 
 ## 主要功能
 
 - **桌面操作**：窗口截图、辅助功能元素、点击、输入、快捷键、滚动和直线拖拽；支持程度取决于平台、应用和动作。
 - **Agent 接入**：stdio MCP、可选本机 HTTP MCP，以及可独立使用的 CLI。
-- **配对授权**：明确选择可控制的应用；配对批准一次即包含前台操作权限并长期有效，撤销客户端即收回；支持暂停和紧急停止。
+- **配对授权**：首次配对默认一次授权所有桌面应用，后续新增应用、窗口及重启无需重复批准；授权包含前台操作，默认仍在后台执行。支持撤销客户端、暂停和紧急停止，也可显式限制应用范围。
 - **动作记录**：每次操作使用新快照，通过请求 ID 查询结果；不自动重放结果不确定的动作。
 - **独立浏览器**：通过 Playwright 操作单独的 headless Chromium，不继承日常浏览器的登录状态。
 - **设置与更新**：设置窗口分为通用、权限与状态（Windows 为“状态”）、客户端、接入、更新、关于六页，界面跟随系统语言显示简体中文或英文；每天从 GitHub 检查一次正式版，下载后校验 SHA-256 与发布元数据。
@@ -21,21 +21,23 @@ Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright �
 
 | 平台 | 构建与接入 | 验证范围 |
 |---|---|---|
-| macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 旧标识版本完成 AppKit Fixture 与 Codex 桌面实测；新标识已通过构建、签名校验，桌面回归待完成 |
-| Windows 11 ARM64 | 托盘程序（安装程序或便携包）；本机 CLI / MCP，Mac 可经 SSH 连接 | 当前版本在一台虚拟机通过 66 个 Fixture 输入用例、1 次 Mac Codex 模型回归及授权/断线/退出检查 |
+| macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 当前标识的本地安装包完成全应用配对、跨应用/新窗口后台输入及暂停、紧停、重启、撤销验收；早期 Codex 实测另见历史记录 |
+| Windows 11 ARM64 | 托盘安装版与便携包；本机 CLI / MCP，Mac 可经 SSH 连接 | 本地安装包在一台虚拟机完成两个 Fixture、三个窗口的 7 轮后台输入及授权控制验收；早期 66 个输入用例和 Mac Codex 实测另见历史记录 |
 | Windows 11 x64 | 独立 x64 构建目标 | 旧开发包在 ARM64 系统的 x64 模拟环境通过组件校验；原生 x64 桌面未验收 |
 | macOS Intel / Linux | 暂无本项目宿主交付 | 未验证 |
 
-应用标识现为 `com.starroy.computeruse`。Windows ARM64 已完成上述限定验收；macOS 和 x64 的旧版证据不能代替当前版本验收。测试方法、结果及未覆盖项见 [验证记录](docs/validation-results.md)。
+应用标识现为 `com.starroy.computeruse`。上述本地安装包验收完成于 2026-10-10，不等同于逐个验收正式发布产物或任意第三方应用。Windows 桌面兼容目标为 Windows 10 1809（build 17763）及之后版本，但 Windows 10 和原生 x64 桌面尚未实测。测试方法、历史结果及未覆盖项见 [验证记录](docs/validation-results.md)。
 
 ## 安装正式版
 
-从 [Releases](https://github.com/starroyhq/computer-use/releases) 下载对应平台的文件（`<版本>` 为版本号）：
+从 [v0.6.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0) 下载对应平台的安装包：
 
-- **macOS（Apple Silicon）**：`computer-use-<版本>-macos-arm64.dmg`。打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。App 与 DMG 都使用 Developer ID 签名并经过 Apple 公证。
-- **Windows 11**：`computer-use-<版本>-windows-arm64-setup.exe` 或 `…-windows-x64-setup.exe`。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。安装程序未签名，SmartScreen 可能提示“Windows 已保护你的电脑”，确认来自本项目的 Releases 后选“更多信息 → 仍要运行”。
+- **macOS（Apple Silicon）**：`computer-use-0.6.0-macos-arm64.dmg`，打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。也可下载 `computer-use-0.6.0-macos-arm64.zip` 并将解压后的 App 移入“应用程序”。正式发布作业分别对 App 与 DMG 使用 Developer ID 签名、Apple 公证和装订，通过校验后才发布。
+- **Windows**：`computer-use-0.6.0-windows-arm64-setup.exe` 或 `computer-use-0.6.0-windows-x64-setup.exe`，按系统架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。便携版可下载对应的 `computer-use-0.6.0-windows-<arm64|x64>.zip`，完整解压后运行 `ComputerUse.WindowsHost.exe`，见 [Windows 指南](docs/WINDOWS.md)。
 
-每个文件都附有 `.sha256` 校验文件。同一发布还有便携 ZIP：macOS 一键更新使用它；Windows 便携包解压即可运行，见 [Windows 指南](docs/WINDOWS.md)。安装后的权限与配对步骤与下文从源码构建相同。
+每个 ZIP、DMG 和安装程序都附有 `.sha256` 校验文件，每个平台另有 JSON 发布元数据。Windows 安装程序与便携包均未签名，SmartScreen 表现尚未实测；原生 x64 安装及从真实发布下载到完成安装版升级的完整流程仍待验证。
+
+安装后的系统权限步骤与下文相同。v0.6.0 新配对默认授权所有桌面应用，已有受限客户端保持原范围；要扩大范围，需撤销后重新配对一次。ZIP 继续用于 macOS 一键更新和 Windows 便携版；安装与桌面测试的具体范围见 [验证记录](docs/validation-results.md)。
 
 ## 快速开始：从源码构建
 
@@ -68,13 +70,13 @@ computer-use --help
 
 这条 `export` 只影响当前终端；新终端需要相同的 PATH 设置。也可直接调用 `artifacts/Computer Use.app/Contents/Resources/bin/computer-use`。
 
-打开 TextEdit 并新建一个空白测试文档，为 Agent 配对：
+为 Agent 配对，首次批准后即可访问所有桌面应用：
 
 ```sh
-computer-use pair --profile codex --name 'Codex' --app com.apple.TextEdit
+computer-use pair --profile codex --name 'Codex'
 ```
 
-在 App 中批准后，检查连接并生成配置：
+在 App 中批准“所有应用”后，打开 TextEdit 并新建一个空白测试文档，检查连接并生成配置：
 
 ```sh
 computer-use doctor --profile codex
@@ -83,6 +85,8 @@ computer-use config codex --profile codex
 ```
 
 `targets` 应包含已打开的测试窗口。未安装 Chromium 时，`doctor` 的浏览器项可以显示不可用；桌面接入应检查桌面后端。接着按下节导入配置。
+
+全应用授权持续有效，不按窗口或会话重复审批。旧配对保留原有应用范围；要改为全应用，在“客户端”页撤销旧授权，删除该 profile 的本地凭据后重新配对一次。受限测试可加 `--app com.apple.TextEdit`；独立浏览器需另加 `--all-apps --browser`。完整选项见[使用说明](docs/USAGE.md#配对范围--pairing-scope)。
 
 ### Windows 11
 
@@ -95,7 +99,7 @@ node scripts/package-windows.mjs --arch x64
 
 宿主应在当前交互登录桌面运行。便携包包含 Node、驱动和 .NET 运行时；构建所需 SDK 与最终运行所需组件不同。
 
-按 [Windows 指南](docs/WINDOWS.md)完成应用路径配对，再选择本机 Agent 的 stdio MCP，或 Mac 经 SSH 隧道连接 Windows HTTP MCP。**Windows 使用可执行文件完整路径配对，不能照抄 macOS 的 Bundle ID。**
+按 [Windows 指南](docs/WINDOWS.md)完成一次全应用配对，再选择本机 Agent 的 stdio MCP，或 Mac 经 SSH 隧道连接 Windows HTTP MCP。默认不需要填写应用路径；显式用 `--app` 限定范围时，Windows 使用完整可执行文件路径，macOS 使用 Bundle ID。
 
 ## 接入 Agent 与首次观察
 
@@ -116,13 +120,13 @@ node scripts/package-windows.mjs --arch x64
 自动检查默认开启，每天最多一次，只读取本仓库 GitHub 上最新的正式版（不含草稿和预发布，也不降级），不上传使用数据；可在“更新”页关闭，或对某个版本选择“跳过”。检查优先使用 GitHub API；未认证的 API 每个 IP 每小时只能调用 60 次，用完或连不上时改读 github.com 的发布页，结果相同。下载的安装包必须与发布里的 SHA-256 校验文件和元数据一致，经 API 读取时还要与 GitHub 记录的摘要一致：
 
 - **macOS**：Developer ID 签名的正式版可一键安装。App 解压新版本后，确认 Bundle ID、版本、签名团队与当前 App 一致并通过 Gatekeeper 检查，经你确认后停止服务、在原位置替换并重新打开，系统权限和已配对客户端保持不变。App 被系统隔离运行（例如下载后未移动就直接打开）或所在文件夹不可写时，改为在访达中显示校验过的新版本，由你手动替换。源码构建的开发版本只能手动检查。
-- **Windows**：安装版下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。便携版只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。v0.5.0 及更早的版本都是便携版。
+- **Windows**：便携版（包括 v0.5.0 及更早版本）只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。v0.6.0 安装版支持下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。从真实发布下载到完成安装版升级的完整流程仍待验证。
 
 两个宿主都通过内置 CLI 完成检查和下载，也可以直接运行 `computer-use update check`，见 [使用说明](docs/USAGE.md#检查更新--updates)。
 
 ## 权限与限制
 
-- Agent 只能通过本项目接口访问已配对目标。配对批准即授予前台操作（可能切换焦点、移动鼠标和模拟键盘），之后不再逐次询问；旧版配对需重新配对才能使用前台。后台能力依赖实际控件，不保证完全不影响焦点。
+- Agent 必须持有已配对客户端的凭据；默认全应用授权覆盖当前及后续桌面应用和窗口，不会自动扩充旧配对的范围，也不代替 macOS 系统权限。配对批准即授予前台操作（可能切换焦点、移动鼠标和模拟键盘），之后不再逐次询问；只有显式指定 `mode: "foreground"` 才使用前台，不自动从后台切换。后台能力依赖实际控件，不保证完全不影响焦点。
 - 不确定动作先查询 `action_status` 并观察，不直接重放。`executed` 不代表任务成功，仍需核对实际界面或输出文件。
 - HTTP 默认关闭，只监听 `127.0.0.1:47631`。跨机器接入通过手动 SSH 隧道，不直接开放 MCP 到局域网或公网。
 - 默认动作日志不保存截图、输入、URL 和窗口标题；CLI 截图会留在本机，需要自行清理。发给云端 Agent 的截图与结果由所选模型服务处理。

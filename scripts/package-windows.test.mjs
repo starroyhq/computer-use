@@ -14,7 +14,7 @@ import {
   readPeMachine,
   verifyInstallerFile,
 } from './package-windows-installer.mjs';
-import { assertPeMachine, parseArguments, targetForArch } from './package-windows.mjs';
+import { assertExecutionHost, assertPeMachine, parseArguments, targetForArch } from './package-windows.mjs';
 
 /** 只有 PE 头的最小可执行文件，用于检查机器类型。 */
 function peFile(machine, size = 0x86) {
@@ -40,6 +40,25 @@ test('Windows package targets have separate binaries, receipts and destinations'
   assert.equal(basename(arm64.installer), 'Computer Use Windows ARM64 Setup.exe');
   assert.equal(basename(x64.installer), 'Computer Use Windows x64 Setup.exe');
   assert.throws(() => targetForArch('ia32'), /Unsupported Windows architecture/);
+});
+
+test('Windows package host checks allow native Windows 10 but require Windows 11 ARM64 for x64 emulation', () => {
+  const x64 = targetForArch('x64');
+  const arm64 = targetForArch('arm64');
+  for (const release of ['10.0.17763', '10.0.19045', '10.0.22000']) {
+    assert.doesNotThrow(() => assertExecutionHost(x64, { platform: 'win32', arch: 'x64', release }));
+    assert.doesNotThrow(() => assertExecutionHost(arm64, { platform: 'win32', arch: 'arm64', release }));
+  }
+  for (const release of ['10.0.19045', '10.0.21999', 'unknown']) {
+    assert.throws(
+      () => assertExecutionHost(x64, { platform: 'win32', arch: 'arm64', release }),
+      /requires Windows 11 .*Use --arch arm64 on Windows 10 ARM64/,
+    );
+  }
+  assert.doesNotThrow(() => assertExecutionHost(x64, { platform: 'win32', arch: 'arm64', release: '10.0.22000' }));
+  assert.throws(() => assertExecutionHost(arm64, { platform: 'win32', arch: 'x64' }), /inside Windows ARM64/);
+  assert.throws(() => assertExecutionHost(x64, { platform: 'win32', arch: 'ia32' }), /inside Windows x64/);
+  assert.throws(() => assertExecutionHost(arm64, { platform: 'darwin', arch: 'arm64' }), /inside Windows ARM64/);
 });
 
 test('Windows installer CLI selects the target and optional checks', () => {
@@ -115,6 +134,16 @@ test('the installer script keeps its BOM and the AppId the tray host recognizes'
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('the installer accepts the Windows 10 host baseline and keeps native architecture restrictions', async () => {
+  const script = await readFile(INSTALLER_SCRIPT, 'utf8');
+  const minimumVersion = /^MinVersion=(.+)$/m.exec(script)?.[1];
+  assert.equal(minimumVersion, '10.0.17763');
+  const project = await readFile(new URL('../windows/ComputerUse.WindowsHost/ComputerUse.WindowsHost.csproj', import.meta.url), 'utf8');
+  assert.ok(project.includes(`-windows${minimumVersion}.0</TargetFramework>`));
+  assert.match(script, /#if Arch == "arm64"\s+ArchitecturesAllowed=arm64\s+ArchitecturesInstallIn64BitMode=arm64/);
+  assert.match(script, /#else\s+ArchitecturesAllowed=x64compatible\s+ArchitecturesInstallIn64BitMode=x64compatible/);
 });
 
 test('the smoke test reads uninstall registration values', () => {

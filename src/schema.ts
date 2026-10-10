@@ -97,12 +97,16 @@ export const pairSchema = z
   .object({
     name: z.string().trim().min(1).max(80).regex(visibleText),
     appIds: z.array(z.string().min(2).max(1024)).max(50).default([]),
+    allApps: z.boolean().optional(),
     browser: z.boolean().default(false),
   })
   .strict()
-  .refine(v => v.appIds.length > 0 || v.browser, 'At least one target permission required');
+  // 不指定范围的新客户端默认请求所有桌面应用；显式应用列表和仅浏览器请求保留原语义。
+  .refine(v => v.allApps !== true || v.appIds.length === 0, 'Choose all applications or an explicit application list')
+  .refine(v => v.allApps !== false || v.appIds.length > 0 || v.browser, 'At least one target permission required');
 export const hostCommandSchema = z.discriminatedUnion('command', [
-  z.object({ command: z.enum(['pair_allow', 'pair_deny', 'revoke']), clientId: id }).strict(),
+  z.object({ command: z.enum(['pair_allow', 'pair_deny']), clientId: id, allApps: z.boolean().optional() }).strict(),
+  z.object({ command: z.literal('revoke'), clientId: id }).strict(),
   z.object({ command: z.enum(['foreground_allow', 'foreground_deny']), sessionId: id }).strict(),
   z.object({ command: z.enum(['pause', 'resume', 'stop', 'http_enable', 'http_disable']) }).strict(),
   z.object({ command: z.literal('control_ready'), pid: z.number().int().positive().max(2_147_483_647) }).strict(),

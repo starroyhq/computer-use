@@ -13,14 +13,74 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        var options = FixtureOptions.Parse(args);
         ApplicationConfiguration.Initialize();
-        var mode = args.Contains("--win32", StringComparer.OrdinalIgnoreCase) ? ProbeMode.Win32
-            : args.Contains("--wpf", StringComparer.OrdinalIgnoreCase) ? ProbeMode.Wpf : ProbeMode.WinForms;
-        Application.Run(new FixtureForm(mode));
+        if (options.MultiWindow) Application.Run(new FixtureApplicationContext(options));
+        else Application.Run(new FixtureForm(options.Mode, options.ResultDirectory, options.WindowLabel));
     }
 }
 
 internal enum ProbeMode { WinForms, Win32, Wpf }
+
+internal sealed record FixtureOptions(ProbeMode Mode, string? ResultDirectory, string? WindowLabel, bool MultiWindow)
+{
+    internal static FixtureOptions Parse(string[] args)
+    {
+        var win32 = false;
+        var wpf = false;
+        var multiWindow = false;
+        string? resultDirectory = null;
+        string? windowLabel = null;
+        for (var index = 0; index < args.Length; index++)
+        {
+            string Value()
+            {
+                if (++index >= args.Length || string.IsNullOrWhiteSpace(args[index]) || args[index].StartsWith("--", StringComparison.Ordinal))
+                    throw new ArgumentException("Expected a value after the fixture option.");
+                return args[index];
+            }
+            switch (args[index].ToLowerInvariant())
+            {
+                case "--win32": win32 = true; break;
+                case "--wpf": wpf = true; break;
+                case "--multi-window": multiWindow = true; break;
+                case "--result-dir": resultDirectory = Value(); break;
+                case "--window-label": windowLabel = Value(); break;
+                default: throw new ArgumentException($"Unknown fixture option: {args[index]}");
+            }
+        }
+        if (resultDirectory is not null && !Path.IsPathFullyQualified(resultDirectory))
+            throw new ArgumentException("--result-dir must be an absolute path to a disposable test directory.");
+        if (multiWindow && resultDirectory is null)
+            throw new ArgumentException("--multi-window requires --result-dir so each test window has isolated evidence.");
+        return new FixtureOptions(win32 ? ProbeMode.Win32 : wpf ? ProbeMode.Wpf : ProbeMode.WinForms,
+            resultDirectory, windowLabel, multiWindow);
+    }
+}
+
+// Keep every window in the same process, including windows created after the initial pairing.
+internal sealed class FixtureApplicationContext : ApplicationContext
+{
+    private readonly FixtureOptions options;
+    private int nextWindowNumber;
+    private int openWindows;
+
+    internal FixtureApplicationContext(FixtureOptions options)
+    {
+        this.options = options;
+        OpenWindow();
+    }
+
+    private void OpenWindow()
+    {
+        var number = ++nextWindowNumber;
+        var window = new FixtureForm(options.Mode, options.ResultDirectory, options.WindowLabel, number,
+            OpenWindow, showWithoutActivation: number > 1);
+        openWindows++;
+        window.FormClosed += (_, _) => { if (--openWindows == 0) ExitThread(); };
+        window.Show();
+    }
+}
 
 internal sealed class FixtureForm : Form
 {
@@ -30,18 +90,29 @@ internal sealed class FixtureForm : Form
     private readonly Action focusInput;
     private readonly Label status = new() { AutoSize = true, Text = "Ready" };
     private readonly string resultPath;
+    private readonly bool showWithoutActivation;
+    private readonly bool includeWindowEvidence;
+    private readonly int? windowNumber;
     private int recordCount;
     private readonly List<TextChange> textChanges = [];
     private readonly long startedAt = Stopwatch.GetTimestamp();
 
-    internal FixtureForm(ProbeMode mode)
+    internal FixtureForm(ProbeMode mode, string? resultDirectory = null, string? windowLabel = null,
+        int? windowNumber = null, Action? newWindow = null, bool showWithoutActivation = false)
     {
+        this.showWithoutActivation = showWithoutActivation;
+        this.windowNumber = windowNumber;
+        includeWindowEvidence = resultDirectory is not null || windowLabel is not null || windowNumber is not null;
         Text = mode == ProbeMode.WinForms ? "Computer Use Fixture" : $"Computer Use Fixture {mode}";
+        if (windowLabel is not null) Text += $" — {windowLabel}";
+        if (windowNumber is not null) Text += $" — Window {windowNumber}";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(520, 260);
-        MinimumSize = new Size(420, 250);
-        resultPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Computer Use Fixture", mode == ProbeMode.WinForms ? "result.json" : $"{mode.ToString().ToLowerInvariant()}-result.json");
+        ClientSize = new Size(520, newWindow is null ? 260 : 310);
+        MinimumSize = new Size(420, newWindow is null ? 250 : 300);
+        var fileName = windowNumber is not null ? $"{mode.ToString().ToLowerInvariant()}-window-{windowNumber}-result.json"
+            : mode == ProbeMode.WinForms ? "result.json" : $"{mode.ToString().ToLowerInvariant()}-result.json";
+        resultPath = Path.Combine(resultDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Computer Use Fixture"), fileName);
 
         var title = new Label
         {
@@ -117,14 +188,26 @@ internal sealed class FixtureForm : Form
             Size = new Size(238, 30),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        status.Location = new Point(24, 190);
+        if (newWindow is not null)
+        {
+            var createWindow = new Button
+            {
+                Text = "New Window", AccessibleName = "New Window",
+                Location = new Point(24, 184), Size = new Size(150, 34),
+            };
+            createWindow.Click += (_, _) => newWindow();
+            Controls.Add(createWindow);
+        }
+        status.Location = new Point(24, newWindow is null ? 190 : 250);
         status.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
         Controls.AddRange([title, inputHost, record, reset, secret, status]);
-        Shown += (_, _) => focusInput();
+        Shown += (_, _) => { if (!showWithoutActivation) focusInput(); };
 
         // Clear stale evidence from a previous run before any automation begins.
         Persist("ready");
     }
+
+    protected override bool ShowWithoutActivation => showWithoutActivation;
 
     private void RecordTextChange() => textChanges.Add(new TextChange(
         DateTimeOffset.UtcNow, Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds, readText().Length));
@@ -136,9 +219,14 @@ internal sealed class FixtureForm : Form
         {
             Directory.CreateDirectory(Path.GetDirectoryName(resultPath)!);
             var result = new FixtureResult(state, readText(), recordCount, DateTimeOffset.UtcNow,
-                textChanges.ToArray());
+                textChanges.ToArray(), includeWindowEvidence ? Environment.ProcessId : null,
+                includeWindowEvidence ? Text : null, windowNumber);
             File.WriteAllText(temporaryPath, JsonSerializer.Serialize(result,
-                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }), new UTF8Encoding(false));
+                new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+                }), new UTF8Encoding(false));
             File.Move(temporaryPath, resultPath, overwrite: true);
             status.Text = state == "recorded" ? $"Recorded {recordCount}" : "Ready";
         }
@@ -159,7 +247,7 @@ internal sealed class FixtureForm : Form
 
     private sealed record TextChange(DateTimeOffset AtUtc, double ElapsedMilliseconds, int Length);
     private sealed record FixtureResult(string State, string Text, int RecordCount,
-        DateTimeOffset UpdatedAtUtc, TextChange[] TextChanges);
+        DateTimeOffset UpdatedAtUtc, TextChange[] TextChanges, int? ProcessId, string? WindowTitle, int? WindowNumber);
 }
 
 // A raw Win32 EDIT HWND, intentionally separate from WinForms TextBox's wrapper.

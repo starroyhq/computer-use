@@ -44,7 +44,7 @@ ArchitecturesInstallIn64BitMode=arm64
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
-MinVersion=10.0.22000
+MinVersion=10.0.17763
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 SetupMutex=ComputerUseSetup

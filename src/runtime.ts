@@ -227,6 +227,7 @@ export class Runtime implements RpcService {
         id,
         name,
         appIds: [...grant.appIds],
+        allApps: grant.allApps === true,
         browser: grant.browser,
         foreground: grant.foreground === true,
       })),
@@ -288,9 +289,12 @@ export class Runtime implements RpcService {
   async control(command: HostCommand): Promise<void> {
     switch (command.command) {
       case 'pair_allow':
-      case 'pair_deny':
-        this.pairs.get(command.clientId)?.resolve(command.command === 'pair_allow');
+      case 'pair_deny': {
+        const pair = this.pairs.get(command.clientId);
+        // 旧宿主不认识 allApps，可能把空应用列表显示为“无”。只有明确展示并确认过此范围的宿主才能批准。
+        pair?.resolve(command.command === 'pair_allow' && (pair.client.grant.allApps !== true || command.allApps === true));
         break;
+      }
       case 'foreground_allow':
       case 'foreground_deny':
         break; // 前台权限已在配对时授予；保留命令以兼容旧宿主。
@@ -343,7 +347,7 @@ export class Runtime implements RpcService {
   }
   private async pair(params: unknown): Promise<unknown> {
     const parsed = pairSchema.safeParse(params);
-    if (!parsed.success) throw new CuError('invalid_request', 'Provide a client name and explicit application/browser permissions.');
+    if (!parsed.success) throw new CuError('invalid_request', 'Provide a client name and a valid application/browser scope.');
     if (this.stopped) throw new CuError('unavailable', 'Runtime stopped.');
     if (this.pairs.size >= 3) throw new CuError('busy', 'Too many pending pairing requests.');
     const token = randomBytes(32).toString('base64url');
@@ -353,6 +357,7 @@ export class Runtime implements RpcService {
       tokenHash: hash(token),
       grant: {
         appIds: [...new Set(parsed.data.appIds.map(id => canonicalAppId(id, this.options.platform)))],
+        allApps: parsed.data.allApps ?? (parsed.data.appIds.length === 0 && !parsed.data.browser),
         browser: parsed.data.browser,
         foreground: true,
       },
@@ -367,6 +372,7 @@ export class Runtime implements RpcService {
             clientId: client.id,
             name: client.name,
             appIds: client.grant.appIds,
+            allApps: client.grant.allApps === true,
             browser: client.grant.browser,
             foreground: true,
           });
@@ -392,7 +398,9 @@ export class Runtime implements RpcService {
     const results = await bounded(Promise.all(this.options.backends.map(b => b.targets(client.grant))), 25_000);
     if (!this.clients.clients.has(client.id)) throw new CuError('unauthorized', 'Client revoked.');
     // This check remains in the runtime even if a backend filters incorrectly.
-    return results.flat().filter(t => (t.kind === 'browser' ? client.grant.browser : client.grant.appIds.includes(t.appId)));
+    return results
+      .flat()
+      .filter(t => (t.kind === 'browser' ? client.grant.browser : client.grant.allApps === true || client.grant.appIds.includes(t.appId)));
   }
   private async openSession(client: Client, params: unknown): Promise<unknown> {
     this.checkRunning();

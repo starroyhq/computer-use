@@ -104,6 +104,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     public string ServiceStatus => _status;
     public bool IsRunning => _running && _runtime is not null;
     public bool IsPaused => _paused;
+    public bool IsBusy => _busy;
     public string? PipeName => IsRunning ? _runtime!.PipeName : null;
     public IReadOnlyList<ClientInfo> Clients => _clients;
     public bool HttpEnabled => _httpEnabled;
@@ -244,7 +245,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
             var apps = client.TryGetProperty("appIds", out var values) && values.ValueKind == JsonValueKind.Array
                 ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").ToArray()
                 : Array.Empty<string>();
-            result.Add(new ClientInfo(id, name.Length <= 80 ? name : name[..80], apps, Flag(client, "browser"), Flag(client, "foreground")));
+            result.Add(new ClientInfo(id, name.Length <= 80 ? name : name[..80], apps, Flag(client, "allApps"),
+                Flag(client, "browser"), Flag(client, "foreground")));
         }
         return result;
     }
@@ -262,21 +264,35 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         var isPair = kind == "pair_request";
         var identifier = String(request, isPair ? "clientId" : "sessionId");
         if (identifier.Length == 0) { _ = StopAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
-        string explanation;
+        ApprovalDetails details;
         if (isPair)
         {
-            // 批准即授予全部路径，因此必须全部列出（文本框可滚动），不能截断。
+            // 全应用权限单独说明；受限授权列出全部路径，由授权窗口换行和滚动展示。
+            var allApps = Flag(request, "allApps");
             var paths = request.TryGetProperty("appIds", out var appIds) && appIds.ValueKind == JsonValueKind.Array
                 ? appIds.EnumerateArray().Select(value => value.GetString() ?? "").ToArray() : Array.Empty<string>();
             var apps = string.Join("\n", paths);
             var foreground = request.TryGetProperty("foreground", out var foregroundValue) && foregroundValue.ValueKind == JsonValueKind.False
                 ? L10n.T(Msg.ApprovalNotAllowed) : L10n.T(Msg.ApprovalForegroundAllowed);
-            explanation = L10n.F(Msg.ApprovalPairBody, String(request, "name"), identifier, L10n.F(Msg.ApprovalPathCount, paths.Length),
-                apps.Length == 0 ? L10n.T(Msg.ApprovalNone) : apps,
-                Flag(request, "browser") ? L10n.T(Msg.ApprovalAllowed) : L10n.T(Msg.ApprovalNotAllowed), foreground);
+            details = new ApprovalDetails(L10n.T(Msg.ApprovalPairTitle), String(request, "name"),
+                L10n.T(Msg.ApprovalClientId), identifier, new[]
+                {
+                    allApps
+                        ? new ApprovalSection(L10n.T(Msg.ApprovalDesktopScope), L10n.T(Msg.ClientsAllApps), L10n.T(Msg.ApprovalAllAppsDetail))
+                        : new ApprovalSection(L10n.F(Msg.ApprovalPathCount, paths.Length), apps.Length == 0 ? L10n.T(Msg.ApprovalNone) : apps),
+                    new ApprovalSection(L10n.T(Msg.ApprovalBrowser), Flag(request, "browser") ? L10n.T(Msg.ApprovalAllowed) : L10n.T(Msg.ApprovalNotAllowed)),
+                    new ApprovalSection(L10n.T(Msg.ApprovalForeground), foreground),
+                    new ApprovalSection(L10n.T(Msg.ApprovalLifetime), L10n.T(Msg.ApprovalPairLifetime)),
+                    new ApprovalSection(L10n.T(Msg.ApprovalBehavior), L10n.T(Msg.ApprovalPairBehavior)),
+                });
         }
-        else explanation = L10n.F(Msg.ApprovalForegroundBody, String(request, "clientName"), String(request, "targetTitle"), identifier);
-        var dialog = new ApprovalDialog(identifier, L10n.T(isPair ? Msg.ApprovalPairTitle : Msg.ApprovalForegroundTitle), explanation);
+        else details = new ApprovalDetails(L10n.T(Msg.ApprovalForegroundTitle), String(request, "clientName"),
+            L10n.T(Msg.ApprovalSessionId), identifier, new[]
+            {
+                new ApprovalSection(L10n.T(Msg.ApprovalTarget), String(request, "targetTitle")),
+                new ApprovalSection(L10n.T(Msg.ApprovalForeground), L10n.T(Msg.ApprovalSessionScope)),
+            });
+        var dialog = new ApprovalDialog(identifier, details);
         _approvalDialog = dialog;
         dialog.FormClosed += async (_, _) =>
         {
@@ -288,8 +304,10 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 SetStatus(L10n.T(Msg.StatusDecisionSent));
                 try
                 {
+                    // 明确确认已展示全应用范围；旧宿主不会发送此字段，运行时据此拒绝扩权。
                     await source.SendControlAsync(isPair ? (allow ? "pair_allow" : "pair_deny") : (allow ? "foreground_allow" : "foreground_deny"),
-                        clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier);
+                        clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier,
+                        allApps: isPair && allow && Flag(request, "allApps") ? true : null);
                 }
                 catch { if (ReferenceEquals(_runtime, source)) await StopAsync(L10n.T(Msg.StatusSendDecisionFailed)); }
             }

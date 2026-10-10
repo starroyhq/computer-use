@@ -22,21 +22,25 @@ let runtime: Runtime;
 let listener: Awaited<ReturnType<typeof listenIpc>>;
 let fixture: Server;
 let fixtureUrl: string;
+let allowDesktopPairing: boolean;
 const entrypoint = resolve('dist/cli.js');
 
 beforeEach(async () => {
   // Short private paths work with the macOS AF_UNIX socket limit.
   directory = await mkdtemp('/tmp/cu-cli-');
   socketPath = join(directory, 'runtime.sock');
+  allowDesktopPairing = false;
   runtime = new Runtime({
     dataDir: join(directory, 'runtime'),
     backends: [new BrowserBackend(join(directory, 'browser'))],
     emit: event => {
-      // Automatic approval is confined to this test runtime and browser-only grants.
+      // 此隔离运行时没有桌面后端；除显式测试配对外，只自动批准浏览器权限。
       if (event.event === 'pair_request')
         void runtime.control({
-          command: event.browser && event.appIds.length === 0 ? 'pair_allow' : 'pair_deny',
+          command:
+            allowDesktopPairing || (event.allApps !== true && event.browser && event.appIds.length === 0) ? 'pair_allow' : 'pair_deny',
           clientId: event.clientId,
+          allApps: event.allApps === true,
         });
     },
   });
@@ -109,6 +113,23 @@ async function pair(profile = 'default') {
 }
 
 describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browser workflow', () => {
+  it('pairs all desktop apps by default and preserves explicit scoped and browser-only options', async () => {
+    allowDesktopPairing = true;
+    for (const [profile, args, expected] of [
+      ['all', [], { appIds: [], allApps: true, browser: false, foreground: true }],
+      ['both', ['--all-apps', '--browser'], { appIds: [], allApps: true, browser: true, foreground: true }],
+      ['scoped', ['--app', 'com.example.Fixture'], { appIds: ['com.example.Fixture'], allApps: false, browser: false, foreground: true }],
+      ['browser', ['--browser'], { appIds: [], allApps: false, browser: true, foreground: true }],
+    ] as const) {
+      const paired = await command<{ clientId: string }>(['pair', '--profile', profile, ...args]);
+      expect(runtime.clients.clients.get(paired.clientId)?.grant).toEqual(expected);
+    }
+    const ambiguous = await cli(['pair', '--profile', 'ambiguous', '--all-apps', '--app', 'com.example.Fixture']);
+    expect(ambiguous.code).toBe(1);
+    expect(JSON.parse(ambiguous.stderr).error.code).toBe('invalid_request');
+    expect(runtime.clients.clients.size).toBe(4);
+  });
+
   it('pairs privately, materializes screenshots, enters Chinese text, verifies a save and closes the session', async context => {
     if (!(await new BrowserBackend(directory).doctor()).available) context.skip();
     const credential = await pair();

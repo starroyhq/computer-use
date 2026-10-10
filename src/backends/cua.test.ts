@@ -105,6 +105,65 @@ describe('Cua socket adapter', () => {
     expect(client.callTool).not.toHaveBeenCalled();
   });
 
+  it('discovers every identified running app for an all-app grant while still checking window ownership', async () => {
+    const { client, backend } = fixture();
+    client.listApps.mockResolvedValue({
+      apps: [
+        { pid: 42, name: 'Fixture', running: true, active: false, bundleId: 'test.fixture' },
+        { pid: 99, name: 'Other', running: true, active: true, bundleId: 'other.app' },
+        { pid: 100, name: 'Unidentified', running: true, active: false },
+        { pid: 101, name: 'Stopped', running: false, active: false, bundleId: 'stopped.app' },
+      ],
+    });
+    client.listWindows.mockImplementation(async ({ pid }) => ({
+      windows: [
+        { windowId: 19n, pid, appName: 'App', title: 'Window', bounds, isOnScreen: true },
+        { windowId: 20n, pid: 777, appName: 'Wrong owner', title: 'Window', bounds, isOnScreen: true },
+      ],
+    }));
+    expect(await backend.targets({ appIds: [], browser: false })).toEqual([]);
+    expect(client.listApps).not.toHaveBeenCalled();
+    expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([
+      { ...target, title: 'Window' },
+      { ...target, id: 'desktop:99:19', appId: 'other.app', pid: 99, title: 'Window' },
+    ]);
+    expect(client.listWindows).toHaveBeenCalledTimes(2);
+    expect(client.callTool).not.toHaveBeenCalled();
+    expect(await backend.observe(target)).toMatchObject({ target });
+    await expect(backend.observe({ ...target, appId: 'wrong.app' })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('keeps Windows executable identity checks when every application is authorized', async () => {
+    const { client } = fixture();
+    const paths = new Map([
+      [42, 'C:\\Apps\\Fixture.exe'],
+      [99, 'C:\\Apps\\Other.exe'],
+      [100, 'C:\\Apps\\Actual.exe'],
+    ]);
+    const backend = new CuaBackend(
+      'C:\\Driver\\cua-driver.exe',
+      async () => client,
+      'win32',
+      async () => paths,
+    );
+    client.listApps.mockResolvedValue({
+      apps: [
+        { pid: 42, name: 'Fixture', running: true, active: false },
+        { pid: 99, name: 'Other', running: true, active: false, launchPath: 'C:\\Apps\\Other.exe' },
+        { pid: 100, name: 'Mismatched', running: true, active: false, launchPath: 'C:\\Apps\\Claimed.exe' },
+        { pid: 101, name: 'Unidentified', running: true, active: false },
+      ],
+    });
+    client.listWindows.mockImplementation(async ({ pid }) => ({
+      windows: [{ windowId: 19n, pid, appName: 'App', title: 'Fixture', bounds, isOnScreen: true }],
+    }));
+    const listed = await backend.targets({ appIds: [], allApps: true, browser: false });
+    expect(listed.map(item => item.appId)).toEqual(['win32:c:\\apps\\fixture.exe', 'win32:c:\\apps\\other.exe']);
+    expect(client.listWindows).toHaveBeenCalledTimes(2);
+    paths.set(42, 'C:\\Apps\\Replacement.exe');
+    await expect(backend.observe(listed[0]!)).rejects.toMatchObject({ code: 'not_found' });
+  });
+
   it('replaces an idle SDK client before the implicit session expires', async () => {
     vi.useFakeTimers();
     try {

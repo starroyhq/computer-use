@@ -236,3 +236,77 @@ Windows 前台键盘路径曾出现长文本部分到达；WPF 元素点击的�
 - Windows 安装程序的签名和 SmartScreen 表现、macOS DMG 的公证、原生 x64 机器上的安装、安装版从真实发布升级，以及公众分发验收。
 
 上述结果仅覆盖已列测试程序和环境，不构成通用桌面应用兼容性承诺。
+
+## macOS 全应用授权与后台控制本机验收（2026-10-10）
+
+本节补充当前工作区的全应用授权改动，历史章节中的版本、结果与覆盖限制保持原意。本轮在 Apple Silicon macOS 上构建并安装到 `/Applications/Computer Use.app`；Bundle ID 为 `com.starroy.computeruse`，包内版本仍为 0.5.0、build 6，不能等同于已公开发布的 v0.5.0。该本地构建使用 Developer ID 签名，**本次构建未进行 Apple 公证**。原 App 保存在 `.cache/installed-app-backup-20261010-185321/Computer Use.app`。安装证据核对包内运行时、schema、CLI 与 Cua 适配器文件均匹配本次构建；宿主界面及 `doctor` 确认辅助功能和屏幕录制权限已授予。
+
+首次仅批准一次“所有应用”配对，后续均复用该测试 profile，通过已安装 App 的 `Contents/Resources/bin/computer-use` 调用。测试应用分别使用 `com.starroy.computeruse.fixture.alpha` 和 `com.starroy.computeruse.fixture.beta` 两个 Bundle ID；另启动 beta 的第二个进程，形成同一 Bundle ID 的新窗口，**不是同进程内新建第二个窗口**。所有 `session_open` 均省略 `mode` 并检查返回 `background`，未显式请求前台。
+
+| 检查 | 实际结果 |
+|---|---|
+| 首次配对后的 alpha、另一个应用 beta、beta 后续新窗口 | 各完成一轮 Reset → 中文输入 → Record，无新增配对审批；三个独立结果文件均确认全文准确、各自计数 0 → 1，其他 Fixture 的守卫文件不变 |
+| 暂停 | 对已打开会话的新动作返回 `paused`，独立结果文件不变；会话正常关闭 |
+| 恢复后 alpha、后续 beta 与 beta 新窗口 | 再次完成 Reset → 输入 → Record；全文准确，各自计数 1 → 2，守卫文件不变 |
+| 重启服务后复用原配对 | alpha 再完成一轮后台 Reset → 输入 → Record，全文准确、计数 2 → 3，守卫文件不变；未重新配对 |
+| 撤销测试客户端 | 已打开会话的 Record 动作及 `targets` 均返回 `unauthorized`，独立结果文件不变；同一旧凭据关闭会话也返回 `unauthorized`，符合撤销后拒绝该凭据的预期 |
+| 截图 | 包内 CLI 实际返回窗口截图，人工核对内容正确，密码框显示掩码；本轮观察输出未包含 Fixture 的固定测试密码明文 |
+
+上述完成轮次中的输入返回 `executed` / `effect: confirmed`，Reset 与 Record 点击返回 `executed` / `effect: unconfirmed`；结果以独立文件中的全文和记录计数判定，不把派发状态直接当成任务成功，也未重发不确定动作。正常轮次均关闭会话。
+
+后续后台操作期间，用包含 RunLoop 刷新的 `NSWorkspace.frontmostApplication` 监测程序，以 50 毫秒为目标间隔采样 75 秒，共 1,376 次，未采样到任一 Fixture 位于前台。该结果不能排除短于采样间隔的焦点变化。首次 `focus-cross-app.json` 来自缺少 RunLoop 刷新的实现，可能读到缓存状态，**不作为焦点保持的证据**；有效结果是 `focus-confirmed-background.json`。
+
+紧急停止在一个已派发 Record、正在等待刻意不满足的 `verify` 条件的后台动作中触发。独立文件先确认 Record 计数 2 → 3；紧急停止后，该动作保持 `state: executed` / `effect: unconfirmed`，并附 `error.code: cancelled`，表示已派发的点击没有撤回，后续验证被取消。会话随后已不存在，打包的运行时和驱动子进程停止，后续 CLI 调用返回 `unavailable`；Fixture 结果内容及修改时间保持不变，未出现额外 Record。此项验证覆盖等待结果时的停止，不证明鼠标或按键按住期间能够释放。
+
+验收结束后，已核对身份并退出三个 Fixture 进程，撤销测试客户端，并通过包内 CLI 的 `credentials remove` 删除其本地 profile 凭据。原有 6 个客户端列表保持不变，App 服务继续运行。
+
+本机原始证据保存在被忽略的 `.cache/all-apps-acceptance-20261010`：`install.json`、`alpha-result.json`、`beta-result.json`、`beta2-result.json`、`resume-alpha-result.json`、`background-beta-result.json`、`background-beta2-result.json`、`pause-result.json`、`restart-result.json`、`revoke-result.json`、`focus-confirmed-background.json`、`active-stop-result.json`、`emergency-stop-result.json` 与 `cleanup.json`；截图已保存为同目录的 `fixture-observation.png`。截图、凭据与临时 profile 不随源码公开。
+
+本轮是打包 CLI 的真实桌面验收，不是新的真实模型任务成功率测试；不覆盖 Windows、任意第三方应用兼容性、同进程多窗口、登录或系统重启、长时间闲置、锁屏/休眠、多显示器、人机同时输入或中断后的按键释放。
+
+
+## Windows 授权窗口、设置界面与兼容门槛（2026-10-10）
+
+本轮在现有全应用授权实现上调整 Windows 宿主界面，沿用 .NET 10 WinForms 与标准控件，不引入 Windows 11 专用材质或控件依赖。设置改为六区侧栏、常驻紧急停止、分组状态与接入引导；配对窗口逐项展示身份、桌面范围、独立浏览器、前台权限、授权期限及默认后台行为，保留默认拒绝、超时撤回和运行时确认。安装器最低版本由 build 22000 改为 17763，与既有 target 对齐；Windows 10 ARM64 上拒绝构建或验证依赖 x64 模拟的 x64 包，原生 ARM64 包不受此限制。
+
+验证结果：
+
+- `pnpm check` 通过：类型检查、Biome、161 个运行时/CLI/后端等测试、16 个打包与辅助脚本测试。包含全应用配对持久化、跨目标免重复审批、默认后台、暂停、紧停、撤销和旧范围兼容测试。
+- 在 Windows 11 ARM64 交互桌面，使用现有 .NET 10.0.401 SDK 编译隔离 UI harness，0 警告、0 错误；复制的 14 个源码/项目文件逐一核对 SHA-256。
+- harness 的 9 组检查通过：翻译、辅助方法、设置存储、授权生命周期、配对范围、设置页面、控制按钮交互、双语正常/最小尺寸布局、更新状态。新增覆盖从其他页面紧停、暂停/恢复命令、重启替换运行时、撤销按钮选择状态、长授权路径、`&` 原样展示与 PowerShell 安装路径特殊字符转义。
+- 生成 24 张中英文截图，包括所有设置页、安装版更新状态、三类窄窗口和全应用/25 路径配对窗口。正常尺寸下全应用配对的长期有效、默认后台、撤销、暂停及紧停说明首屏完整可见，允许/拒绝按钮固定在滚动区外。
+- 对真实 `ComputerUse.WindowsHost.csproj` 分别执行 `dotnet publish -c Release -r win-arm64 --self-contained true` 与 `-r win-x64`，均成功，包含真实 HostRuntime 的编译；未启动或安装发布产物。
+
+最终证据统一保存于被忽略的 `.cache/windows-ui-refresh-20261010-f6fdc029`：`build-manifest.json`、`build.log`、`run.log`、`run-result.json`、`publish-arm64-result.json`、`publish-x64-result.json`、`task-cleanup.json`，以及 `zh-` / `en-` 开头的 PNG。临时交互计划任务已删除；测试使用假的 HostRuntime 和独立临时设置目录，没有授予真实客户端权限、修改启动项或调用真实桌面驱动。
+
+**覆盖限制**：这是宿主界面与授权协议衔接的隔离验证，不是 Windows 跨应用输入验收。Windows 10 尚未实机测试，17763 安装门槛仅表示兼容目标；x64 本轮只完成编译。当前独立浏览器的 Playwright 上游要求 Windows 11 或更高版本，Windows 10 ARM64 也无法运行该后端的 x64 Chromium。没有安装或发布新完整 Windows 包；历史 Windows 11 ARM64 桌面验收范围保持不变。
+
+## Windows 安装版全应用授权与后台控制验收（2026-10-10）
+
+本节补充上一节之后的完整打包、安装和真实桌面测试。环境为 Parallels 中的 Windows 11 ARM64（build 26200），使用当前登录用户的交互桌面。使用当前工作区源码构建完整 ARM64 便携包、ZIP 和 Inno Setup 安装器，版本仍为 0.5.0，不能等同于公开发布的 v0.5.0；本地安装器未签名。本轮未发布安装包或提交源码。
+
+初次安装复用了此前便携版的用户数据。随后实测发现暂停按钮的可见文字已变为“恢复接收动作”，但固定的 `AccessibleName` 仍为“暂停新动作”。已移除按钮不必要的固定名称，使用随 `Text` 更新的原生名称，并补充暂停/恢复、诊断及高级接入展开/收起的无障碍名称断言。修订后的 9 组 Windows UI 检查全部通过，生成 24 张中英文截图；真实 ARM64 Host 发布、便携包验证、ZIP 解压复验及安装器验证均成功。
+
+最终安装器覆盖安装到 `%LOCALAPPDATA%\Programs\Computer Use`，自动请求旧 Host 正常退出，安装退出码为 0，无需重启 Windows。逐一核对 2,239 个安装文件与最终构建产物一致；安装前后的客户端文件及全部现有凭据文件哈希一致。最终 setup SHA-256 为 `4e94c7de42710bc6ac0fab449a5db13e010ec5c74cfe2d9103433faed0056cc7`。这是本地两次构建之间的覆盖安装，不替代从正式发布版升级的验收。
+
+配对通过安装版真实授权窗口的“允许”按钮完成，仅成功批准一次“所有桌面应用”；之后所有测试使用同一 profile。调试虚拟机 UI 操作时曾有未批准请求超时，未创建客户端。后续没有再次配对，也没有逐应用或逐窗口审批。测试对象是两个本地不同 exe 路径的 WinForms Fixture（Alpha、Beta），以及在 Alpha 同一进程内通过“New Window”按钮创建的第二个顶层窗口；Beta 和第二窗口均在成功配对后启动或创建。所有桌面 `session_open` 省略 `mode`，并断言实际返回 `background`。
+
+| 检查 | 实际结果 |
+|---|---|
+| 跨应用、同进程新窗口 | Alpha、Beta、Alpha 第二窗口均完成 Reset → 中文输入 → Record，无重复审批；独立文件确认全文准确，Reset 后计数 0 → 1 |
+| 暂停/恢复 | 原包与最终修订包均通过真实按钮暂停；已打开会话的新动作及 `targets` 返回 `paused`，结果文件不变。恢复后可继续后台输入；最终安装版 UIA 名称与可见的暂停/恢复文字一致 |
+| 服务重启、覆盖安装 | 均复用原凭据完成 Alpha 第二窗口后台操作；覆盖安装后 Beta 再完成一轮，未重新授权 |
+| 撤销 | 在最终安装版“客户端”页选中测试客户端并确认撤销；原有会话的新动作、`targets` 和关闭会话均返回 `unauthorized`，三个结果文件未变化 |
+| 新界面 | 安装版实际显示六区侧栏、常驻紧停、分组状态、配对范围说明和客户端权限；核对状态、接入、客户端及配对截图。最终暂停/恢复名称修复另在真实安装版核验 |
+
+共完成 7 轮正常 Reset → 输入 → Record。输入返回 `verified` / `effect: confirmed`，点击返回 `executed` / `effect: unconfirmed`；各动作状态查询与原 UUID 一致，正常会话均已关闭。独立文件是全文及计数依据，不能把点击已派发直接当作业务效果已验证。Alpha 第一轮启动时尚未配置守卫文件，不计入跨窗口守卫验证；后续轮次核对已存在的其他窗口结果文件未变化。紧停后及最终撤销后，另用不经过 Computer Use 运行时的原生 UIA 只读检查三个窗口，当前非密码输入值和可见计数均与独立文件一致。本轮观察 JSON 未包含 Fixture 固定测试密码明文，不构成新的截图像素或所有密码控件验证。
+
+前台窗口监测以 50 毫秒为目标间隔。第一次记录共 2,475 个样本，其中覆盖 Beta 首轮、Alpha 新窗口创建、Alpha 第二窗口、恢复后 Alpha 及紧停这五段操作的 812 个样本，均未采到当前被操作的 Fixture 位于前台；这些时段最大实际采样间隔约 127 毫秒。任务启动/结束之间曾记录到 Beta 位于前台，不能将整段监测写成“所有 Fixture 始终在后台”。最终安装版 Beta 轮次另有 193 个样本，目标前台计数为 0，最大间隔约 143 毫秒。采样不能排除短于间隔的焦点变化。
+
+紧急停止在单次 Record 已派发、等待刻意不满足的 30 秒验证条件期间触发。独立计数先从 1 增至 2；紧停后运行时及驱动退出，后续调用返回 `unavailable`，三个结果文件未额外变化。等待中的 CLI 因连接关闭返回 `unknown_outcome`，未直接收到 helper 预期的 `executed` / `cancelled`，因此原严格 helper 保持失败记录。服务重启后，只读查询原 UUID，持久化记录返回 `state: executed`、`effect: unconfirmed`、`error.code: cancelled`，确认点击已派发、后续验证已取消。没有重发该动作；停止不会撤回已经发生的点击。本项不覆盖按住的键或鼠标释放。
+
+原始证据位于被忽略的 `.cache/windows-all-apps-acceptance-20261010`：`install-result.json`、`install-revision-result.json`、`pair-success-*`、各 `*-report.json`、`focus-assessment.json`、`focus-final-assessment.json`、`independent-after-stop.json`、`independent-final.json`、`stop-assessment.json`、`stopped-action-status-stdout.json` 及真实 Host 截图。最终产物、构建日志、源码清单和 24 张 UI 回归截图位于其 `revision-3976fd39` 子目录。凭据与原用户数据备份仅保留在 Windows 用户的私有目录中，不随证据导出。
+
+验收后已撤销测试客户端、通过安装版 CLI 删除测试 profile、确认两个 Fixture 进程退出，并注销本轮 63 个临时计划任务。最终核对原有两个客户端的完整记录在旧缺省 `allApps` 规范化为 `false` 后一致，原两份凭据文件不变；安装版 Host 和运行时仍存在。清理阶段的 PowerShell 5 数组解析、进程退出等待及任务注销权限问题分别留有原失败记录，最终结果由 `final-user-state.json`、`task-cleanup-final.json` 和 `cleanup-summary.json` 确认。为完成清理而临时关闭的虚拟机空闲自动暂停已恢复为原设置。
+
+本轮覆盖 Windows 11 ARM64 的安装版 CLI、两个测试应用和三个窗口。Windows 10、原生 x64 桌面、任意第三方应用、受控浏览器、真实模型任务成功率、UAC/提权窗口、系统重启、锁屏/休眠及签名/SmartScreen 仍未在本轮实测。

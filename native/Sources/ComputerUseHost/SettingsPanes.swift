@@ -203,7 +203,7 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
         let text: String
         switch column {
         case .name: text = client.name
-        case .apps: text = (client.appIds ?? []).isEmpty ? tr(.clientsNo) : (client.appIds ?? []).joined(separator: ", ")
+        case .apps: text = client.allApps == true ? tr(.clientsAllApps) : (client.appIds ?? []).isEmpty ? tr(.clientsNo) : (client.appIds ?? []).joined(separator: ", ")
         case .browser: text = client.browser == true ? tr(.clientsYes) : tr(.clientsNo)
         case .foreground: text = client.foreground == true ? tr(.clientsYes) : tr(.clientsNo)
         }

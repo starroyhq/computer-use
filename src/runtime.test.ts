@@ -72,15 +72,18 @@ describe('Runtime authorization and execution', () => {
     });
   const call = <T = Record<string, unknown>>(token: string | undefined, method: string, params: unknown = {}) =>
     runtime.call(token, method, params) as Promise<T>;
-  async function pair(name = 'Test Agent', allow = true) {
+  async function pair(
+    name = 'Test Agent',
+    allow = true,
+    scope: { appIds?: string[]; allApps?: boolean; browser?: boolean } = { appIds: [target.appId, target.appId], browser: false },
+  ) {
     const pending = call<{ token: string; clientId: string }>(undefined, 'pair', {
       name,
-      appIds: [target.appId, target.appId],
-      browser: false,
+      ...scope,
     });
     const event = events.findLast(e => e.event === 'pair_request');
     if (event?.event !== 'pair_request') throw new Error('Pair request not emitted');
-    await runtime.control({ command: allow ? 'pair_allow' : 'pair_deny', clientId: event.clientId });
+    await runtime.control({ command: allow ? 'pair_allow' : 'pair_deny', clientId: event.clientId, allApps: event.allApps === true });
     return pending;
   }
   async function session(token: string, exclusive = false) {
@@ -141,7 +144,7 @@ describe('Runtime authorization and execution', () => {
     const listed = events.findLast(e => e.event === 'clients');
     expect(listed).toEqual({
       event: 'clients',
-      clients: [{ id: client.clientId, name: 'Test Agent', appIds: [target.appId], browser: false, foreground: true }],
+      clients: [{ id: client.clientId, name: 'Test Agent', appIds: [target.appId], allApps: false, browser: false, foreground: true }],
     });
     expect(JSON.stringify(listed)).not.toContain(client.token);
     await runtime.control({ command: 'revoke', clientId: client.clientId });
@@ -282,6 +285,88 @@ describe('Runtime authorization and execution', () => {
     await expect(call('wrong', 'targets')).rejects.toMatchObject({ code: 'unauthorized' });
     expect(await call(token, 'targets')).toEqual([target]);
     await expect(call(token, 'session_open', { targetId: secretTarget.id })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('approves all desktop apps once and discovers future apps and windows after restart without prompting', async () => {
+    const client = await pair('All apps', true, {});
+    expect(events.findLast(event => event.event === 'pair_request')).toMatchObject({
+      allApps: true,
+      appIds: [],
+      browser: false,
+      foreground: true,
+    });
+    expect(runtime.authenticate(client.token).grant).toEqual({ allApps: true, appIds: [], browser: false, foreground: true });
+    expect(await call(client.token, 'targets')).toEqual([target, secretTarget]);
+    const first = await call<{ sessionId: string; mode: string }>(client.token, 'session_open', { targetId: secretTarget.id });
+    expect(first.mode).toBe('background');
+    await call(client.token, 'act', await actionInput(client.token, first.sessionId));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function));
+    await runtime.close();
+
+    const newWindow = { ...target, id: 'window-2' };
+    const newApp = { ...target, id: 'new-app-window', appId: 'com.example.NewApp' };
+    const page = { ...target, id: 'browser-page', kind: 'browser' as const, appId: 'browser' };
+    backend.targets = vi.fn(async () => [target, secretTarget, newWindow, newApp, page]);
+    events = [];
+    runtime = new Runtime({ dataDir: directory, backends: [backend], emit: event => events.push(event), now: () => clock });
+    await runtime.start();
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({ clients: [{ allApps: true }] });
+    expect(await call(client.token, 'targets')).toEqual([target, secretTarget, newWindow, newApp]);
+    for (const next of [newWindow, newApp]) {
+      const opened = await call<{ sessionId: string; mode: string }>(client.token, 'session_open', { targetId: next.id });
+      expect(opened.mode).toBe('background');
+      await call(client.token, 'session_close', { sessionId: opened.sessionId });
+    }
+    await expect(call(client.token, 'session_open', { targetId: page.id })).rejects.toMatchObject({ code: 'not_found' });
+    expect(events.some(event => event.event === 'pair_request' || event.event === 'foreground_request')).toBe(false);
+    await runtime.control({ command: 'revoke', clientId: client.clientId });
+    await expect(call(client.token, 'targets')).rejects.toMatchObject({ code: 'unauthorized' });
+  });
+
+  it('keeps approval, pause, emergency stop and revocation effective for all-app clients', async () => {
+    await expect(pair('Denied all apps', false, {})).rejects.toMatchObject({ code: 'permission_denied' });
+    expect(runtime.clients.clients.size).toBe(0);
+    const client = await pair('All apps', true, {});
+    const { sessionId } = await session(client.token);
+    const request = await actionInput(client.token, sessionId);
+    await runtime.control({ command: 'pause' });
+    await expect(call(client.token, 'act', request)).rejects.toMatchObject({ code: 'paused' });
+    expect(backend.act).not.toHaveBeenCalled();
+    await runtime.control({ command: 'resume' });
+    await call(client.token, 'act', request);
+    expect(backend.act).toHaveBeenCalledTimes(1);
+    const afterStop = await actionInput(client.token, sessionId);
+    await runtime.control({ command: 'stop' });
+    await expect(call(client.token, 'act', afterStop)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(backend.cancel).toHaveBeenCalledTimes(1);
+    expect(backend.act).toHaveBeenCalledTimes(1);
+    await runtime.control({ command: 'revoke', clientId: client.clientId });
+    await expect(call(client.token, 'observe', { sessionId })).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(await readFile(join(directory, 'clients.json'), 'utf8')).toBe('[]\n');
+  });
+
+  it('preserves explicit and browser-only pairing scopes and rejects ambiguous all-app requests', async () => {
+    const browser = await pair('Browser only', true, { browser: true });
+    expect(runtime.authenticate(browser.token).grant).toEqual({ appIds: [], allApps: false, browser: true, foreground: true });
+    expect(await call(browser.token, 'targets')).toEqual([]);
+    const both = await pair('Apps and browser', true, { allApps: true, browser: true });
+    expect(runtime.authenticate(both.token).grant).toMatchObject({ allApps: true, browser: true });
+    const approvals = events.filter(event => event.event === 'pair_request').length;
+    for (const scope of [{ allApps: true, appIds: [target.appId] }, { allApps: false }, { allApps: 'true' }]) {
+      await expect(call(undefined, 'pair', { name: 'Invalid scope', ...scope })).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    expect(events.filter(event => event.event === 'pair_request')).toHaveLength(approvals);
+  });
+
+  it('refuses all-app approval from older hosts that cannot confirm the expanded scope', async () => {
+    const pending = call(undefined, 'pair', { name: 'All apps with old host' });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'permission_denied' });
+    const request = events.findLast(event => event.event === 'pair_request');
+    if (request?.event !== 'pair_request') throw new Error('Missing pair request');
+    await runtime.control({ command: 'pair_allow', clientId: request.clientId });
+    await rejected;
+    expect(runtime.clients.clients.size).toBe(0);
+    expect(events.findLast(event => event.event === 'decision_finished')).toMatchObject({ approved: false });
   });
 
   it('isolates sessions, snapshots, and action records between clients', async () => {

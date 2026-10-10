@@ -2,11 +2,19 @@
 
 [简体中文](WINDOWS.md) | English · [Home](../README.en.md)
 
-The current ARM64 package using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop**: 66 fixture input cases, one real Mac Codex model regression, and authorization, disconnect and exit checks. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. The installer and the portable package are both unsigned. Elevated applications and the UAC secure desktop are unsupported.
+The locally installed ARM64 build using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop** on 2026-10-10: one all-app pairing, three windows across two fixtures, 7 background input rounds, pause, resume, emergency stop, restart, revocation and installation over an existing local build. The earlier 66 fixture input cases and one real Mac Codex model regression remain historical evidence. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. The installer and the portable package are both unsigned. Elevated applications and the UAC secure desktop are unsupported.
+
+Version 0.6.0 targets desktop compatibility with Windows 10 version 1809 (build 17763) and later, including Windows 11, with x64 and ARM64 packages. The installer minimum matches the WinForms target `net10.0-windows10.0.17763.0`. **Windows 10 acceptance on a real system is still pending**: allowing installation does not establish desktop correctness.
+
+The isolated browser has a separate boundary: the current Playwright backend's [upstream requirement is Windows 11 or later](https://playwright.dev/docs/intro#system-requirements). Windows 10 ARM64 lacks x64 emulation and cannot run the x64 Chromium used by this backend. All-desktop-application approval does not include the isolated browser, and the Windows 10 desktop compatibility target does not establish browser compatibility.
 
 ## Install and uninstall
 
-The recommended download is the release installer `computer-use-<version>-windows-<arm64|x64>-setup.exe` for your Windows architecture. The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; a first install can choose another folder and upgrades keep the original one. It adds a Start menu shortcut, offers an optional desktop shortcut and can start the app when it finishes. Before installing, setup runs `ComputerUse.WindowsHost.exe --quit` so that a tray app running in the current session (installed or portable) stops its service and quits; version 0.5.0 and earlier do not support `--quit`, so the wizard asks you to quit from the tray menu and try again. The installer is unsigned, so SmartScreen may say "Windows protected your PC"; once you have confirmed it came from this project's Releases, choose More info → Run anyway.
+Download `computer-use-0.6.0-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.6.0](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0). For a portable copy, download `computer-use-0.6.0-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
+
+Installers are available starting with v0.6.0; v0.5.0 and earlier provide only portable packages. Installation over an existing local ARM64 build has been tested. The complete flow from downloading a real release to completing an installer upgrade, native x64 installation and SmartScreen behavior remain unverified; see the [validation record](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10) (Chinese).
+
+The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; a first install can choose another folder and upgrades keep the original one. It adds a Start menu shortcut, offers an optional desktop shortcut and can start the app when it finishes. Before installing, setup runs `ComputerUse.WindowsHost.exe --quit` so that a tray app running in the current session (installed or portable) stops its service and quits; version 0.5.0 and earlier do not support `--quit`, so the wizard asks you to quit from the tray menu and try again. The installer is unsigned, so SmartScreen may say "Windows protected your PC"; once you have confirmed it came from this project's Releases, choose More info → Run anyway.
 
 Uninstall from Settings → Apps. The uninstaller first has the tray app stop its service and quit, then removes the install folder and a sign-in startup entry that points to it. Pairing credentials, settings and logs in `%LOCALAPPDATA%\Computer Use` are kept; delete that folder yourself when you no longer need them.
 
@@ -16,13 +24,13 @@ For an installed copy the CLI is `bin\node.exe runtime\cli.js` in the install fo
 Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
 ```
 
-You can also use the portable ZIP: extract the entire package on Windows 11 of the matching architecture and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. When you move from a portable copy to the installer, the program location changes, so regenerate agent configuration from the new location; pairing credentials stay valid.
+When you move from a portable copy to the installer, the program location changes, so regenerate agent configuration from the new location; pairing credentials stay valid.
 
 Either way, runtime components are bundled; build tools are not required to run the package. Start in your interactive login session. Packages do not include pairing credentials: each user must create and approve their own pairing.
 
 ## Build and start from source
 
-To build, install .NET 10 SDK, Node 24+ and pnpm 10, then obtain the source as described in the [README](../README.en.md). From the repository root in PowerShell:
+To build on Windows x64 or ARM64, install .NET 10 SDK and Node 24+ for the host architecture, plus pnpm 10, then obtain the source as described in the [README](../README.en.md). From the repository root in PowerShell:
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -32,7 +40,7 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 & '.\artifacts\Computer Use Windows x64\ComputerUse.WindowsHost.exe'
 ```
 
-For ARM64, replace `x64` with `arm64` and use the `Computer Use Windows ARM64` output directory. An ARM64 host can also build x64 packages and run component checks through Windows x64 emulation. An x64 host cannot build ARM64 packages. Omitting `--arch` selects the current Node architecture.
+For ARM64, replace `x64` with `arm64` and use the `Computer Use Windows ARM64` output directory. Windows 10 ARM64 builds and verifies native ARM64 components. Building or verifying an x64 package on an ARM64 host requires Windows 11 (build 22000 or later) for x64 emulation; the script fails early with an explanation otherwise. An x64 host cannot build ARM64 packages. Omitting `--arch` selects the current Node architecture.
 
 Packaging downloads pinned Node 24.21.0 and Cua Driver 0.28.2 artifacts, checks official manifests and pinned SHA-256 values, and installs production dependencies for the selected architecture from the lockfile. It checks host, Node, driver and native SDK architecture and loads the SDK. License files are retained. The bundled CLI is `bin\node.exe runtime\cli.js`; no global Node is required. Quitting the tray stops the service and input. Do not replace a running package. Component checks do not establish desktop screenshot or input correctness.
 
@@ -47,25 +55,29 @@ The result is `artifacts\Computer Use Windows x64 Setup.exe`. `--smoke-test` ins
 
 Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder.
 
+Version 0.6.0 uses a sidebar with six sections: Status, Clients, Connect, General, Updates and About. Emergency Stop stays visible on every page. Status shows the service and pairing count and links to Connect, where you can copy the pairing command followed by stdio configuration. Clients shows scopes and offers revocation. The pairing dialog separates client identity, desktop scope, isolated browser access, foreground permission, duration and execution behavior. Long content scrolls while decision buttons stay visible. Deny remains the default button and has initial focus; closing the dialog or pressing Escape does not authorize access. Expiry or withdrawal closes the prompt, and an Allow decision requires runtime confirmation.
+
 ## Updates
 
-The Updates page checks stable GitHub releases once a day (this can be turned off), and downloads must match the release SHA-256 checksum file and metadata. When the program folder is the install folder in the current user's uninstall registration, the copy counts as installed; otherwise it is portable:
+The Updates page checks stable GitHub releases once a day (this can be turned off), and downloads must match the release SHA-256 checksum file and metadata. Version 0.6.0 supports both installed and portable update flows; v0.5.0 and earlier use the portable flow. Downloading and running an installer from a real release still needs full acceptance. When the program folder is the install folder in the current user's uninstall registration, the copy counts as installed; otherwise it is portable:
 
-- **Installed**: downloads and verifies the new installer; choose Run Installer and follow the setup wizard. Setup first has the tray app stop its service and quit, installs over the original folder and can start the app when it finishes. Cancelling before you choose Install leaves the tray app running.
+- **Installed**: when the release includes an installer, downloads and verifies it; choose Run Installer and follow the setup wizard. Setup first has the tray app stop its service and quit, installs over the original folder and can start the app when it finishes. Cancelling before you choose Install leaves the tray app running.
 - **Portable**: only downloads and verifies the ZIP and shows it in File Explorer. Quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid.
 
 Paired clients and settings are stored in `%LOCALAPPDATA%\Computer Use` and are kept either way.
 
 ## Local Windows agent: stdio MCP
 
-Open an ordinary, non-elevated test application and pair its **full executable path**. The path below is a placeholder: substitute your own disposable test application. Local stdio and remote Mac access are alternatives; you do not need both.
+New v0.6.0 pairings grant all desktop applications through one initial approval by default, without an application path; existing restricted clients do not gain a wider scope automatically. Local stdio and remote Mac access are alternatives; you do not need both.
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # Installed copy or supplied ZIP: enter the install or extracted folder instead
-& .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex' --app 'C:\path\to\ComputerUseFixture.exe'
+& .\bin\node.exe .\runtime\cli.js pair --profile codex --name 'Codex'
 ```
 
-Approve the request in the tray, then run:
+Approve all applications in the tray. New apps, windows and host restarts need no further approval. Pairing includes foreground permission, but sessions remain in the background by default and foreground must be requested explicitly, without automatic fallback. Revocation, Pause/Resume and Emergency Stop remain available. Existing pairings keep their original scope; see [Usage](USAGE.md#配对范围--pairing-scope) to change it.
+
+Open an ordinary, non-elevated test application, then run:
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js doctor --profile codex
@@ -75,18 +87,20 @@ Approve the request in the tray, then run:
 
 Add the output to the Windows user's `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. Reload client configuration and try the [read-only task in the README](../README.en.md#connect-an-agent-and-observe). The configuration contains no credentials and requires neither HTTP nor SSH. Real model validation with Windows-local Codex is pending; earlier cross-machine tests used Mac Codex. Other clients can use `config stdio` for generic JSON configuration.
 
+For fixture-only acceptance, create a separate profile with `pair --profile fixture --name 'Fixture Agent' --app 'C:\path\to\ComputerUseFixture.exe'`, replacing the placeholder with the real full path. Use `fixture` consistently in later commands and agent configuration; repeat `--app` to allow several specific applications. Isolated browser access is separate; see [Pairing scope](USAGE.md#配对范围--pairing-scope).
+
 ## Remote Mac access: Windows pairing and credentials
 
 From the repository root, enter the package directory. Skip `Set-Location` if already there. Create a separate remote client profile and approve it in the tray:
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64'
-& .\bin\node.exe .\runtime\cli.js pair --profile mac-codex --name 'Mac Codex' --app 'C:\path\to\ComputerUseFixture.exe'
+& .\bin\node.exe .\runtime\cli.js pair --profile mac-codex --name 'Mac Codex'
 & .\bin\node.exe .\runtime\cli.js doctor --profile mac-codex
 & .\bin\node.exe .\runtime\cli.js targets --profile mac-codex
 ```
 
-Approve only intended executable paths. Revoking this client invalidates its Mac credentials. Host connection metadata, credentials and logs are kept in the current user's protected `%LOCALAPPDATA%\Computer Use` directory. Do not start the host from a service account or a noninteractive session.
+Approve all applications for this client in the Windows tray. For fixture-only acceptance, add `--app 'C:\path\to\ComputerUseFixture.exe'` to restrict the pairing. Revoking this client invalidates its Mac credentials. Host connection metadata, credentials and logs are kept in the current user's protected `%LOCALAPPDATA%\Computer Use` directory. Do not start the host from a service account or a noninteractive session.
 
 Enable local HTTP MCP on the Connect page of Settings (it lasts for the current run only), then export a new private configuration file:
 
@@ -129,18 +143,20 @@ tool_timeout_sec = 90
 
 Restart Codex and inspect `/mcp` or `codex mcp list`. Start with the README's read-only task, then use `doctor → targets → session_open → observe → act → observe → session_close`. Every action needs a UUID `requestId` and a fresh `snapshotId`. An action without a confirmed response after a tunnel failure is uncertain: reconnect, query `action_status` and observe before deciding what to do. Never automatically replay it. Screenshots are sent to the chosen agent; default action logs exclude images and typed text.
 
-If noninteractive `codex exec` fails with `MCP tool call requires approval, but approval policy is never`, a **temporary configuration limited to a paired disposable fixture** can set `default_tools_approval_mode = "approve"` for this server. Do not change user-level configuration for that test. This only handles Codex tool approval; tray pairing approval still applies. In an interactive client, approve tools when prompted. See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+If noninteractive `codex exec` fails with `MCP tool call requires approval, but approval policy is never`, a **temporary configuration connected only to an `--app`-restricted fixture profile** can set `default_tools_approval_mode = "approve"` for this server. Do not change user-level configuration for that test. This only handles Codex tool approval; initial tray pairing approval still applies. In an interactive client, approve tools when prompted. See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## Troubleshooting
 
-Pairing and foreground requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Allow submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
+Pairing requests expire after 60 seconds. The host closes invalid prompts and removes expired requests from the queue. Clicking Allow submits a decision; approval is shown only after runtime confirmation. Closing the prompt or pressing its default button denies the request. An expired request requires a new request from the agent.
 
-Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, queued requests, confirmation, default denial, stop cleanup, both translation tables, the settings store, the six settings pages, the client list and the update actions for installed and portable copies. Add `-- --screenshots <folder>` to save every settings page as PNG, or `-- --live-update <old-package-folder>` to check and download the real latest release through that package's CLI, including its installer when the release has one (network required). This harness uses a runtime double and cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
+Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an interactive Windows desktop to test prompt expiry, withdrawal, queued requests, confirmation, default denial, stop cleanup, the settings store, the six sidebar sections, the client list and update actions for installed and portable copies. Default tests use an isolated fake backend and check English and Simplified Chinese layouts at normal and minimum window sizes, including the persistent Emergency Stop button. They cannot grant real permissions or control other applications. `pnpm test` covers runtime authorization semantics.
+
+Add `-- --screenshots <folder>` to save PNGs of all six pages in both languages, the installed update state, narrow Clients/Connect/Updates windows, and all-application and multiple-path scoped pairing dialogs. These screenshots use simulated data and do not establish Windows 10 or desktop input acceptance. The separate `-- --live-update <old-package-folder>` mode checks and downloads the real latest release through that package's CLI, including its installer when the release has one (network required). See the [UI test instructions](../validation/windows/README.md).
 
 - `doctor` cannot connect: check that the tray runs in the logged-in desktop and that host and driver versions match.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.
 - `targets` blocked by MCP approval: check the Codex approval policy; dedicated noninteractive fixture tests can use the temporary setting above.
 - `401`: check the Mac JSON belongs to the current, unrevoked pairing and has mode `0600`. The helper should output one JSON header object; do not paste that credential-bearing output into logs or chat.
-- Missing application or rejected action: verify the executable path, window owner process and privilege level. Foreground sessions must be requested explicitly (granted at pairing, no per-session prompt); failed background operations never trigger an automatic foreground fallback.
+- Missing application or rejected action: verify the window owner process and privilege level; for a scoped pairing, also check the full executable path. Existing pairings do not automatically gain all-application access. Foreground sessions must be requested explicitly (granted at pairing, no per-session prompt); failed background operations never trigger an automatic foreground fallback.
 
 Windows element-directed typing and clicks always use background accessibility, including in approved foreground sessions, with no automatic fallback or retry. Long foreground input without an element ID, canvases and terminals have no completeness guarantee. See [Usage](USAGE.md) for action semantics and the [validation record](validation-results.md) for actual test coverage.

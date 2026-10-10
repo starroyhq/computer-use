@@ -416,7 +416,7 @@ export class CuaBackend implements Backend {
   }
 
   async targets(grant: Grant): Promise<Target[]> {
-    if (grant.appIds.length === 0) return [];
+    if (grant.allApps !== true && grant.appIds.length === 0) return [];
     const cached = this.cachedApps();
     return this.read(async client => {
       const apps = cached ?? (await client.listApps({}, readOptions())).apps;
@@ -427,7 +427,7 @@ export class CuaBackend implements Backend {
       for (const app of apps) {
         const appId = this.platform === 'win32' ? windowsAppId(nativePaths?.get(app.pid)) : app.bundleId;
         if (this.platform === 'win32' && app.launchPath && windowsAppId(app.launchPath) !== appId) continue;
-        if (!app.running || !appId || !grant.appIds.includes(appId)) continue;
+        if (!app.running || !appId || (grant.allApps !== true && !grant.appIds.includes(appId))) continue;
         const { windows } = await client.listWindows({ pid: app.pid, onScreenOnly: false }, readOptions());
         for (const window of windows) {
           if (window.pid !== undefined && window.pid !== app.pid) continue;
