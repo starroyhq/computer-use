@@ -7,6 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../../assets/app-icon.ico" LogicalName="ComputerUse.AppIcon.ico" />
     <!-- 直接编译托盘程序的界面源文件；HostRuntime 由 Program.cs 里的假实现替代。 -->
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostApplication.cs" Link="HostApplication.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/ApprovalDialog.cs" Link="ApprovalDialog.cs" />
@@ -17,5 +18,6 @@
     <Compile Include="../../../windows/ComputerUse.WindowsHost/LaunchAtLogin.cs" Link="LaunchAtLogin.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/Updater.cs" Link="Updater.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/PrivateData.cs" Link="PrivateData.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/HostStartup.cs" Link="HostStartup.cs" />
   </ItemGroup>
 </Project>

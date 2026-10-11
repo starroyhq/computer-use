@@ -29,6 +29,7 @@ internal sealed class ApprovalDialog : Form
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = details.Title;
+        Icon = UiStyle.ApplicationIcon;
         Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5F);
         BackColor = UiStyle.Background;
         ForeColor = UiStyle.Text;

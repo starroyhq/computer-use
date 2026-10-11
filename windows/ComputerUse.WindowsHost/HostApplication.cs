@@ -14,6 +14,10 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private readonly Queue<JsonElement> _alerts = new();
     private readonly RegisteredWaitHandle? _showRegistration;
     private readonly RegisteredWaitHandle? _quitRegistration;
+    private readonly HostStartupStore _startup;
+    private readonly bool _showStartupErrors;
+    private bool _autoStartBlocked;
+    private string _startupState = "starting";
     private HostRuntime? _runtime;
     private bool _running;
     private bool _busy;
@@ -32,8 +36,11 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     /// <param name="showSignal">再次启动程序时由新进程触发，已运行的实例据此打开设置窗口。</param>
     /// <param name="quitSignal">安装或卸载程序经 --quit 触发：先停止服务，再像菜单里选择“退出”一样退出。</param>
     internal HostApplication(bool showWindow = true, string? dataDirectory = null, WaitHandle? showSignal = null,
-        WaitHandle? quitSignal = null)
+        WaitHandle? quitSignal = null, HostStartupStore? startup = null)
     {
+        _startup = startup ?? new HostStartupStore(dataDirectory);
+        _showStartupErrors = showWindow;
+        PublishStartupState("starting");
         var settings = new HostSettingsStore(dataDirectory ?? PrivateData.DirectoryPath);
         Updates = new UpdateService(AppContext.BaseDirectory, settings);
         _window = new SettingsForm(this);
@@ -57,7 +64,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(L10n.T(Msg.TrayQuit), null, async (_, _) => await ExitAsync());
         menu.Opening += (_, _) => RefreshTray();
-        _tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "Computer Use", Visible = true, ContextMenuStrip = menu };
+        _tray = new NotifyIcon { Icon = UiStyle.TrayIcon, Text = "Computer Use", Visible = true, ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => _window.ShowPage();
         Updates.Changed += StateChanged;
 
@@ -72,6 +79,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
             else
             {
                 _exiting = true;
+                PublishExitState();
                 // 注销或关机时只能在 UI 线程同步等待。把释放放到线程池执行并限时，
                 // 否则 HostRuntime 的 await 需要回到这个被阻塞的 UI 线程，会互相等待。
                 var runtime = _runtime;
@@ -121,7 +129,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     {
         var text = $"Computer Use · {_status}";
         _tray.Text = text.Length <= 63 ? text : "Computer Use";
-        _tray.Icon = _running || _busy ? SystemIcons.Application : SystemIcons.Warning;
+        _tray.Icon = _running || _busy ? UiStyle.TrayIcon : SystemIcons.Warning;
         _pauseItem.Text = L10n.T(_paused ? Msg.TrayResume : Msg.TrayPause);
         _pauseItem.Enabled = IsRunning;
         _stopItem.Enabled = IsRunning || _busy;
@@ -148,6 +156,19 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
 
     // MARK: 服务
 
+    private void PublishStartupState(string state)
+    {
+        _startupState = state;
+        _startup.Write(state, _autoStartBlocked, state is "ready" or "paused" ? _runtime?.PipeName : null);
+    }
+
+    private void PublishExitState()
+    {
+        // A generic exit must not erase the user's earlier pause/emergency stop.
+        try { PublishStartupState(_autoStartBlocked ? (_startupState == "paused" ? "paused" : "stopped") : "exited"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+    }
+
     private async Task StartAsync()
     {
         if (_busy || _runtime is not null || _exiting) return;
@@ -156,21 +177,32 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         HostRuntime? next = null;
         try
         {
+            PublishStartupState("starting");
             next = new HostRuntime(message => PostEvent(next, message));
             _runtime = next;
             await next.StartAsync();
-            _running = true;
-            _paused = false;
-            SetStatus(L10n.T(Msg.StatusReady));
+            if (_stopAfterStart is null && !_exiting)
+            {
+                _running = true;
+                _paused = false;
+                // StartAsync completes only after the listener and discovery file exist.
+                PublishStartupState("ready");
+                SetStatus(L10n.T(Msg.StatusReady));
+            }
         }
         catch (Exception error)
         {
             _runtime = null;
             _running = false;
             if (next is not null) await next.DisposeAsync();
+            try { PublishStartupState("failed"); }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
             SetStatus(L10n.F(Msg.StatusStartFailed, error.Message));
-            _window.ShowPage(SettingsPage.Status);
-            MessageBox.Show(_window, error.Message, L10n.T(Msg.FailureLaunchTitle), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (_showStartupErrors)
+            {
+                _window.ShowPage(SettingsPage.Status);
+                MessageBox.Show(_window, error.Message, L10n.T(Msg.FailureLaunchTitle), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         finally
         {
@@ -193,9 +225,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         switch (eventValue.GetString())
         {
             case "ready":
-                _running = true;
-                _paused = false;
-                SetStatus(L10n.T(Msg.StatusReady));
+                // Worker readiness precedes pipe publication. StartAsync owns the
+                // lifecycle transition; late ready events cannot undo pause/stop.
                 break;
             case "status":
                 var status = String(message, "message");
@@ -208,7 +239,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 }
                 else SetStatus(status);
                 break;
-            case "fatal": _ = StopAsync(L10n.F(Msg.StatusRuntimeFault, String(message, "message"))); break;
+            case "fatal": _ = FailAsync(L10n.F(Msg.StatusRuntimeFault, String(message, "message"))); break;
             case "clients":
                 _clients = ParseClients(message);
                 StateChanged();
@@ -227,7 +258,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 if (_approvalDialog?.RequestId == requestId) _approvalDialog.Withdraw();
                 PresentNextAlert();
                 break;
-            default: _ = StopAsync(L10n.T(Msg.StatusUnknownEvent)); break;
+            default: _ = FailAsync(L10n.T(Msg.StatusUnknownEvent)); break;
         }
     }
 
@@ -263,7 +294,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         var kind = String(request, "event");
         var isPair = kind == "pair_request";
         var identifier = String(request, isPair ? "clientId" : "sessionId");
-        if (identifier.Length == 0) { _ = StopAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
+        if (identifier.Length == 0) { _ = FailAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
         ApprovalDetails details;
         if (isPair)
         {
@@ -309,7 +340,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                         clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier,
                         allApps: isPair && allow && Flag(request, "allApps") ? true : null);
                 }
-                catch { if (ReferenceEquals(_runtime, source)) await StopAsync(L10n.T(Msg.StatusSendDecisionFailed)); }
+                catch { if (ReferenceEquals(_runtime, source)) await FailAsync(L10n.T(Msg.StatusSendDecisionFailed)); }
             }
             PresentNextAlert();
         };
@@ -326,7 +357,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     {
         if (!_running || _runtime is null) return;
         try { await _runtime.SendControlAsync(command, clientId, sessionId); SetStatus(status); }
-        catch { await StopAsync(L10n.T(Msg.StatusSendControlFailed)); }
+        catch { await FailAsync(L10n.T(Msg.StatusSendControlFailed)); }
     }
 
     // MARK: 设置窗口与托盘菜单的操作
@@ -335,12 +366,37 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     {
         if (!IsRunning) return;
         var resume = _paused;
+        if (!resume)
+        {
+            _autoStartBlocked = true;
+            try { PublishStartupState("paused"); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                await FailAsync(L10n.T(Msg.StatusSendControlFailed));
+                return;
+            }
+        }
         await ControlAsync(resume ? "resume" : "pause", L10n.T(resume ? Msg.StatusReady : Msg.StatusPaused));
-        if (IsRunning) _paused = !resume;
+        if (IsRunning)
+        {
+            _paused = !resume;
+            _autoStartBlocked = !resume;
+            try { PublishStartupState(resume ? "ready" : "paused"); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            { await FailAsync(L10n.T(Msg.StatusSendControlFailed)); }
+        }
         StateChanged();
     }
 
-    public Task EmergencyStopAsync() => StopAsync(L10n.T(Msg.StatusEmergencyStopped));
+    public Task EmergencyStopAsync()
+    {
+        _autoStartBlocked = true;
+        // Persist before waiting for an in-flight start/stop. Failure to persist
+        // must never prevent the actual emergency stop.
+        try { PublishStartupState("stopped"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        return StopAsync(L10n.T(Msg.StatusEmergencyStopped));
+    }
     public Task RestartServicesAsync() => RestartAsync();
     public Task RevokeAsync(string clientId) => ControlAsync("revoke", L10n.T(Msg.StatusRevoked), clientId: clientId);
 
@@ -358,19 +414,34 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
             _httpStatus = null;
             StateChanged();
         }
-        catch { await StopAsync(L10n.T(Msg.StatusHttpFailed)); }
+        catch { await FailAsync(L10n.T(Msg.StatusHttpFailed)); }
     }
 
     private async Task RestartAsync()
     {
+        if (_busy || _exiting) return;
+        // A later emergency stop must win while disposal is awaiting the worker.
+        _autoStartBlocked = false;
         await StopAsync(L10n.T(Msg.StatusRestarting));
+        if (_autoStartBlocked || _exiting) return;
         await StartAsync();
+    }
+
+    private Task FailAsync(string status)
+    {
+        _startupState = "failed";
+        return StopAsync(status);
     }
 
     private async Task StopAsync(string status)
     {
         if (_busy) { _stopAfterStart = status; return; }
         _busy = true;
+        if (!_exiting)
+        {
+            try { PublishStartupState(_startupState == "failed" ? "failed" : "stopped"); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
         _running = false;
         _paused = false;
         _httpEnabled = false;
@@ -386,6 +457,11 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         finally
         {
             _busy = false;
+            if (_stopAfterStart is { } stopStatus)
+            {
+                _stopAfterStart = null;
+                SetStatus(stopStatus);
+            }
             StateChanged();
         }
     }
@@ -394,6 +470,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     {
         if (_exiting) return;
         _exiting = true;
+        PublishExitState();
         _showRegistration?.Unregister(null);
         _quitRegistration?.Unregister(null);
         Updates.Dispose();

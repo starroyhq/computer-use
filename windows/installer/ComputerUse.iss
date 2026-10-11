@@ -47,6 +47,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
+SetupIconFile={#SourcePath}..\..\assets\app-icon.ico
 SetupMutex=ComputerUseSetup
 Compression=lzma2
 SolidCompression=yes

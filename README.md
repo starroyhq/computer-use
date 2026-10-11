@@ -4,12 +4,13 @@
 
 让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
 
-**开发预览。** v0.6.0 提供 macOS ARM64、Windows ARM64 和 x64 的 ZIP 包，以及 macOS DMG 和 Windows 安装程序，见[安装正式版](#安装正式版)。也可按下文从源码构建。已验证范围见下表。
+**开发预览。** v0.6.1 提供 macOS ARM64、Windows ARM64 和 x64 的 ZIP 包，以及 macOS DMG 和 Windows 安装程序，见[安装正式版](#安装正式版)。也可按下文从源码构建。已验证范围见下表。
 
 ## 主要功能
 
 - **桌面操作**：窗口截图、辅助功能元素、点击、输入、快捷键、滚动和直线拖拽；支持程度取决于平台、应用和动作。
 - **Agent 接入**：stdio MCP、可选本机 HTTP MCP，以及可独立使用的 CLI。
+- **Windows 按需启动**：同一完整包的 CLI / stdio MCP 在首次需要宿主时启动后台服务并等待就绪；尊重暂停和紧急停止，不自动恢复。
 - **配对授权**：首次配对默认一次授权所有桌面应用，后续新增应用、窗口及重启无需重复批准；授权包含前台操作，默认仍在后台执行。支持撤销客户端、暂停和紧急停止，也可显式限制应用范围。
 - **动作记录**：每次操作使用新快照，通过请求 ID 查询结果；不自动重放结果不确定的动作。
 - **独立浏览器**：通过 Playwright 操作单独的 headless Chromium，不继承日常浏览器的登录状态。
@@ -30,14 +31,14 @@ Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright �
 
 ## 安装正式版
 
-从 [v0.6.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0) 下载对应平台的安装包：
+从 [v0.6.1 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.6.1) 下载对应平台的安装包：
 
-- **macOS（Apple Silicon）**：`computer-use-0.6.0-macos-arm64.dmg`，打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。也可下载 `computer-use-0.6.0-macos-arm64.zip` 并将解压后的 App 移入“应用程序”。正式发布作业分别对 App 与 DMG 使用 Developer ID 签名、Apple 公证和装订，通过校验后才发布。
-- **Windows**：`computer-use-0.6.0-windows-arm64-setup.exe` 或 `computer-use-0.6.0-windows-x64-setup.exe`，按系统架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。便携版可下载对应的 `computer-use-0.6.0-windows-<arm64|x64>.zip`，完整解压后运行 `ComputerUse.WindowsHost.exe`，见 [Windows 指南](docs/WINDOWS.md)。
+- **macOS（Apple Silicon）**：`computer-use-0.6.1-macos-arm64.dmg`，打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。也可下载 `computer-use-0.6.1-macos-arm64.zip` 并将解压后的 App 移入“应用程序”。正式发布作业分别对 App 与 DMG 使用 Developer ID 签名、Apple 公证和装订，通过校验后才发布。
+- **Windows**：`computer-use-0.6.1-windows-arm64-setup.exe` 或 `computer-use-0.6.1-windows-x64-setup.exe`，按系统架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。便携版可下载对应的 `computer-use-0.6.1-windows-<arm64|x64>.zip`，完整解压后运行 `ComputerUse.WindowsHost.exe`，见 [Windows 指南](docs/WINDOWS.md)。
 
-每个 ZIP、DMG 和安装程序都附有 `.sha256` 校验文件，每个平台另有 JSON 发布元数据。Windows 安装程序与便携包均未签名，SmartScreen 表现尚未实测；原生 x64 安装及从真实发布下载到完成安装版升级的完整流程仍待验证。
+每个 ZIP、DMG 和安装程序都附有 `.sha256` 校验文件，每个平台另有 JSON 发布元数据。Windows 安装程序与便携包均未签名，可能受到 SmartScreen 或 Smart App Control 的签名、信誉与系统策略限制；图标和按需启动不会解除这些限制，macOS Developer ID 也不适用于 Windows。相关系统提示、原生 x64 安装及从真实发布下载到完成安装版升级的完整流程仍待验证。
 
-安装后的系统权限步骤与下文相同。v0.6.0 新配对默认授权所有桌面应用，已有受限客户端保持原范围；要扩大范围，需撤销后重新配对一次。ZIP 继续用于 macOS 一键更新和 Windows 便携版；安装与桌面测试的具体范围见 [验证记录](docs/validation-results.md)。
+安装后的系统权限步骤与下文相同。从 v0.6.0 起，新配对默认授权所有桌面应用，已有受限客户端保持原范围；要扩大范围，需撤销后重新配对一次。ZIP 继续用于 macOS 一键更新和 Windows 便携版；安装与桌面测试的具体范围见 [验证记录](docs/validation-results.md)。
 
 ## 快速开始：从源码构建
 
@@ -101,6 +102,8 @@ node scripts/package-windows.mjs --arch x64
 
 按 [Windows 指南](docs/WINDOWS.md)完成一次全应用配对，再选择本机 Agent 的 stdio MCP，或 Mac 经 SSH 隧道连接 Windows HTTP MCP。默认不需要填写应用路径；显式用 `--app` 限定范围时，Windows 使用完整可执行文件路径，macOS 使用 Bundle ID。
 
+v0.6.1 中，同一完整 Windows 包的 CLI / stdio MCP 使用默认管道时，会在首次实际 RPC 前按需启动宿主并等待就绪；MCP 初始化和工具列表不启动宿主。暂停与紧停状态即使退出宿主也会阻止自动启动，需在本机恢复、重启服务，或在宿主退出后由用户重新打开 App。源码运行、macOS 和自定义 `--socket` 不自动启动。详细行为与 `--ensure-running` 排错命令见 [Windows 指南](docs/WINDOWS.md#按需启动与暂停保护)。
+
 ## 接入 Agent 与首次观察
 
 将 `config codex` 输出的 TOML 片段添加到 Codex 用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`。配置含绝对启动路径和 profile，不含凭据；项目不会自动修改 Agent 配置。详见 [Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
@@ -117,10 +120,12 @@ node scripts/package-windows.mjs --arch x64
 
 菜单栏图标（Windows 为托盘图标）显示服务状态，菜单只保留设置、暂停/恢复、紧急停止、重新启动、检查更新和退出。配对审批仍以弹窗出现；已配对客户端、授权范围和撤销在设置窗口的“客户端”页，本机 HTTP MCP 开关与 stdio 配置在“接入”页。“登录时启动”默认关闭，macOS 使用系统登录项，Windows 写入当前用户的启动项。
 
+v0.6.1 增加暖白与深炭色的光标 App 图标，覆盖 macOS App，以及 Windows EXE、托盘、窗口和安装器；macOS 菜单栏使用白色光标主体。图标不改变配对或系统权限。
+
 自动检查默认开启，每天最多一次，只读取本仓库 GitHub 上最新的正式版（不含草稿和预发布，也不降级），不上传使用数据；可在“更新”页关闭，或对某个版本选择“跳过”。检查优先使用 GitHub API；未认证的 API 每个 IP 每小时只能调用 60 次，用完或连不上时改读 github.com 的发布页，结果相同。下载的安装包必须与发布里的 SHA-256 校验文件和元数据一致，经 API 读取时还要与 GitHub 记录的摘要一致：
 
 - **macOS**：Developer ID 签名的正式版可一键安装。App 解压新版本后，确认 Bundle ID、版本、签名团队与当前 App 一致并通过 Gatekeeper 检查，经你确认后停止服务、在原位置替换并重新打开，系统权限和已配对客户端保持不变。App 被系统隔离运行（例如下载后未移动就直接打开）或所在文件夹不可写时，改为在访达中显示校验过的新版本，由你手动替换。源码构建的开发版本只能手动检查。
-- **Windows**：便携版（包括 v0.5.0 及更早版本）只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。v0.6.0 安装版支持下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。从真实发布下载到完成安装版升级的完整流程仍待验证。
+- **Windows**：便携版（包括 v0.5.0 及更早版本）只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。从 v0.6.0 起，安装版支持下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。从真实发布下载到完成安装版升级的完整流程仍待验证。
 
 两个宿主都通过内置 CLI 完成检查和下载，也可以直接运行 `computer-use update check`，见 [使用说明](docs/USAGE.md#检查更新--updates)。
 

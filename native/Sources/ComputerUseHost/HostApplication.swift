@@ -60,6 +60,13 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private let readerQueue = DispatchQueue(label: "com.starroy.computeruse.events")
     private var controlLease = ControlLease()
     private var statusText = tr(.statusNotStarted)
+    private lazy var statusCursorImage: NSImage? = {
+        guard let image = NSImage(contentsOf: paths.resources.appendingPathComponent("menu-bar-icon.png")) else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        // Keep the requested white glyph rather than letting template tinting change its color.
+        image.isTemplate = false
+        return image
+    }()
 
     private(set) var serviceState = ServiceState.stopped
     private(set) var clients: [ClientRecord] = []
@@ -184,7 +191,10 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         }
         let description = tr(.statusItemAccessibility, serviceStatus)
         guard let button = item.button else { return }
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
+        if serviceState == .ready, let image = statusCursorImage {
+            button.image = image
+            button.title = ""
+        } else if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
             image.isTemplate = true
             button.image = image
             button.title = ""

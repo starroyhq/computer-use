@@ -88,6 +88,8 @@ export async function verify(app) {
   for (const path of [
     'Contents/MacOS/ComputerUseHost',
     'Contents/Info.plist',
+    'Contents/Resources/app-icon.icns',
+    'Contents/Resources/menu-bar-icon.png',
     'Contents/Resources/bin/cua-driver',
     'Contents/Resources/bin/node',
     'Contents/Resources/bin/computer-use',
@@ -101,6 +103,9 @@ export async function verify(app) {
   run('/usr/bin/plutil', ['-lint', infoPlist]);
   if (run('/usr/bin/plutil', ['-extract', 'CFBundleIdentifier', 'raw', infoPlist]) !== BUNDLE_ID) {
     throw new Error(`Bundle identifier must be ${BUNDLE_ID}.`);
+  }
+  if (run('/usr/bin/plutil', ['-extract', 'CFBundleIconFile', 'raw', infoPlist]) !== 'app-icon.icns') {
+    throw new Error('Bundle icon must be app-icon.icns.');
   }
   await assertInternalLinks(app);
   let nativeCount = 0;
@@ -153,6 +158,8 @@ async function build(identity) {
     await cp(join(stage, 'cua', 'cua-driver'), join(binaries, 'cua-driver'));
     await cp(join(nativeDirectory, 'ComputerUseHost'), join(app, 'Contents', 'MacOS', 'ComputerUseHost'));
     await cp(join(ROOT, 'native', 'Info.plist'), join(app, 'Contents', 'Info.plist'));
+    await cp(join(ROOT, 'assets', 'app-icon.icns'), join(resources, 'app-icon.icns'));
+    await cp(join(ROOT, 'assets', 'menu-bar-icon.png'), join(resources, 'menu-bar-icon.png'));
     await cp(join(ROOT, 'dist'), join(resources, 'runtime'), { recursive: true });
     const dependencies = join(stage, 'dependencies');
     await mkdir(dependencies);

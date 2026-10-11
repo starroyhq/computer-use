@@ -104,6 +104,7 @@ internal sealed class SettingsForm : Form
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = L10n.T(Msg.SettingsTitle);
+        Icon = UiStyle.ApplicationIcon;
         Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5F);
         BackColor = UiStyle.Background;
         ForeColor = UiStyle.Text;

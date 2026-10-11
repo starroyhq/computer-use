@@ -25,6 +25,12 @@ internal static class Program
         }
         // 安装与卸载程序用：请当前会话里正在运行的托盘程序停止服务后退出，并等它退出。
         if (args.Length == 1 && args[0] == QuitArgument) return QuitRunningInstance();
+        if (args.Length == 1 && args[0] == HostStartup.EnsureArgument)
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            var ensureSuffix = InstanceSuffix();
+            return HostStartup.EnsureRunning(MutexName(ensureSuffix), SignalName("Ensure", ensureSuffix));
+        }
         // 登录时启动项带 --background：只在托盘运行，不打开设置窗口。
         var background = args.Length == 1 && args[0] == LaunchAtLogin.BackgroundArgument;
         if (args.Length != 0 && !background) return 2;
@@ -42,8 +48,12 @@ internal static class Program
         }
 
         using var quitSignal = OpenSignal(SignalName("Quit", suffix));
+        var startup = new HostStartupStore();
+        // Automatic launches cannot undo an earlier pause or emergency stop.
+        if (background && HostStartup.BlockingCode(startup.Read(), sameLiveProcess: false) is not null) return 1;
         ApplicationConfiguration.Initialize();
-        Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal, quitSignal: quitSignal));
+        Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal, quitSignal: quitSignal,
+            startup: startup));
         return 0;
     }
 

@@ -1,6 +1,9 @@
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO.Pipes;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -12,6 +15,12 @@ internal static class Program
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args.Length == 1 && args[0] == "--startup-state-checks")
+        {
+            CheckStandardHandleInheritance();
+            CheckStartupState();
+            return;
+        }
         if (args.Length == 2 && args[0] == "--live-update")
         {
             LiveUpdate(args[1]);
@@ -32,6 +41,9 @@ internal static class Program
         var screenshots = args.Length == 2 && args[0] == "--screenshots" ? args[1] : null;
         CheckTranslations();
         CheckHelpers();
+        CheckStandardHandleInheritance();
+        CheckStartupState();
+        CheckStartupLifecycle();
         var data = Path.Combine(Path.GetTempPath(), "cu-host-tests-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -54,6 +66,259 @@ internal static class Program
         {
             try { Directory.Delete(data, recursive: true); } catch { }
         }
+    }
+
+    private static void CheckStandardHandleInheritance()
+    {
+        using var input = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.None);
+        using var output = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.None);
+        using var error = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.None);
+        var kinds = new[] { -10, -11, -12 };
+        var original = kinds.Select(GetStdHandle).ToArray();
+        var temporary = new[] { input.SafePipeHandle.DangerousGetHandle(), output.SafePipeHandle.DangerousGetHandle(),
+            error.SafePipeHandle.DangerousGetHandle() };
+        try
+        {
+            for (var index = 0; index < kinds.Length; index++)
+            {
+                Check(SetHandleInformation(temporary[index], 1, 1), "test standard handle can be made inheritable");
+                Check(SetStdHandle(kinds[index], temporary[index]), "test standard handle can be installed");
+            }
+            HostStartup.PreventStandardHandleInheritance();
+            for (var index = 0; index < kinds.Length; index++)
+            {
+                Check(GetStdHandle(kinds[index]) == temporary[index], "startup does not replace standard handles");
+                Check(GetHandleInformation(temporary[index], out var flags) && (flags & 1) == 0,
+                    "startup clears inheritance without closing the standard handle");
+            }
+            output.WriteByte(0x41);
+            output.Flush();
+            HostStartup.PreventStandardHandleInheritance();
+            Check(SetStdHandle(-10, IntPtr.Zero) && SetStdHandle(-12, new IntPtr(-1)), "install absent GUI standard handles");
+            HostStartup.PreventStandardHandleInheritance();
+            Check(GetHandleInformation(temporary[1], out _), "absent stdin/stderr do not prevent usable JSON stdout");
+        }
+        finally
+        {
+            // Restore native handles before any harness logging or error reporting.
+            for (var index = 0; index < kinds.Length; index++)
+                if (!SetStdHandle(kinds[index], original[index])) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        Console.WriteLine("PASS: startup prevents inherited standard handles without closing or replacing them");
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int standardHandle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetStdHandle(int standardHandle, IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+    private static void CheckStartupState()
+    {
+        var failure = HostStartup.StartupFailureMessage(new FileNotFoundException("private-path-sentinel"));
+        Check(failure.Contains("FileNotFoundException, HRESULT=0x80070002") && !failure.Contains("private-path-sentinel"),
+            "startup diagnosis includes an error code without the exception message");
+        var nativeFailure = HostStartup.StartupFailureMessage(new System.ComponentModel.Win32Exception(5, "private-path-sentinel"));
+        Check(nativeFailure.Contains("Win32Exception, HRESULT=0x") && nativeFailure.Contains("Win32=5")
+            && !nativeFailure.Contains("private-path-sentinel"), "startup diagnosis retains the native code without private content");
+        var data = Path.Combine(Path.GetTempPath(), "cu-startup-tests-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new HostStartupStore(data);
+            Check(store.Read() is null, "missing startup state permits a first launch");
+            var missingData = Path.Combine(data, "not-created");
+            Check(new HostStartupStore(missingData, readOnly: true).Read() is null && !Directory.Exists(missingData),
+                "read-only startup permits a first launch without creating its data directory");
+            store.Write("paused", blocked: true);
+            var paused = store.Read()!;
+            Check(HostStartup.BlockingCode(paused, sameLiveProcess: false) == "paused", "pause blocks cold start after host exit");
+            store.Write("stopped", blocked: true);
+            Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) == "stopped", "emergency stop blocks cold start after host exit");
+            store.Write("failed", blocked: false);
+            Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: true) == "failed", "live failed host requires local restart");
+            Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) is null, "dead failed host does not permanently block launch");
+            store.Write("exited", blocked: false);
+            Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) is null, "normal exit permits cold start");
+            var statePath = Path.Combine(data, "host-state.json");
+            Check(PrivateData.FileLockName(statePath).StartsWith(@"Global\ComputerUse.PrivateData.")
+                && PrivateData.FileLockName(statePath) == PrivateData.FileLockName(statePath.ToUpperInvariant()),
+                "private state lock is global and normalizes Windows path casing");
+            var beforeAccess = new DirectoryInfo(data).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
+                .GetSecurityDescriptorBinaryForm();
+            using (var busyTemporary = new FileStream(Path.Combine(data, "unrelated.tmp"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                var readOnly = new HostStartupStore(data, readOnly: true);
+                Check(readOnly.Read() is { State: "exited" }, "helper reads state without scanning a busy unrelated temporary file");
+                var rejectedWrite = false;
+                try { readOnly.Write("ready", blocked: false); } catch (InvalidOperationException) { rejectedWrite = true; }
+                Check(rejectedWrite, "read-only startup cannot change a persisted stop");
+            }
+            Check(beforeAccess.SequenceEqual(new DirectoryInfo(data).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
+                .GetSecurityDescriptorBinaryForm()), "read-only startup preserves the data directory ACL");
+            using (var publishing = new FileStream(statePath, FileMode.Open, FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = PrivateData.OpenPrivateRead(statePath))
+            {
+                Check(JsonSerializer.Deserialize<HostStartupState>(reader, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                    is { State: "exited", AutoStartBlocked: false },
+                    "a reader shares the destination access held during atomic publication");
+            }
+            using (var reader = PrivateData.OpenPrivateRead(statePath))
+            {
+                // Exercise both ACL maintenance and the writer's owner check
+                // while the same reader used by startup discovery stays open.
+                PrivateData.EnsureDirectory(data);
+                store.Write("stopped", blocked: true);
+                var beforeReplace = JsonSerializer.Deserialize<HostStartupState>(reader, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                Check(beforeReplace is { State: "exited", AutoStartBlocked: false },
+                    "an open reader retains the complete old startup state after atomic replacement");
+                Check(store.Read() is { State: "stopped", AutoStartBlocked: true },
+                    "ACL checks and atomic replacement publish the stop while another reader is open");
+            }
+            var writer = Task.Run(() =>
+            {
+                for (var index = 0; index < 250; index++) store.Write(index % 2 == 0 ? "paused" : "stopped", blocked: true);
+            });
+            var reading = Task.Run(() =>
+            {
+                for (var index = 0; index < 1_000 || !writer.IsCompleted; index++)
+                {
+                    var observed = store.Read();
+                    Check(observed is { State: "paused" or "stopped", AutoStartBlocked: true },
+                        $"concurrent publication exposes a complete blocked state (state={observed?.State ?? "absent"}, blocked={observed?.AutoStartBlocked})");
+                }
+            });
+            Task.WhenAll(writer, reading).GetAwaiter().GetResult();
+            using (var held = new ManualResetEventSlim())
+            using (var release = new ManualResetEventSlim())
+            {
+                var holding = Task.Run(() =>
+                {
+                    using var mutex = new Mutex(false, PrivateData.FileLockName(statePath));
+                    mutex.WaitOne();
+                    try { held.Set(); release.Wait(); }
+                    finally { mutex.ReleaseMutex(); }
+                });
+                try
+                {
+                    Check(held.Wait(TimeSpan.FromSeconds(5)), "test owns the private state lock");
+                    var timedOut = false;
+                    try { _ = store.Read(); }
+                    catch (IOException error) when (error.HResult == unchecked((int)0x800705B4)) { timedOut = true; }
+                    Check(timedOut, "private state lock timeout fails explicitly instead of treating state as absent");
+                }
+                finally { release.Set(); holding.GetAwaiter().GetResult(); }
+            }
+            const string executable = @"C:\Apps\ComputerUse.WindowsHost.exe";
+            Check(HostStartup.MatchesProcess(paused, paused.ProcessId, paused.ProcessStartTimeUtcTicks, paused.SessionId,
+                executable, executable.ToLowerInvariant()), "Windows executable identity is case insensitive");
+            Check(!HostStartup.MatchesProcess(paused, paused.ProcessId, paused.ProcessStartTimeUtcTicks + 1, paused.SessionId,
+                executable, executable), "reused PID cannot validate stale startup state");
+            Check(!HostStartup.MatchesProcess(paused, paused.ProcessId + 1, paused.ProcessStartTimeUtcTicks, paused.SessionId,
+                executable, executable), "different PID cannot validate ready state");
+            Check(!HostStartup.MatchesProcess(paused, paused.ProcessId, paused.ProcessStartTimeUtcTicks, paused.SessionId + 1,
+                executable, executable), "another Windows session cannot validate ready state");
+            Check(!HostStartup.MatchesProcess(paused, paused.ProcessId, paused.ProcessStartTimeUtcTicks, paused.SessionId,
+                executable, @"C:\Other\ComputerUse.WindowsHost.exe"), "another executable cannot validate ready state");
+            File.WriteAllText(statePath, "{}");
+            var rejected = false;
+            try { _ = store.Read(); } catch (IOException) { rejected = true; }
+            Check(rejected, "invalid state fails closed instead of clearing a stop");
+        }
+        finally { Directory.Delete(data, recursive: true); }
+        Console.WriteLine("PASS: Windows startup state identity and persistence");
+    }
+
+    private static void CheckStartupLifecycle()
+    {
+        foreach (var pause in new[] { true, false })
+        {
+            var data = Path.Combine(Path.GetTempPath(), "cu-startup-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                using (var host = new HostApplication(showWindow: false, dataDirectory: data))
+                {
+                    Pump();
+                    var runtime = HostRuntime.Last!;
+                    var store = new HostStartupStore(data);
+                    Check(store.Read()!.State == "ready", "completed startup publishes ready");
+                    if (pause) host.TogglePauseAsync().GetAwaiter().GetResult();
+                    else host.EmergencyStopAsync().GetAwaiter().GetResult();
+                    runtime.Emit(new { @event = "ready" });
+                    Pump();
+                    Check(pause ? host.IsPaused : !host.IsRunning, "late worker ready cannot undo pause or stop");
+                    Invoke(host, "ExitAsync").GetAwaiter().GetResult();
+                    Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) == (pause ? "paused" : "stopped"),
+                        "exit preserves the earlier user block");
+                }
+                using (var manual = new HostApplication(showWindow: false, dataDirectory: data))
+                {
+                    // Program permits this new constructor only after an explicit manual
+                    // launch when a persisted block exists; background launch is rejected.
+                    Pump();
+                    Check(new HostStartupStore(data).Read() is { State: "ready", AutoStartBlocked: false },
+                        "explicit new local launch can clear a persisted user block");
+                    Invoke(manual, "ExitAsync").GetAwaiter().GetResult();
+                }
+            }
+            finally { Directory.Delete(data, recursive: true); }
+        }
+        var raceData = Path.Combine(Path.GetTempPath(), "cu-startup-race-" + Guid.NewGuid().ToString("N"));
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        HostRuntime.NextStart = gate.Task;
+        try
+        {
+            using var host = new HostApplication(showWindow: false, dataDirectory: raceData);
+            Pump();
+            var runtime = HostRuntime.Last!;
+            runtime.Emit(new { @event = "ready" });
+            Pump();
+            Check(!host.IsRunning && new HostStartupStore(raceData).Read()!.State == "starting",
+                "worker ready cannot publish readiness before full runtime startup");
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            Check(new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
+                "emergency stop persists while startup is still pending");
+            gate.SetResult();
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (host.IsBusy && DateTime.UtcNow < deadline) Pump();
+            Check(!host.IsBusy && !host.IsRunning && new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
+                "completion after emergency stop never publishes ready");
+            host.RestartServicesAsync().GetAwaiter().GetResult();
+            runtime.Emit(new { @event = "ready" });
+            Pump();
+            Check(host.IsRunning && !host.IsPaused && new HostStartupStore(raceData).Read() is { State: "ready", AutoStartBlocked: false },
+                "local restart recovers and ignores an old runtime's ready event");
+            var disposeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HostRuntime.NextDispose = disposeGate.Task;
+            var starts = HostRuntime.StartCount;
+            var restarting = host.RestartServicesAsync();
+            Check(host.IsBusy, "restart waits for disposal before launching another worker");
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            disposeGate.SetResult();
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (!restarting.IsCompleted && DateTime.UtcNow < deadline) Pump();
+            Check(restarting.IsCompleted, "restart disposal completes");
+            restarting.GetAwaiter().GetResult();
+            Check(!host.IsRunning && HostRuntime.StartCount == starts
+                && new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
+                "emergency stop during restart wins without starting a replacement");
+            Invoke(host, "ExitAsync").GetAwaiter().GetResult();
+            Check(HostStartup.BlockingCode(new HostStartupStore(raceData).Read(), sameLiveProcess: false) == "stopped",
+                "emergency stop during restart remains blocked across exit");
+        }
+        finally
+        {
+            HostRuntime.NextStart = null;
+            HostRuntime.NextDispose = null;
+            Directory.Delete(raceData, recursive: true);
+        }
+        Console.WriteLine("PASS: Windows startup lifecycle, late ready, and stop during startup");
     }
 
     private static void CheckAuthorizationLifecycle(HostApplication host)
@@ -234,7 +499,7 @@ internal static class Program
     private static void CheckSettingsInteractions(HostApplication host)
     {
         var window = (SettingsForm)Field(host, "_window")!;
-        Event(host, new { @event = "ready" });
+        Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
         window.ShowPage(SettingsPage.Status);
         Pump();
         var pause = ControlField<Button>(window, "_pause");
@@ -306,7 +571,7 @@ internal static class Program
             foreach (var language in new[] { false, true })
             {
                 L10n.Chinese = language;
-                Event(host, new { @event = "ready" });
+                Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
                 using var window = new SettingsForm(host);
                 var expected = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T);
                 Check(window.PageTitles.SequenceEqual(expected), "sidebar titles match the selected language");
@@ -329,7 +594,7 @@ internal static class Program
                 }
             }
         }
-        finally { L10n.Chinese = chinese; Event(host, new { @event = "ready" }); }
+        finally { L10n.Chinese = chinese; Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) }); }
         Console.WriteLine("PASS: Windows bilingual settings layouts at normal and minimum sizes");
     }
 
@@ -629,7 +894,7 @@ internal static class Program
             {
                 L10n.Chinese = language;
                 var prefix = language ? "zh" : "en";
-                Event(host, new { @event = "ready" });
+                Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
                 Event(host, new
                 {
                     @event = "clients", clients = new[]
@@ -667,7 +932,7 @@ internal static class Program
                 }
                 foreach (var allApps in new[] { true, false })
                 {
-                    Event(host, new { @event = "ready" });
+                    Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
                     var id = $"screenshot-{prefix}-{allApps}";
                     Event(host, new
                     {
@@ -688,7 +953,7 @@ internal static class Program
             installed.SetValue(host.Updates, originalInstalled);
             check.SetValue(host.Updates, originalCheck);
             phase.SetValue(host.Updates, originalPhase);
-            Event(host, new { @event = "ready" });
+            Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
         }
         Console.WriteLine($"Saved bilingual settings and pairing screenshots to {directory}");
     }
@@ -736,15 +1001,32 @@ namespace ComputerUse.WindowsHost
         internal static readonly List<bool?> AllAppsAcknowledgments = [];
         internal static int StartCount { get; private set; }
         internal static int DisposeCount { get; private set; }
+        internal static HostRuntime? Last { get; private set; }
+        internal static Task? NextStart { get; set; }
+        internal static Task? NextDispose { get; set; }
+        private readonly Action<JsonElement> _onEvent;
         internal string PipeName => "isolated-test";
-        internal HostRuntime(Action<JsonElement> onEvent) { }
-        internal Task StartAsync() { StartCount++; return Task.CompletedTask; }
+        internal HostRuntime(Action<JsonElement> onEvent) { _onEvent = onEvent; Last = this; }
+        internal Task StartAsync()
+        {
+            StartCount++;
+            var task = NextStart ?? Task.CompletedTask;
+            NextStart = null;
+            return task;
+        }
+        internal void Emit(object message) => _onEvent(JsonSerializer.SerializeToElement(message));
         internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null)
         {
             Commands.Add(command + ":" + (clientId ?? sessionId));
             AllAppsAcknowledgments.Add(allApps);
             return Task.CompletedTask;
         }
-        public ValueTask DisposeAsync() { DisposeCount++; return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            var task = NextDispose ?? Task.CompletedTask;
+            NextDispose = null;
+            return new ValueTask(task);
+        }
     }
 }

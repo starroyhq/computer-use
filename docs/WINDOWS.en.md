@@ -4,17 +4,19 @@
 
 The locally installed ARM64 build using `com.starroy.computeruse` passed limited acceptance on one **interactive Windows 11 ARM64 VM desktop** on 2026-10-10: one all-app pairing, three windows across two fixtures, 7 background input rounds, pause, resume, emergency stop, restart, revocation and installation over an existing local build. The earlier 66 fixture input cases and one real Mac Codex model regression remain historical evidence. Native x64 acceptance remains pending. See the [validation record](validation-results.md) (Chinese) for full boundaries. A Windows agent can connect through stdio MCP; a Mac can connect through SSH to Windows HTTP MCP, which listens only on `127.0.0.1:47631`. Do not open this port to the LAN. The installer and the portable package are both unsigned. Elevated applications and the UAC secure desktop are unsupported.
 
-Version 0.6.0 targets desktop compatibility with Windows 10 version 1809 (build 17763) and later, including Windows 11, with x64 and ARM64 packages. The installer minimum matches the WinForms target `net10.0-windows10.0.17763.0`. **Windows 10 acceptance on a real system is still pending**: allowing installation does not establish desktop correctness.
+Since v0.6.0, desktop compatibility targets Windows 10 version 1809 (build 17763) and later, including Windows 11, with x64 and ARM64 packages. The installer minimum matches the WinForms target `net10.0-windows10.0.17763.0`. **Windows 10 acceptance on a real system is still pending**: allowing installation does not establish desktop correctness.
 
 The isolated browser has a separate boundary: the current Playwright backend's [upstream requirement is Windows 11 or later](https://playwright.dev/docs/intro#system-requirements). Windows 10 ARM64 lacks x64 emulation and cannot run the x64 Chromium used by this backend. All-desktop-application approval does not include the isolated browser, and the Windows 10 desktop compatibility target does not establish browser compatibility.
 
 ## Install and uninstall
 
-Download `computer-use-0.6.0-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.6.0](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0). For a portable copy, download `computer-use-0.6.0-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
+Download `computer-use-0.6.1-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.6.1](https://github.com/starroyhq/computer-use/releases/tag/v0.6.1). For a portable copy, download `computer-use-0.6.1-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
 
 Installers are available starting with v0.6.0; v0.5.0 and earlier provide only portable packages. Installation over an existing local ARM64 build has been tested. The complete flow from downloading a real release to completing an installer upgrade, native x64 installation and SmartScreen behavior remain unverified; see the [validation record](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10) (Chinese).
 
-The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; a first install can choose another folder and upgrades keep the original one. It adds a Start menu shortcut, offers an optional desktop shortcut and can start the app when it finishes. Before installing, setup runs `ComputerUse.WindowsHost.exe --quit` so that a tray app running in the current session (installed or portable) stops its service and quits; version 0.5.0 and earlier do not support `--quit`, so the wizard asks you to quit from the tray menu and try again. The installer is unsigned, so SmartScreen may say "Windows protected your PC"; once you have confirmed it came from this project's Releases, choose More info → Run anyway.
+The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; a first install can choose another folder and upgrades keep the original one. It adds a Start menu shortcut, offers an optional desktop shortcut and can start the app when it finishes; silent installation skips that final-page launch. Before installing, setup runs `ComputerUse.WindowsHost.exe --quit` so that a tray app running in the current session (installed or portable) stops its service and quits; version 0.5.0 and earlier do not support `--quit`, so the wizard asks you to quit from the tray menu and try again.
+
+Windows installers and portable packages remain unsigned. SmartScreen or Smart App Control (SAC) may warn or block execution based on signing, reputation and system policy. The new icons and on-demand startup do not remove those restrictions; macOS Developer ID and Apple notarization do not sign Windows packages. Keep the exact system message and follow local or organizational policy. Restarting, disabling protection or changing agent tool approval is not a general fix for a system block.
 
 Uninstall from Settings → Apps. The uninstaller first has the tray app stop its service and quit, then removes the install folder and a sign-in startup entry that points to it. Pairing credentials, settings and logs in `%LOCALAPPDATA%\Computer Use` are kept; delete that folder yourself when you no longer need them.
 
@@ -27,6 +29,24 @@ Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
 When you move from a portable copy to the installer, the program location changes, so regenerate agent configuration from the new location; pairing credentials stay valid.
 
 Either way, runtime components are bundled; build tools are not required to run the package. Start in your interactive login session. Packages do not include pairing credentials: each user must create and approve their own pairing.
+
+## On-demand startup and pause protection
+
+Complete Windows packages in v0.6.1 support on-demand startup. CLI and stdio MCP calls made with the package's own `bin\node.exe runtime\cli.js` first probe the default pipe. If unavailable, they invoke the same package’s startup check, which starts a host only when none is running and no pause/stop blocks it, then waits for readiness before the original RPC is sent. MCP `initialize` and `tools/list` neither connect to the runtime nor launch the tray app; the first actual tool call needs the host. Initial pairing still requires local approval and startup does not create a grant.
+
+This requires the current user's interactive login desktop, not a service account or Session 0. Source execution, macOS, a custom `--socket`, HTTP and SSH tunnels do not use this automatic startup path. It does not search PATH or other installation folders for a host. Regenerate agent configuration after moving the package.
+
+Pause and emergency stop are recorded in the current user's private `host-state.json` and continue to block automatic and sign-in startup after the tray app exits. The user must resume or restart services locally, or deliberately open the app after it has exited. Opening an already-running host only shows Settings and does not resume its service. The helper also leaves an existing failed or stopped host for local recovery. A startup failure sends no original business request; a connection failure after dispatch still has an uncertain outcome and is never automatically replayed.
+
+To check startup separately, run this in PowerShell from the complete installed or portable folder:
+
+```powershell
+& .\ComputerUse.WindowsHost.exe --ensure-running | Out-String
+```
+
+The helper waits up to 35 seconds and writes exactly one JSON line to stdout. Success is `{"ok":true,"state":"ready"}` with exit code 0. Failure exits nonzero and returns `ok: false`, `code` and `message`; codes are `paused`, `stopped`, `failed`, `non_interactive`, `timeout` or `launch_failed`. Success requires a matching session and host process identity plus a successful probe of the published pipe; an EXE process alone does not establish readiness. This command neither approves pairing nor resumes a pause or emergency stop, and it cannot remove Windows system blocks.
+
+This section describes interface behavior. See the [validation record](validation-results.md) for actual v0.6.1 build, VM and CI results; historical desktop acceptance does not automatically cover the new startup path.
 
 ## Build and start from source
 
@@ -55,11 +75,13 @@ The result is `artifacts\Computer Use Windows x64 Setup.exe`. `--smoke-test` ins
 
 Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder.
 
-Version 0.6.0 uses a sidebar with six sections: Status, Clients, Connect, General, Updates and About. Emergency Stop stays visible on every page. Status shows the service and pairing count and links to Connect, where you can copy the pairing command followed by stdio configuration. Clients shows scopes and offers revocation. The pairing dialog separates client identity, desktop scope, isolated browser access, foreground permission, duration and execution behavior. Long content scrolls while decision buttons stay visible. Deny remains the default button and has initial focus; closing the dialog or pressing Escape does not authorize access. Expiry or withdrawal closes the prompt, and an Allow decision requires runtime confirmation.
+v0.6.1 adds the complete warm-white and dark-charcoal cursor icon to the EXE, tray, settings and approval windows, and installer. The icon identifies the app; it does not indicate signing or change startup and authorization rules.
+
+Since v0.6.0, the window uses a sidebar with six sections: Status, Clients, Connect, General, Updates and About. Emergency Stop stays visible on every page. Status shows the service and pairing count and links to Connect, where you can copy the pairing command followed by stdio configuration. Clients shows scopes and offers revocation. The pairing dialog separates client identity, desktop scope, isolated browser access, foreground permission, duration and execution behavior. Long content scrolls while decision buttons stay visible. Deny remains the default button and has initial focus; closing the dialog or pressing Escape does not authorize access. Expiry or withdrawal closes the prompt, and an Allow decision requires runtime confirmation.
 
 ## Updates
 
-The Updates page checks stable GitHub releases once a day (this can be turned off), and downloads must match the release SHA-256 checksum file and metadata. Version 0.6.0 supports both installed and portable update flows; v0.5.0 and earlier use the portable flow. Downloading and running an installer from a real release still needs full acceptance. When the program folder is the install folder in the current user's uninstall registration, the copy counts as installed; otherwise it is portable:
+The Updates page checks stable GitHub releases once a day (this can be turned off), and downloads must match the release SHA-256 checksum file and metadata. Since v0.6.0, the app supports both installed and portable update flows; v0.5.0 and earlier use the portable flow. Downloading and running an installer from a real release still needs full acceptance. When the program folder is the install folder in the current user's uninstall registration, the copy counts as installed; otherwise it is portable:
 
 - **Installed**: when the release includes an installer, downloads and verifies it; choose Run Installer and follow the setup wizard. Setup first has the tray app stop its service and quit, installs over the original folder and can start the app when it finishes. Cancelling before you choose Install leaves the tray app running.
 - **Portable**: only downloads and verifies the ZIP and shows it in File Explorer. Quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid.
@@ -68,7 +90,7 @@ Paired clients and settings are stored in `%LOCALAPPDATA%\Computer Use` and are 
 
 ## Local Windows agent: stdio MCP
 
-New v0.6.0 pairings grant all desktop applications through one initial approval by default, without an application path; existing restricted clients do not gain a wider scope automatically. Local stdio and remote Mac access are alternatives; you do not need both.
+Since v0.6.0, new pairings grant all desktop applications through one initial approval by default, without an application path; existing restricted clients do not gain a wider scope automatically. Local stdio and remote Mac access are alternatives; you do not need both.
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # Installed copy or supplied ZIP: enter the install or extracted folder instead
@@ -153,7 +175,7 @@ Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an
 
 Add `-- --screenshots <folder>` to save PNGs of all six pages in both languages, the installed update state, narrow Clients/Connect/Updates windows, and all-application and multiple-path scoped pairing dialogs. These screenshots use simulated data and do not establish Windows 10 or desktop input acceptance. The separate `-- --live-update <old-package-folder>` mode checks and downloads the real latest release through that package's CLI, including its installer when the release has one (network required). See the [UI test instructions](../validation/windows/README.md).
 
-- `doctor` cannot connect: check that the tray runs in the logged-in desktop and that host and driver versions match.
+- `doctor` cannot connect: the bundled default-pipe client starts the host on demand. Keep the error code and check the complete package, interactive login session and host status. `paused` / `stopped` require local user recovery; inspect Settings for `failed`, and use the login desktop for `non_interactive`. For `timeout` / `launch_failed`, check system block messages, bundled components and matching host/driver versions. Do not delete state files or repeatedly launch the app to clear a user's pause.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.
 - `targets` blocked by MCP approval: check the Codex approval policy; dedicated noninteractive fixture tests can use the temporary setting above.
 - `401`: check the Mac JSON belongs to the current, unrevoked pairing and has mode `0600`. The helper should output one JSON header object; do not paste that credential-bearing output into logs or chat.

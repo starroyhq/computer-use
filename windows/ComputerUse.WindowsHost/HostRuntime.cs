@@ -136,28 +136,60 @@ internal sealed class HostRuntime : IAsyncDisposable
 
     private async Task AcceptConnectionsAsync(CancellationToken cancellation)
     {
+        // Reserve one of the 64 instances for the next listener. In particular,
+        // an EOF-only readiness probe must not close the last named-pipe handle
+        // before a successor exists, or the next CreateFile can see ENOENT.
+        using var slots = new SemaphoreSlim(MaxPipeInstances - 1, MaxPipeInstances - 1);
+        var handlers = new List<Task>();
+        NamedPipeServerStream? listener = null;
+        Task? accepting = null;
         try
         {
+            listener = CreatePipe();
+            accepting = ArmListener(listener, cancellation);
             while (!cancellation.IsCancellationRequested)
             {
-                NamedPipeServerStream pipe;
+                await slots.WaitAsync(cancellation);
+                NamedPipeServerStream? connected = null;
+                var handedOff = false;
                 try
                 {
-                    pipe = new NamedPipeServerStream(_pipeShortName, PipeDirection.InOut, MaxPipeInstances,
-                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-                        64 * 1024, 64 * 1024);
+                    try { await accepting; }
+                    catch (IOException error) when (error.HResult == unchecked((int)0x800700E8))
+                    {
+                        // ERROR_NO_DATA: a client connected and closed before
+                        // ConnectNamedPipe could arm. No request was dispatched.
+                        // Replace it before disposal so the name never vanishes.
+                        var abandoned = listener;
+                        listener = null;
+                        try
+                        {
+                            listener = CreatePipe();
+                            accepting = ArmListener(listener, cancellation);
+                        }
+                        finally { abandoned.Dispose(); }
+                        continue;
+                    }
+                    connected = listener;
+                    listener = null;
+                    // Create the successor before dispatch: handling an already
+                    // disconnected probe can complete synchronously, including Dispose.
+                    listener = CreatePipe();
+                    accepting = ArmListener(listener, cancellation);
+                    var id = Guid.NewGuid();
+                    _connections[id] = connected;
+                    handlers.RemoveAll(task => task.IsCompletedSuccessfully);
+                    handlers.Add(HandleConnectionWithSlotAsync(id, connected, slots, cancellation));
+                    handedOff = true;
                 }
-                catch (IOException) when (!_connections.IsEmpty)
+                finally
                 {
-                    // 所有实例都在处理请求时无法再建实例：这是暂时拥塞，等连接释放后重试，而不是停止服务。
-                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellation);
-                    continue;
+                    if (!handedOff)
+                    {
+                        connected?.Dispose();
+                        slots.Release();
+                    }
                 }
-                try { await pipe.WaitForConnectionAsync(cancellation); }
-                catch { pipe.Dispose(); throw; }
-                var id = Guid.NewGuid();
-                _connections[id] = pipe;
-                _ = HandleConnectionAsync(id, pipe, cancellation);
             }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
@@ -167,6 +199,32 @@ internal sealed class HostRuntime : IAsyncDisposable
             if (!_closing)
                 _event(JsonSerializer.SerializeToElement(new { @event = "fatal", message = "当前用户命名管道已停止；请重启服务。" }));
         }
+        finally
+        {
+            listener?.Dispose();
+            // Disposing the pending instance completes its overlapped wait. Observe
+            // that completion as well, including cancellation and a final probe EOF.
+            if (accepting is not null) try { await accepting; } catch { }
+            // Keep the semaphore alive until every handler has released its slot.
+            await Task.WhenAll(handlers);
+        }
+    }
+
+    private NamedPipeServerStream CreatePipe() => new(_pipeShortName, PipeDirection.InOut, MaxPipeInstances,
+        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 64 * 1024, 64 * 1024);
+
+    private static Task ArmListener(NamedPipeServerStream pipe, CancellationToken cancellation)
+    {
+        try { return pipe.WaitForConnectionAsync(cancellation); }
+        catch (IOException error) { return Task.FromException(error); }
+    }
+
+    private async Task HandleConnectionWithSlotAsync(Guid id, NamedPipeServerStream pipe, SemaphoreSlim slots,
+        CancellationToken cancellation)
+    {
+        try { await HandleConnectionAsync(id, pipe, cancellation); }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        finally { slots.Release(); }
     }
 
     private async Task HandleConnectionAsync(Guid connectionId, NamedPipeServerStream pipe, CancellationToken cancellation)

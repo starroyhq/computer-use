@@ -1,11 +1,15 @@
 ---
 name: computer-use
-description: Operate authorized macOS application windows and isolated browser pages through the local Computer Use CLI. Use for screenshot-based desktop interaction, GUI checks, and cross-application workflows when this runtime is installed.
+description: Operate authorized macOS or Windows application windows and isolated browser pages through the local Computer Use CLI. Use for screenshot-based desktop interaction, GUI checks, and cross-application workflows when this runtime is installed.
 ---
 
 # Computer Use
 
 Use the installed `computer-use` CLI. Read `computer-use --help` and `computer-use schema <method>` for the current arguments. CLI operation works without MCP. If connected through MCP, use the equivalent named tools directly.
+
+On Windows, use the complete package's own `bin/node.exe runtime/cli.js`. Starting with v0.6.1, its default-pipe client starts the same package's host on demand and waits for readiness before sending the first actual RPC. MCP initialization and tool listing do not start the host. Source execution, macOS, a custom `--socket` and remote HTTP do not auto-start it. Startup requires the current user's interactive desktop.
+
+For startup diagnostics, the same package's `ComputerUse.WindowsHost.exe --ensure-running` waits up to 35 seconds and returns exactly one JSON line: success is `{"ok":true,"state":"ready"}` with exit 0; failure contains `ok: false`, `code` and `message` with a nonzero exit. Preserve the error code. `paused` or `stopped` requires local user recovery, `failed` requires checking the host, `non_interactive` requires the signed-in desktop, and `timeout` or `launch_failed` requires inspecting startup/system errors. Never delete `host-state.json`, relaunch the GUI or change pipes to override a pause or emergency stop: they persist across host exit until the user resumes, restarts services or explicitly opens a new host. Existing failed/stopped hosts are not automatically restarted. Windows packages remain unsigned; startup and icons do not bypass SmartScreen, Smart App Control or agent tool approval. A startup failure sends no original RPC; never replay an action after an uncertain post-dispatch failure.
 
 ## Connect and observe
 

@@ -6,9 +6,9 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
-import { IpcClient } from './ipc.js';
+import { createRuntimeClient } from './runtime-client.js';
 import { CuError, errorResult } from './contracts.js';
-import { credentialDir, dataDir, defaultIpcPath } from './paths.js';
+import { credentialDir, dataDir } from './paths.js';
 import { atomicJson, privateDirectory, readJson } from './storage.js';
 import { schemas, type Method } from './schema.js';
 import { VERSION } from './version.js';
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
     return;
   }
   // 只在需要运行时的命令里解析 IPC 路径：Windows 上生成配置不应要求托盘程序正在运行。
-  const connect = async () => new IpcClient(values.socket ?? (await defaultIpcPath()));
+  const connect = () => createRuntimeClient(values.socket);
   if (command === 'pair') {
     if ((await readJson(credentialsPath)) !== undefined)
       throw new CuError('invalid_request', 'Profile already exists; choose another profile or remove it explicitly.');

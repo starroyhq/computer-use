@@ -84,12 +84,21 @@ jobs:
           $projects = @(
             'windows/ComputerUse.WindowsHost/ComputerUse.WindowsHost.csproj',
             'validation/windows/ComputerUse.WindowsFixture/ComputerUse.WindowsFixture.csproj',
-            'validation/windows/ComputerUse.WindowsHostTests/ComputerUse.WindowsHostTests.csproj'
+            'validation/windows/ComputerUse.WindowsHostTests/ComputerUse.WindowsHostTests.csproj',
+            'validation/windows/ComputerUse.WindowsTransportTests/ComputerUse.WindowsTransportTests.csproj'
           )
           foreach ($project in $projects) {
             dotnet build $project -c Release -r "win-$env:TARGET_ARCH"
             if ($LASTEXITCODE -ne 0) { throw "Build failed: $project" }
           }
+      - name: Test real Windows named-pipe transport without desktop access
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          dotnet run --project validation/windows/ComputerUse.WindowsTransportTests -c Release -r "win-$env:TARGET_ARCH" --no-build
+          if ($LASTEXITCODE -ne 0) { throw 'Windows transport regression tests failed' }
       - name: Record coverage boundaries
         shell: bash
         env:

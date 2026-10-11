@@ -4,12 +4,13 @@
 
 Give your existing AI agent screenshots and control of authorized application windows through MCP or CLI. Built on [Cua Driver](https://github.com/trycua/cua) and [Playwright](https://github.com/microsoft/playwright), Computer Use provides a macOS menu-bar app and a Windows tray host. Your chosen agent handles task understanding and planning.
 
-**Development preview.** Release v0.6.0 provides ZIP packages for macOS ARM64 and Windows ARM64 and x64, plus a macOS disk image and Windows installers; see [Install a release](#install-a-release). You can also build from source below. See the platform status below for tested coverage.
+**Development preview.** Release v0.6.1 provides ZIP packages for macOS ARM64 and Windows ARM64 and x64, plus a macOS disk image and Windows installers; see [Install a release](#install-a-release). You can also build from source below. See the platform status below for tested coverage.
 
 ## Features
 
 - **Desktop operations**: window screenshots, accessibility elements, clicks, typing, hotkeys, scrolling and straight drags; support depends on platform, application and action.
 - **Agent integration**: stdio MCP, optional loopback HTTP MCP and an independently usable CLI.
+- **Windows on-demand startup**: the CLI / stdio MCP from the same complete package starts the background host when first needed and waits for readiness; it never automatically resumes a pause or emergency stop.
 - **Pairing authorization**: one initial approval grants all desktop applications by default, including future apps and windows, and survives restarts. It includes foreground control while execution remains in the background by default. Revoke clients, pause or emergency-stop execution, or explicitly restrict the application scope.
 - **Action records**: fresh snapshots and request IDs for tracking outcomes; uncertain actions are never automatically replayed.
 - **Separate browser**: Playwright controls an isolated headless Chromium without inheriting your everyday browser's login state.
@@ -30,14 +31,14 @@ The current application identifier is `com.starroy.computeruse`. The local insta
 
 ## Install a release
 
-Download the package for your platform from [Release v0.6.0](https://github.com/starroyhq/computer-use/releases/tag/v0.6.0):
+Download the package for your platform from [Release v0.6.1](https://github.com/starroyhq/computer-use/releases/tag/v0.6.1):
 
-- **macOS (Apple Silicon)**: `computer-use-0.6.0-macos-arm64.dmg`. Open it, drag Computer Use to Applications, then open it from Applications. Alternatively, extract `computer-use-0.6.0-macos-arm64.zip` and move the app to Applications. The release workflow signs the app and DMG with Developer ID, notarizes and staples each separately, and verifies them before publication.
-- **Windows**: choose `computer-use-0.6.0-windows-arm64-setup.exe` or `computer-use-0.6.0-windows-x64-setup.exe` for your system architecture. The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; open it from the Start menu and uninstall it from Settings → Apps. For a portable copy, extract the complete matching `computer-use-0.6.0-windows-<arm64|x64>.zip` and run `ComputerUse.WindowsHost.exe`; see the [Windows guide](docs/WINDOWS.en.md).
+- **macOS (Apple Silicon)**: `computer-use-0.6.1-macos-arm64.dmg`. Open it, drag Computer Use to Applications, then open it from Applications. Alternatively, extract `computer-use-0.6.1-macos-arm64.zip` and move the app to Applications. The release workflow signs the app and DMG with Developer ID, notarizes and staples each separately, and verifies them before publication.
+- **Windows**: choose `computer-use-0.6.1-windows-arm64-setup.exe` or `computer-use-0.6.1-windows-x64-setup.exe` for your system architecture. The setup wizard installs for the current user without administrator rights, by default into `%LOCALAPPDATA%\Programs\Computer Use`; open it from the Start menu and uninstall it from Settings → Apps. For a portable copy, extract the complete matching `computer-use-0.6.1-windows-<arm64|x64>.zip` and run `ComputerUse.WindowsHost.exe`; see the [Windows guide](docs/WINDOWS.en.md).
 
-Each ZIP, DMG and installer has a `.sha256` checksum, and each platform has JSON release metadata. Windows installers and portable packages are unsigned; SmartScreen behavior has not been tested. Native x64 installation and the complete flow from downloading a real release to completing an installer upgrade remain unverified.
+Each ZIP, DMG and installer has a `.sha256` checksum, and each platform has JSON release metadata. Windows installers and portable packages remain unsigned and may be restricted by SmartScreen or Smart App Control signing, reputation and system policies. Icons and on-demand startup do not remove those restrictions; macOS Developer ID does not apply to Windows. Those system prompts, native x64 installation and the complete flow from downloading a real release to completing an installer upgrade remain unverified.
 
-System permissions work as described below. New v0.6.0 pairings grant all desktop applications by default; existing restricted clients keep their scope. Revoke and pair once again to expand it. ZIPs remain available for macOS one-step updates and Windows portable copies. See the [validation record](docs/validation-results.md) for installation and desktop coverage.
+System permissions work as described below. Since v0.6.0, new pairings grant all desktop applications by default; existing restricted clients keep their scope. Revoke and pair once again to expand it. ZIPs remain available for macOS one-step updates and Windows portable copies. See the [validation record](docs/validation-results.md) for installation and desktop coverage.
 
 ## Quick start: build from source
 
@@ -101,6 +102,8 @@ Run the host in your interactive login session. The portable package includes No
 
 Follow the [Windows guide](docs/WINDOWS.en.md) to pair all applications once, then choose local stdio MCP or Mac access to Windows HTTP MCP through an SSH tunnel. No application path is required by default. For an explicit `--app` restriction, Windows uses a full executable path and macOS uses a Bundle ID.
 
+In v0.6.1, the CLI / stdio MCP from the same complete Windows package starts the host on demand and waits for readiness before the first actual RPC over the default pipe. MCP initialization and tool listing do not start the host. Pause and emergency stop continue to block automatic startup after the host exits; the user must resume or restart services locally, or reopen the app after it has exited. Source execution, macOS and a custom `--socket` do not auto-start a host. See the [Windows guide](docs/WINDOWS.en.md#on-demand-startup-and-pause-protection) for details and the `--ensure-running` diagnostic command.
+
 ## Connect an agent and observe
 
 Add the TOML from `config codex` to Codex's user-level `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. It contains absolute launch paths and a profile, not credentials. The project does not edit agent configuration automatically. See the [Codex MCP setup guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
@@ -117,10 +120,12 @@ For manual CLI calls, browser setup and action parameters, see [Usage](docs/USAG
 
 The menu bar icon (the notification-area icon on Windows) shows the service state; its menu keeps only Settings, Pause/Resume, Emergency Stop, Restart, Check for Updates and Quit. Pairing approvals still appear as dialogs. Paired clients, their scopes and revocation live on the Clients page of Settings; the local HTTP MCP switch and the stdio configuration live on the Connect page. Opening at login is off by default; macOS uses a system login item and Windows a current-user startup entry.
 
+v0.6.1 adds a warm-white and dark-charcoal cursor app icon for the macOS app and Windows EXE, tray, windows and installer. The macOS menu bar uses a white cursor body. Icons do not change pairing or OS permissions.
+
 Automatic checks are on by default and run at most once a day. They read only this repository's latest stable GitHub release (never drafts, prereleases or older versions) and send no usage data. Turn them off on the Updates page or skip a version. Checks use the GitHub API first. The unauthenticated API allows 60 requests per hour per IP; when that is used up or the API is unreachable, the check reads the github.com release page instead, with the same result. A download must match the release's SHA-256 checksum file and metadata, and GitHub's recorded digest when read through the API:
 
 - **macOS**: signed releases install in one step. The app extracts the new version, confirms that its bundle identifier, version and signing team match the running app and that it passes Gatekeeper, then after your confirmation stops the service, replaces the app in place and reopens it; system permissions and paired clients are kept. When the system runs the app from a translocated location (for example, opened straight from Downloads) or its folder is not writable, the verified new version is shown in Finder for a manual replacement instead. Development builds from source only check manually.
-- **Windows**: portable copies, including version 0.5.0 and earlier, download and verify the ZIP and show it in File Explorer; quit the tray app, extract the package and replace the current folder with the new one, keeping the same path. An installed v0.6.0 copy can download and verify a new version's installer; choose Run Installer and follow the setup wizard. Setup first asks the tray app to stop its service and quit, upgrades keep the original install location, and paired clients and settings are kept. The complete flow from downloading a real release to completing an installer upgrade remains unverified.
+- **Windows**: portable copies, including version 0.5.0 and earlier, download and verify the ZIP and show it in File Explorer; quit the tray app, extract the package and replace the current folder with the new one, keeping the same path. An installed copy from v0.6.0 onward can download and verify a new version's installer; choose Run Installer and follow the setup wizard. Setup first asks the tray app to stop its service and quit, upgrades keep the original install location, and paired clients and settings are kept. The complete flow from downloading a real release to completing an installer upgrade remains unverified.
 
 Both hosts run the check and download through the bundled CLI; you can also run `computer-use update check` directly. See [Usage](docs/USAGE.md#检查更新--updates).
 

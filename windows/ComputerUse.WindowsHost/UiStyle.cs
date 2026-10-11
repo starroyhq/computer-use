@@ -8,6 +8,9 @@ internal enum ButtonTone { Normal, Primary, Danger }
 /// <summary>Shared WinForms styling; no Windows 11 materials or platform-specific controls.</summary>
 internal static class UiStyle
 {
+    // Loading the ICO bytes retains every size; extracting an HICON from the executable loses them.
+    internal static Icon ApplicationIcon { get; } = LoadApplicationIcon();
+    internal static Icon TrayIcon { get; } = new(ApplicationIcon, SystemInformation.SmallIconSize);
     internal static Color Background => SystemInformation.HighContrast ? SystemColors.Control : Color.FromArgb(244, 246, 249);
     internal static Color Surface => SystemColors.Window;
     internal static Color Text => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(32, 42, 57);
@@ -17,6 +20,13 @@ internal static class UiStyle
     internal static Color Danger => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(172, 46, 52);
     internal static Font HeadingFont { get; } = new(SystemFonts.MessageBoxFont!.FontFamily, 20F, FontStyle.Bold);
     internal static Font SectionFont { get; } = new(SystemFonts.MessageBoxFont!.FontFamily, 11F, FontStyle.Bold);
+
+    private static Icon LoadApplicationIcon()
+    {
+        using var stream = typeof(UiStyle).Assembly.GetManifestResourceStream("ComputerUse.AppIcon.ico")
+            ?? throw new InvalidOperationException("The application icon resource is missing.");
+        return new Icon(stream);
+    }
 
     internal static void StyleButton(Button button, ButtonTone tone = ButtonTone.Normal)
     {
