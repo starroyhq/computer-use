@@ -53,6 +53,15 @@ Native Windows interface, shown with UI test fixture data. [Screenshot sources](
 
 Official macOS packages are Developer ID signed and Apple notarized. Windows packages are currently unsigned and may be blocked by SmartScreen, Smart App Control or system policy; on-demand startup does not bypass those restrictions. Windows compatibility targets **Windows 10 1809+**; see [platforms and validation](#platforms-and-validation) for tested coverage.
 
+With Node.js 22+, you can also use the [npm launcher](https://www.npmjs.com/package/@starroy/computer-use):
+
+```sh
+npx @starroy/computer-use setup
+# Or: pnpm dlx @starroy/computer-use setup
+```
+
+It finds or verifies and installs the official App, then prints a setup prompt for your Agent. System permissions and first pairing approval still happen locally. Existing installations, profiles and paused states are preserved. See [npm / pnpm setup](docs/NPM.md) (Chinese).
+
 ## Connect an agent and observe
 
 ### 1. Open the App and grant system permissions
@@ -177,6 +186,7 @@ Browser integration tests need matching Chromium, installed with `pnpm exec play
 | --- | --- |
 | [Usage](docs/USAGE.md) | CLI, Skill setup, authorization scopes, browser, action semantics and troubleshooting |
 | [Windows guide](docs/WINDOWS.en.md) | Installation, local MCP, Mac access over SSH and pause protection |
+| [npm / pnpm setup](docs/NPM.md) | `@starroy/computer-use` launcher, App discovery and publishing setup (Chinese) |
 | [CLI Skill](skills/computer-use/SKILL.md) | Complete installation and operation guide for your Agent |
 | [Architecture](docs/ARCHITECTURE.md) | Hosts, authorization, sessions, snapshots and backend adapters |
 | [Building and packaging](scripts/README.md) · [CI](docs/CI.md) | Local builds, platform checks, signing and releases |

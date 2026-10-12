@@ -1,4 +1,4 @@
-param([string]$Hint = '')
+param([string]$Hint = '', [switch]$DiscoverOnly)
 # Standalone bootstrap v1. Discovery/installation only; never starts the Host.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -197,6 +197,10 @@ try {
     $architecture = Get-NativeArchitecture
     $package = Get-Installations $Hint $architecture
     if ($package) { Write-Result $package $architecture $false; return }
+    if ($DiscoverOnly) {
+        [ordered]@{ platform = "windows-$architecture"; found = $false } | ConvertTo-Json -Compress
+        return
+    }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $mutex = [Threading.Mutex]::new($false, "Local\ComputerUseBootstrapInstall-$sid")
     try { $locked = $mutex.WaitOne(35000) } catch [Threading.AbandonedMutexException] { $locked = $true }

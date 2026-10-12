@@ -72,7 +72,9 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 fail() { printf 'Computer Use: %s\n' "$*" >&2; exit 1; }
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail 'This script requires macOS.'
 [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || fail 'Only Apple Silicon macOS is supported.'
-[ "$#" -le 1 ] || fail 'Usage: bootstrap-macos.sh [APP_OR_CLI_HINT]'
+discover_only=0
+if [ "${1:-}" = --discover-only ]; then discover_only=1; shift; fi
+[ "$#" -le 1 ] || fail 'Usage: bootstrap-macos.sh [--discover-only] [APP_OR_CLI_HINT]'
 work=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/computer-use-bootstrap.XXXXXX")
 lock="$HOME/.computer-use-bootstrap.lock"
 locked=0
@@ -207,6 +209,7 @@ request() {
 # Entry point. Existing installations are returned without network access or Host execution.
 app=$(discover "${1:-}")
 if [ -n "$app" ]; then json result "$app" false; exit 0; fi
+if [ "$discover_only" = 1 ]; then printf '{"platform":"macos-arm64","found":false}\n'; exit 0; fi
 for attempt in {1..35}; do
   if /bin/mkdir -m 700 "$lock" 2>/dev/null; then locked=1; break; fi
   [ ! -L "$lock" ] && [ -d "$lock" ] && [ "$(/usr/bin/stat -f %u "$lock")" = "$(/usr/bin/id -u)" ] || fail 'Unsafe bootstrap lock path.'
@@ -263,7 +266,7 @@ Run in the signed-in user’s normal PowerShell on Windows 10 build 17763 or new
 
 <!-- computer-use-bootstrap:windows -->
 ```powershell
-param([string]$Hint = '')
+param([string]$Hint = '', [switch]$DiscoverOnly)
 # Standalone bootstrap v1. Discovery/installation only; never starts the Host.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -462,6 +465,10 @@ try {
     $architecture = Get-NativeArchitecture
     $package = Get-Installations $Hint $architecture
     if ($package) { Write-Result $package $architecture $false; return }
+    if ($DiscoverOnly) {
+        [ordered]@{ platform = "windows-$architecture"; found = $false } | ConvertTo-Json -Compress
+        return
+    }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $mutex = [Threading.Mutex]::new($false, "Local\ComputerUseBootstrapInstall-$sid")
     try { $locked = $mutex.WaitOne(35000) } catch [Threading.AbandonedMutexException] { $locked = $true }

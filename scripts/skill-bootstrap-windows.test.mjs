@@ -156,6 +156,7 @@ function Start-Process {
     credentialPath: join(home, 'Computer Use', 'credentials', 'default.json'),
     requests,
     run: env => powershell(copy, env),
+    discover: hint => powershell(`& {\n${copy}\n} -DiscoverOnly${hint === undefined ? '' : ` -Hint ${quote(hint)}`}`),
     source,
     copy,
   };
@@ -168,6 +169,44 @@ if ($errors.Count) { throw ($errors | Out-String) }
 'parsed'`);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'parsed');
+});
+
+test('Windows discovery-only returns a missing result without downloading or installing', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  const result = await f.discover();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { platform: `windows-${f.arch}`, found: false });
+  await assert.rejects(readFile(join(f.packagePath, 'package.json')), /ENOENT/);
+  assert.equal(f.requests.length, 0);
+});
+
+test('Windows discovery-only returns the unchanged result for standard and explicit installations', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  await fakePackage(f.packagePath, f.arch, '0.6.1');
+  const normal = await f.run();
+  assert.equal(normal.code, 0, normal.stderr);
+  for (const hint of [undefined, join(f.packagePath, 'runtime', 'cli.js')]) {
+    const result = await f.discover(hint);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), JSON.parse(normal.stdout));
+  }
+  assert.equal(f.requests.length, 0);
+});
+
+test('Windows discovery-only rejects stale and different-architecture hints', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  const missing = await f.discover(join(f.directory, 'missing', 'runtime', 'cli.js'));
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /hinted package is missing, incomplete or for another architecture/);
+  const wrongArch = f.arch === 'arm64' ? 'x64' : 'arm64';
+  await writeFile(
+    join(f.source, 'build-receipt.json'),
+    JSON.stringify({ owner: `computer-use-windows-${wrongArch}-package-v1`, arch: `win-${wrongArch}` }),
+  );
+  const wrong = await f.discover(f.source);
+  assert.equal(wrong.code, 1);
+  assert.match(wrong.stderr, /hinted package is missing, incomplete or for another architecture/);
+  assert.equal(f.requests.length, 0);
 });
 
 test('Windows clean bootstrap uses native architecture and preserves an existing profile on rerun', { skip: !windows }, async t => {
@@ -256,7 +295,7 @@ ${fixture.copy}
 
 test('existing Windows v0.6.1 with a quoted CLI hint needs no network or process execution', { skip: !windows }, async t => {
   const f = await fixture(t, { installedVersion: '0.6.1' });
-  const source = f.copy.replace("param([string]$Hint = '')", `param([string]$Hint = ${quote(join(f.source, 'runtime', 'cli.js'))})`);
+  const source = `& {\n${f.copy}\n} -Hint ${quote(join(f.source, 'runtime', 'cli.js'))}`;
   const result = await powershell(source);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).installed, false);
@@ -276,9 +315,10 @@ test('an incomplete Windows package blocks installation without changing existin
   await mkdir(f.packagePath, { recursive: true });
   const marker = join(f.packagePath, 'keep-me.txt');
   await writeFile(marker, 'existing user work');
-  const result = await f.run();
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /incomplete, unknown or different-architecture/);
+  for (const result of [await f.run(), await f.discover()]) {
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /incomplete, unknown or different-architecture/);
+  }
   assert.equal(await readFile(marker, 'utf8'), 'existing user work');
   assert.equal(f.requests.length, 0);
 });

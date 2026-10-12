@@ -53,6 +53,15 @@ Windows 原生界面，截图使用 UI 测试演示数据。[截图来源](docs/
 
 macOS 正式包已使用 Developer ID 签名并经过 Apple 公证。Windows 包目前未签名，可能被 SmartScreen、Smart App Control 或系统策略拦截，按需启动不会绕过这些限制。Windows 兼容目标为 **Windows 10 1809+**，实测范围见[平台与验证](#平台与验证)。
 
+已有 Node.js 22+ 时，也可以使用 [npm 入口](https://www.npmjs.com/package/@starroy/computer-use)：
+
+```sh
+npx @starroy/computer-use setup
+# 或：pnpm dlx @starroy/computer-use setup
+```
+
+它会发现或校验安装官方 App，并输出可交给 Agent 的接入提示词。首次系统授权和配对仍在本机完成；已有 App、profile 和暂停状态会被保留。详见 [npm / pnpm 接入](docs/NPM.md)。
+
 ## 接入 Agent 与首次观察
 
 ### 1. 打开 App，完成系统授权
@@ -177,6 +186,7 @@ ARM64 将参数改为 `--arch arm64`，产物目录改为 `Computer Use Windows 
 | --- | --- |
 | [使用说明](docs/USAGE.md) | CLI、Skill 接入、授权范围、浏览器、动作语义与排错 |
 | [Windows 指南](docs/WINDOWS.md) | 安装、本机 MCP、Mac 经 SSH 接入与暂停保护 |
+| [npm / pnpm 接入](docs/NPM.md) | `@starroy/computer-use` 轻量安装入口、CLI 转发、包校验与发布配置 |
 | [CLI Skill](skills/computer-use/SKILL.md) | 可交给 Agent 的完整安装与操作指南 |
 | [架构](docs/ARCHITECTURE.md) | 宿主、授权、会话、快照与后端适配 |
 | [构建与打包](scripts/README.md) · [CI](docs/CI.md) | 本地构建、跨平台检查、签名与发布 |

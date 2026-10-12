@@ -184,6 +184,47 @@ test('existing v0.6.1 and a quoted Unicode path are found without executing or d
   assert.deepEqual(await f.logs(), []);
 });
 
+test('macOS discovery-only returns a missing result without downloading or taking an installation lock', { skip: !mac }, async t => {
+  const f = await fixture(t);
+  const lock = join(f.home, '.computer-use-bootstrap.lock');
+  const absent = await f.run('--discover-only');
+  assert.equal(absent.code, 0, absent.stderr);
+  assert.deepEqual(JSON.parse(absent.stdout), { platform: 'macos-arm64', found: false });
+  await assert.rejects(stat(lock), /ENOENT/);
+  await mkdir(lock, { mode: 0o700 });
+  const held = await f.run('--discover-only');
+  assert.equal(held.code, 0, held.stderr);
+  assert.deepEqual(JSON.parse(held.stdout), { platform: 'macos-arm64', found: false });
+  assert.ok((await stat(lock)).isDirectory());
+  assert.deepEqual(await f.logs(), []);
+});
+
+test('macOS discovery-only preserves the existing result for standard and explicit installations', { skip: !mac }, async t => {
+  const f = await fixture(t);
+  const app = join(f.applications, 'Computer Use.app');
+  await fakeApp(app);
+  const normal = await f.run();
+  assert.equal(normal.code, 0, normal.stderr);
+  for (const args of [[], [join(app, 'Contents/Resources/bin/computer-use')]]) {
+    const result = await f.run('--discover-only', ...args);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), JSON.parse(normal.stdout));
+  }
+  assert.deepEqual(await f.logs(), []);
+});
+
+test('macOS discovery-only rejects missing and invalid explicit hints instead of reporting no installation', { skip: !mac }, async t => {
+  const f = await fixture(t);
+  const missing = await f.run('--discover-only', join(f.directory, 'missing.app'));
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /hinted App is missing/);
+  await writeFile(join(f.app, 'Contents/Resources/build-receipt.json'), JSON.stringify({ owner: 'computer-use-package-v1', arch: 'x64' }));
+  const wrongArchitecture = await f.run('--discover-only', f.app);
+  assert.equal(wrongArchitecture.code, 1);
+  assert.match(wrongArchitecture.stderr, /hinted App is incomplete/);
+  assert.deepEqual(await f.logs(), []);
+});
+
 test('App-exported bundle, runtime CLI and embedded Node hints discover the same package', { skip: !mac }, async t => {
   const f = await fixture(t);
   const app = join(f.applications, 'Computer Use.app');
@@ -223,14 +264,18 @@ test('multiple packages require an explicit choice and incomplete packages are p
   const f = await fixture(t);
   await fakeApp(join(f.applications, 'Computer Use.app'));
   await fakeApp(join(f.home, 'Applications', 'Computer Use.app'));
-  const multiple = await f.run();
-  assert.equal(multiple.code, 1);
-  assert.match(multiple.stderr, /Multiple installations/);
+  for (const args of [[], ['--discover-only']]) {
+    const multiple = await f.run(...args);
+    assert.equal(multiple.code, 1);
+    assert.match(multiple.stderr, /Multiple installations/);
+  }
   await rm(join(f.home, 'Applications'), { recursive: true });
   await rm(join(f.applications, 'Computer Use.app', 'Contents/Resources/bin/node'));
-  const incomplete = await f.run();
-  assert.equal(incomplete.code, 1);
-  assert.match(incomplete.stderr, /incomplete or unknown/);
+  for (const args of [[], ['--discover-only']]) {
+    const incomplete = await f.run(...args);
+    assert.equal(incomplete.code, 1);
+    assert.match(incomplete.stderr, /incomplete or unknown/);
+  }
   assert.deepEqual(await f.logs(), []);
 });
 

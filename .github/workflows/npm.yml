@@ -1,0 +1,202 @@
+name: npm launcher
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - packages/npm/**
+      - scripts/package-npm*
+      - scripts/skill-bootstrap*
+      - skills/computer-use/**
+      - package.json
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_NOTICES.md
+      - .github/workflows/npm.yml
+      - .github/scripts/npm-release*
+  push:
+    branches: [main]
+    tags: ['npm-v*']
+    paths:
+      - packages/npm/**
+      - scripts/package-npm*
+      - scripts/skill-bootstrap*
+      - skills/computer-use/**
+      - package.json
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_NOTICES.md
+      - .github/workflows/npm.yml
+      - .github/scripts/npm-release*
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified tarball to npm (requires configured Trusted Publisher)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Launcher ${{ matrix.platform }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            arch: arm64
+            node: 24.21.0
+          - platform: windows-x64
+            os: windows-2025
+            arch: x64
+            node: 24.21.0
+          - platform: windows-arm64
+            os: windows-11-arm
+            arch: arm64
+            node: 24.21.0
+          - platform: launcher-compatibility-only
+            os: ubuntu-24.04
+            arch: x64
+            node: '22'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Test launcher and package isolation without installing dependencies
+        shell: bash
+        run: node --test packages/npm/test/*.test.mjs scripts/package-npm.test.mjs .github/scripts/npm-release.test.mjs
+      - name: Test maintained bootstrap resources
+        if: matrix.node != '22'
+        run: node --test scripts/skill-bootstrap.test.mjs scripts/skill-bootstrap-windows.test.mjs
+      - name: Build the standalone package
+        run: node scripts/package-npm.mjs
+      - name: Verify packed command through npm without lifecycle scripts or network
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(node -p "'./artifacts/npm/starroy-computer-use-' + JSON.parse(require('fs').readFileSync('packages/npm/package.json', 'utf8')).version + '.tgz'")
+          npm exec --offline --ignore-scripts --yes --package "$archive" -- computer-use --help
+          npm exec --offline --ignore-scripts --yes --package "$archive" -- computer-use --version
+      - name: Record coverage boundaries
+        shell: bash
+        run: |
+          echo 'Launcher fixtures, archive isolation and packaged --help/--version passed. Desktop permission, pairing and real input are separate acceptance checks; the Node 22 Linux job does not provide a Linux App.' >> "$GITHUB_STEP_SUMMARY"
+
+  package:
+    name: Prepare reviewed npm artifact
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      filename: ${{ steps.pack.outputs.filename }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Pack and record the exact artifact
+        id: pack
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile, writeFile } from 'node:fs/promises';
+          import { packageNpm } from './scripts/package-npm.mjs';
+          const result = await packageNpm();
+          await writeFile('artifacts/npm/package-report.json', JSON.stringify(result, null, 2) + '\n');
+          await appendFile(process.env.GITHUB_OUTPUT, `filename=${result.filename}\nsha256=${result.sha256}\n`);
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `Package: ${result.name}@${result.version}\n\nSHA-256: ${result.sha256}\n\nFiles:\n${result.files.map(file => '- ' + file).join('\n')}\n`);
+          NODE
+      - name: Dry-run the tarball publication
+        shell: bash
+        env:
+          NPM_ARCHIVE: ${{ steps.pack.outputs.filename }}
+        run: npm publish "./artifacts/npm/$NPM_ARCHIVE" --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-launcher-${{ github.sha }}
+          path: artifacts/npm/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish the verified tarball using OIDC
+    needs: package
+    if: github.repository == 'starroyhq/computer-use' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/npm-v')) || (github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    concurrency:
+      group: npm-registry-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Require the exact npm tag or manual main source
+        env:
+          NPM_PUBLISH: ${{ inputs.publish }}
+        run: node .github/scripts/npm-release.mjs source
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-launcher-${{ github.sha }}
+          path: artifacts/npm
+      - name: Verify artifact identity and npm OIDC support
+        shell: bash
+        env:
+          NPM_ARCHIVE: ${{ needs.package.outputs.filename }}
+          EXPECTED_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { verifyNpmArchive } from './scripts/package-npm.mjs';
+          const result = await verifyNpmArchive('artifacts/npm/' + process.env.NPM_ARCHIVE);
+          if (result.sha256 !== process.env.EXPECTED_SHA256) throw new Error('The downloaded artifact differs from the checked tarball.');
+          const [major, minor, patch] = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          if (!(major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1))))) throw new Error('npm >=11.5.1 is required for trusted publishing.');
+          NODE
+      - name: Check whether this version is already published with identical content
+        id: registry
+        env:
+          NPM_ARCHIVE: ${{ needs.package.outputs.filename }}
+        run: node .github/scripts/npm-release.mjs check "./artifacts/npm/$NPM_ARCHIVE"
+      - name: Publish without a stored npm token
+        if: steps.registry.outputs.exists == 'false'
+        env:
+          NPM_ARCHIVE: ${{ needs.package.outputs.filename }}
+        run: npm publish "./artifacts/npm/$NPM_ARCHIVE" --ignore-scripts --access public --registry https://registry.npmjs.org
+      - name: Verify public archive integrity, contents and provenance
+        if: steps.registry.outputs.exists == 'false'
+        env:
+          NPM_ARCHIVE: ${{ needs.package.outputs.filename }}
+        run: node .github/scripts/npm-release.mjs verify "./artifacts/npm/$NPM_ARCHIVE"
+      - name: Record an idempotent retry
+        if: steps.registry.outputs.exists == 'true'
+        run: echo 'This npm version was already published with matching package contents. No publish was attempted.' >> "$GITHUB_STEP_SUMMARY"
