@@ -14,6 +14,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--cli-fixture") { CliFixture(args[1]); return; }
         ApplicationConfiguration.Initialize();
         if (args.Length == 1 && args[0] == "--startup-state-checks")
         {
@@ -41,6 +42,7 @@ internal static class Program
         var screenshots = args.Length == 2 && args[0] == "--screenshots" ? args[1] : null;
         CheckTranslations();
         CheckHelpers();
+        CheckPackageCommand();
         CheckStandardHandleInheritance();
         CheckStartupState();
         CheckStartupLifecycle();
@@ -56,6 +58,7 @@ internal static class Program
                 CheckPairingScopes(host);
                 CheckSettingsWindow(host);
                 CheckSettingsInteractions(host);
+                CheckSkillConnection(host);
                 CheckSettingsLayouts(host);
                 CheckUpdatePage(host);
                 if (screenshots is not null) Screenshots(host, screenshots);
@@ -105,6 +108,165 @@ internal static class Program
                 if (!SetStdHandle(kinds[index], original[index])) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
         Console.WriteLine("PASS: startup prevents inherited standard handles without closing or replacing them");
+    }
+
+    private static void CliFixture(string mode)
+    {
+        Console.OutputEncoding = new System.Text.UTF8Encoding(false);
+        switch (mode)
+        {
+            case "preflight": Console.Write(JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1, version = "0.6.1", platform = "windows-arm64", host = new { state = "paused" },
+                profiles = new[] { "default", "work_agent" }, profile = new { name = "work_agent", state = "unverified" }
+            })); break;
+            case "skill": Console.Write("请为我安装 Computer Use Skill 并完成连接。\n"); break;
+            case "error":
+                Console.Error.WriteLine("{\"error\":{\"code\":\"invalid_request\",\"message\":\"fixture error\"}}");
+                Environment.ExitCode = 17;
+                break;
+            case "oversize": Console.Write(new string('x', 4 * 1024 * 1024 + 1)); break;
+            case "slow": Thread.Sleep(TimeSpan.FromSeconds(30)); break;
+            default: Console.Write("invalid output"); break;
+        }
+    }
+
+    private static void CheckPackageCommand()
+    {
+        var runner = new PackageCommand(Environment.ProcessPath!, "--cli-fixture");
+        var command = new AgentCommand(runner);
+        var profile = command.PreflightAsync("work_agent", CancellationToken.None).GetAwaiter().GetResult();
+        Check(profile.Host.State == "paused" && profile.Profile.State == "unverified"
+            && profile.Profiles.SequenceEqual(new[] { "default", "work_agent" }), "preflight preserves inactive states and profile names without starting a host");
+        Check(command.SetupPromptAsync("work_agent", CancellationToken.None).GetAwaiter().GetResult().Contains("安装 Computer Use Skill"),
+            "package command preserves UTF-8 setup prompt output");
+        var failed = false;
+        try { _ = runner.RunAsync(["error"], CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (UpdateFailure error) { failed = error.Code == "invalid_request"; }
+        Check(failed, "shared CLI runner preserves nonzero CLI errors");
+        failed = false;
+        try { _ = runner.RunAsync(["oversize"], CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (UpdateFailure error) { failed = error.Code == "output"; }
+        Check(failed, "shared CLI runner bounds its output");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var cancelled = false;
+        try { _ = runner.RunAsync(["slow"], cancellation.Token).GetAwaiter().GetResult(); }
+        catch (OperationCanceledException) { cancelled = true; }
+        Check(cancelled && watch.Elapsed < TimeSpan.FromSeconds(10), "cancel kills the isolated CLI process promptly");
+        var start = PackageCommand.ForPackage(@"C:\O'Brien\$tools`").StartInfo(["skill", "prompt", "--profile", "work_agent"]);
+        Check(!start.UseShellExecute && start.CreateNoWindow && start.ArgumentList.SequenceEqual(new[]
+        { @"C:\O'Brien\$tools`\runtime\cli.js", "skill", "prompt", "--profile", "work_agent" }),
+            "package commands use exact argument boundaries and the bundled executable");
+        Check(!start.Environment.Keys.Any(key => key.StartsWith("CUA_", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("NODE_", StringComparison.OrdinalIgnoreCase)), "package commands remove Node/runtime overrides");
+        Check(AgentCommand.ValidProfile("work_agent-2") && !AgentCommand.ValidProfile("new\n")
+            && !AgentCommand.ValidProfile("bad'profile") && !AgentCommand.ValidProfile(new string('a', 65)), "profile validation rejects ambiguous or shell-like names");
+        Console.WriteLine("PASS: shared package CLI runner, profile contract, cancellation and bounded output");
+    }
+
+    private static void CheckSkillConnection(HostApplication host)
+    {
+        var language = L10n.Chinese;
+        try
+        {
+            foreach (var chinese in new[] { true, false })
+            {
+                L10n.Chinese = chinese;
+                var command = new FakeAgentCommand();
+                var copied = new List<string>();
+                var copySucceeds = true;
+                using var window = new SettingsForm(host, command, text => { if (copySucceeds) copied.Add(text); return copySucceeds; });
+                window.ShowPage(SettingsPage.Connect);
+                Pump();
+                var profiles = ControlField<ComboBox>(window, "_profile");
+                var copy = ControlField<Button>(window, "_copySetupPrompt");
+                var status = ControlField<Label>(window, "_setupPromptStatus");
+                Check(profiles.Text == "default" && !profiles.Visible && !ControlField<Button>(window, "_copyPair").Visible
+                    && !ControlField<Button>(window, "_copyStdio").Visible && !ControlField<CheckBox>(window, "_http").Visible,
+                    "first connection screen hides profile and manual connection choices by default");
+                Check(copy.Visible && copy.Text == L10n.T(Msg.ConnectCopySetupPrompt) && command.PreflightCalls == 0,
+                    "first connection screen offers setup prompt without probing or requiring a profile decision");
+                copy.PerformClick(); AwaitUi(window.SetupPromptTask);
+                Check(copied.Single() == FakeAgentCommand.Prompt && command.PromptedProfiles.Single() == "default"
+                    && status.Text == L10n.T(Msg.ConnectSetupPromptCopied), "primary copy returns the CLI setup prompt with default profile");
+
+                var advanced = Descendants(window).OfType<Button>().Single(button => button.Text == L10n.T(Msg.ConnectAdvanced));
+                advanced.PerformClick(); AwaitUi(window.ProfileLoadTask);
+                Check(profiles.Visible && profiles.Items.Cast<string>().SequenceEqual(new[] { "default", "work_agent" }),
+                    "advanced connection loads existing names only when expanded");
+                profiles.Text = "work_agent";
+                Check(ControlField<TextBox>(window, "_pairCommand").Text == SettingsForm.PairCommand(host.PackageRoot, "work_agent"),
+                    "pairing command follows the editable profile");
+                using (var config = JsonDocument.Parse(SettingsForm.StdioConfiguration(host.PackageRoot, profiles.Text)))
+                    Check(config.RootElement.GetProperty("mcpServers").GetProperty("computer-use").GetProperty("args")[4].GetString() == "work_agent",
+                        "MCP config uses the same selected profile");
+                profiles.Text = "invalid profile";
+                Check(!copy.Enabled && !ControlField<Button>(window, "_copyPair").Enabled
+                    && !ControlField<Button>(window, "_copyStdio").Enabled, "invalid profile disables generated connection content");
+                profiles.Text = "work_agent";
+                copy.PerformClick(); AwaitUi(window.SetupPromptTask);
+                Check(copied.Count == 2 && command.PromptedProfiles.Last() == "work_agent", "setup prompt honors an advanced profile override");
+                command.PromptGate = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                copy.PerformClick();
+                Check(!window.SetupPromptTask.IsCompleted && !profiles.Enabled && !copy.Enabled
+                    && ControlField<Button>(window, "_cancelSetupPrompt").Visible, "pending prompt keeps UI responsive and prevents duplicate generation");
+                ControlField<Button>(window, "_cancelSetupPrompt").PerformClick(); AwaitUi(window.SetupPromptTask);
+                Check(copied.Count == 2 && profiles.Enabled && copy.Enabled && status.Text == L10n.T(Msg.ConnectSetupPromptCancelled),
+                    "cancel restores controls without copying partial content");
+                command.PromptGate = null;
+                command.PromptError = true;
+                copy.PerformClick(); AwaitUi(window.SetupPromptTask);
+                Check(status.Text == L10n.T(Msg.ConnectSetupPromptFailed) && copied.Count == 2,
+                    "CLI failure preserves clipboard without displaying raw errors");
+                command.PromptError = false;
+                copySucceeds = false;
+                copy.PerformClick(); AwaitUi(window.SetupPromptTask);
+                Check(status.Text == L10n.T(Msg.CommonCopyFailed) && copied.Count == 2, "clipboard failure is reported without claiming success");
+                command.PreflightGate = new TaskCompletionSource<AgentPreflight>(TaskCreationOptions.RunContinuationsAsynchronously);
+                ControlField<Button>(window, "_refreshProfiles").PerformClick();
+                profiles.Text = "new_agent";
+                command.PreflightGate.SetResult(command.Result("work_agent"));
+                AwaitUi(window.ProfileLoadTask);
+                Check(profiles.Text == "new_agent" && ControlField<TextBox>(window, "_pairCommand").Text.EndsWith("--profile 'new_agent'", StringComparison.Ordinal),
+                    "late preflight never changes a profile edited while loading");
+                advanced.PerformClick(); Pump();
+                Check(!profiles.Visible && copy.Visible, "advanced choices collapse without hiding the primary setup action");
+            }
+        }
+        finally { L10n.Chinese = language; }
+        Console.WriteLine("PASS: bilingual setup prompt copy, advanced profile consistency, async cancellation and clipboard errors");
+    }
+
+    private static void AwaitUi(Task task)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!task.IsCompleted && DateTime.UtcNow < deadline) { Pump(); Thread.Sleep(1); }
+        Check(task.IsCompleted, "isolated asynchronous UI operation completes within its test deadline");
+        task.GetAwaiter().GetResult();
+    }
+
+    private sealed class FakeAgentCommand : IAgentCommand
+    {
+        internal const string Prompt = "请安装 Computer Use Skill 并完成连接。 Use the bundled CLI and ask me to approve first-time pairing.\n";
+        internal readonly List<string> PromptedProfiles = [];
+        internal TaskCompletionSource<string>? PromptGate;
+        internal TaskCompletionSource<AgentPreflight>? PreflightGate;
+        internal bool PromptError;
+        internal int PreflightCalls;
+        internal AgentPreflight Result(string profile) => new(1, "0.6.1", "windows-arm64", new("paused"),
+            ["default", "work_agent"], new(profile, "unverified"));
+        public Task<AgentPreflight> PreflightAsync(string profile, CancellationToken cancellation)
+        {
+            PreflightCalls++;
+            return PreflightGate?.Task.WaitAsync(cancellation) ?? Task.FromResult(Result(profile));
+        }
+        public Task<string> SetupPromptAsync(string profile, CancellationToken cancellation)
+        {
+            PromptedProfiles.Add(profile);
+            if (PromptError) throw new IOException("sensitive fixture error must not reach UI");
+            return PromptGate?.Task.WaitAsync(cancellation) ?? Task.FromResult(Prompt);
+        }
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -257,14 +419,32 @@ internal static class Program
                     Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) == (pause ? "paused" : "stopped"),
                         "exit preserves the earlier user block");
                 }
-                using (var manual = new HostApplication(showWindow: false, dataDirectory: data))
+                foreach (var showWindow in new[] { false, true })
                 {
-                    // Program permits this new constructor only after an explicit manual
-                    // launch when a persisted block exists; background launch is rejected.
+                    var starts = HostRuntime.StartCount;
+                    using var reopened = new HostApplication(showWindow: showWindow, dataDirectory: data);
                     Pump();
-                    Check(new HostStartupStore(data).Read() is { State: "ready", AutoStartBlocked: false },
-                        "explicit new local launch can clear a persisted user block");
-                    Invoke(manual, "ExitAsync").GetAwaiter().GetResult();
+                    var window = (SettingsForm)Field(reopened, "_window")!;
+                    window.ShowPage(SettingsPage.Status);
+                    Event(reopened, new { @event = "ready" });
+                    Pump();
+                    Check(!reopened.IsRunning && reopened.IsPaused == pause && HostRuntime.StartCount == starts
+                        && HostStartup.BlockingCode(new HostStartupStore(data).Read(), sameLiveProcess: false) == (pause ? "paused" : "stopped"),
+                        "manual, background/login/update and existing-window opens preserve the user block without starting a worker");
+                    Check(ControlField<Button>(window, "_pause").Enabled == pause
+                        && ControlField<Button>(window, "_restart").Enabled, "persisted block exposes the appropriate local recovery controls");
+                    Invoke(reopened, "ExitAsync").GetAwaiter().GetResult();
+                }
+                using (var recovered = new HostApplication(showWindow: false, dataDirectory: data))
+                {
+                    Pump();
+                    if (pause) recovered.TogglePauseAsync().GetAwaiter().GetResult();
+                    else recovered.RestartServicesAsync().GetAwaiter().GetResult();
+                    Pump();
+                    Check(recovered.IsRunning && !recovered.IsPaused
+                        && new HostStartupStore(data).Read() is { State: "ready", AutoStartBlocked: false },
+                        "only the local Resume or Restart action clears a persisted user block");
+                    Invoke(recovered, "ExitAsync").GetAwaiter().GetResult();
                 }
             }
             finally { Directory.Delete(data, recursive: true); }
@@ -294,6 +474,17 @@ internal static class Program
             Pump();
             Check(host.IsRunning && !host.IsPaused && new HostStartupStore(raceData).Read() is { State: "ready", AutoStartBlocked: false },
                 "local restart recovers and ignores an old runtime's ready event");
+            host.TogglePauseAsync().GetAwaiter().GetResult();
+            var controlGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HostRuntime.NextControl = controlGate.Task;
+            var resuming = host.TogglePauseAsync();
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            controlGate.SetResult();
+            AwaitUi(resuming);
+            Check(!host.IsRunning && host.ServiceStatus == L10n.T(Msg.StatusEmergencyStopped)
+                && new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
+                "a late Resume control completion cannot overwrite emergency stop or its visible state");
+            host.RestartServicesAsync().GetAwaiter().GetResult();
             var disposeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             HostRuntime.NextDispose = disposeGate.Task;
             var starts = HostRuntime.StartCount;
@@ -316,6 +507,7 @@ internal static class Program
         {
             HostRuntime.NextStart = null;
             HostRuntime.NextDispose = null;
+            HostRuntime.NextControl = null;
             Directory.Delete(raceData, recursive: true);
         }
         Console.WriteLine("PASS: Windows startup lifecycle, late ready, and stop during startup");
@@ -602,7 +794,7 @@ internal static class Program
     private static void CheckHorizontalLayout(Control root, string context)
     {
         foreach (var control in Descendants(root).Where(control => control.Visible
-            && (control is Label or Button or CheckBox or TextBox or ListView)))
+            && (control is Label or Button or CheckBox or TextBox or ComboBox or ListView)))
         {
             if (control.Parent is not { } parent) continue;
             Check(control.Left >= -1 && control.Right <= parent.ClientSize.Width + 1,
@@ -677,7 +869,7 @@ internal static class Program
         using var config = JsonDocument.Parse(SettingsForm.StdioConfiguration(@"C:\Portable"));
         var server = config.RootElement.GetProperty("mcpServers").GetProperty("computer-use");
         Check(server.GetProperty("command").GetString() == @"C:\Portable\bin\node.exe"
-            && server.GetProperty("args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(new[] { @"C:\Portable\runtime\cli.js", "mcp", "stdio" }),
+            && server.GetProperty("args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(new[] { @"C:\Portable\runtime\cli.js", "mcp", "stdio", "--profile", "default" }),
             "stdio configuration uses the bundled node and CLI");
         var pair = SettingsForm.PairCommand(@"C:\Portable");
         Check(SettingsForm.CliCommand(@"C:\O'Brien\$tools`") ==
@@ -685,8 +877,7 @@ internal static class Program
             "copied PowerShell commands preserve apostrophes, dollar signs and backticks in installation paths");
         Check(pair.StartsWith(SettingsForm.CliCommand(@"C:\Portable") + " pair ", StringComparison.Ordinal)
             && pair.Contains("--name", StringComparison.Ordinal) && !pair.Contains("--app", StringComparison.Ordinal)
-            && !pair.Contains("--profile", StringComparison.Ordinal)
-            && !server.GetProperty("args").EnumerateArray().Any(value => value.GetString() == "--profile"),
+            && pair.EndsWith("--profile 'default'", StringComparison.Ordinal),
             "pairing and stdio share the default profile and bundled CLI without restricting applications");
         var check = JsonSerializer.Deserialize<UpdateCheck>("""
             {"current":"0.4.0","latest":"0.5.0","available":true,"platform":"windows-arm64","tag":"v0.5.0",
@@ -1004,6 +1195,7 @@ namespace ComputerUse.WindowsHost
         internal static HostRuntime? Last { get; private set; }
         internal static Task? NextStart { get; set; }
         internal static Task? NextDispose { get; set; }
+        internal static Task? NextControl { get; set; }
         private readonly Action<JsonElement> _onEvent;
         internal string PipeName => "isolated-test";
         internal HostRuntime(Action<JsonElement> onEvent) { _onEvent = onEvent; Last = this; }
@@ -1019,7 +1211,9 @@ namespace ComputerUse.WindowsHost
         {
             Commands.Add(command + ":" + (clientId ?? sessionId));
             AllAppsAcknowledgments.Add(allApps);
-            return Task.CompletedTask;
+            var task = NextControl ?? Task.CompletedTask;
+            NextControl = null;
+            return task;
         }
         public ValueTask DisposeAsync()
         {

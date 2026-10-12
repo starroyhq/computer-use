@@ -12,6 +12,7 @@ import { credentialDir, dataDir } from './paths.js';
 import { atomicJson, privateDirectory, readJson } from './storage.js';
 import { schemas, type Method } from './schema.js';
 import { VERSION } from './version.js';
+import { exportSkill, instructions, localPaths, preflight, setupPrompt, validateProfile, writeSkill } from './skill.js';
 
 const SCREENSHOT_RETENTION_MS = 24 * 60 * 60_000;
 let pruned: Promise<void> | undefined;
@@ -39,6 +40,10 @@ computer-use pair --name "Browser Agent" --browser
 computer-use <method> --json '<JSON>' [--profile default]
 computer-use call <method> --input request.json
 computer-use schema <method>
+computer-use preflight [--profile default]
+computer-use instructions
+computer-use skill export [--profile default] [--out SKILL.md]
+computer-use skill prompt [--profile default]
 computer-use mcp stdio [--profile default]
 computer-use config stdio
 computer-use config codex [--profile default]
@@ -96,9 +101,33 @@ async function main(): Promise<void> {
     return;
   }
   const profile = values.profile!;
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(profile)) throw new CuError('invalid_request', 'Invalid profile name.');
+  validateProfile(profile);
   const credentialsPath = join(credentialDir, `${profile}.json`);
   const command = positionals[0]!;
+  if (command === 'instructions' && positionals.length === 1) {
+    process.stdout.write(await instructions());
+    return;
+  }
+  if (command === 'preflight' && positionals.length === 1) {
+    process.stdout.write(JSON.stringify(await preflight({ profile, ...(values.socket ? { socket: values.socket } : {}) })) + '\n');
+    return;
+  }
+  if (command === 'skill') {
+    if (positionals.length === 2 && positionals[1] === 'prompt') {
+      if (values.out !== undefined) throw new CuError('invalid_request', 'Use skill prompt [--profile NAME] without --out.');
+      process.stdout.write(setupPrompt(profile, await localPaths()));
+      return;
+    }
+    if (positionals.length !== 2 || positionals[1] !== 'export')
+      throw new CuError('invalid_request', 'Use skill prompt [--profile NAME] or skill export [--profile NAME] [--out SKILL.md].');
+    const text = await exportSkill(profile, await localPaths());
+    if (values.out !== undefined) {
+      const path = resolve(values.out);
+      await writeSkill(path, text);
+      process.stdout.write(JSON.stringify({ path, profile }) + '\n');
+    } else process.stdout.write(text);
+    return;
+  }
   if (command === 'schema') {
     const method = positionals[1];
     if (!method || !Object.hasOwn(schemas, method)) throw new CuError('invalid_request', 'Unknown method.');

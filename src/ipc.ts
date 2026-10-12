@@ -83,7 +83,10 @@ function closeServer(server: Server): Promise<void> {
 }
 
 export class IpcClient implements RpcService {
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly timeoutMs = 65_000,
+  ) {}
   async call(token: string | undefined, method: string, params: unknown): Promise<unknown> {
     const id = randomUUID();
     return new Promise((resolve, reject) => {
@@ -97,7 +100,7 @@ export class IpcClient implements RpcService {
         }
         socket.destroy();
       };
-      socket.setTimeout(65_000, () =>
+      socket.setTimeout(this.timeoutMs, () =>
         fail(
           new CuError(
             method === 'act' ? 'unknown_outcome' : 'timeout',

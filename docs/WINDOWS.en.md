@@ -10,7 +10,7 @@ The isolated browser has a separate boundary: the current Playwright backend's [
 
 ## Install and uninstall
 
-Download `computer-use-0.6.1-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.6.1](https://github.com/starroyhq/computer-use/releases/tag/v0.6.1). For a portable copy, download `computer-use-0.6.1-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
+Download `computer-use-0.7.0-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.7.0](https://github.com/starroyhq/computer-use/releases/tag/v0.7.0). For a portable copy, download `computer-use-0.7.0-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
 
 Installers are available starting with v0.6.0; v0.5.0 and earlier provide only portable packages. Installation over an existing local ARM64 build has been tested. The complete flow from downloading a real release to completing an installer upgrade, native x64 installation and SmartScreen behavior remain unverified; see the [validation record](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10) (Chinese).
 
@@ -30,13 +30,19 @@ When you move from a portable copy to the installer, the program location change
 
 Either way, runtime components are bundled; build tools are not required to run the package. Start in your interactive login session. Packages do not include pairing credentials: each user must create and approve their own pairing.
 
+## Connect an agent with an installation prompt
+
+In v0.7.0, the app's Connect page presents **Copy setup prompt** by default. Copy the installation prompt and paste it into your agent so it can install the Skill and complete the connection. The app only generates and copies the prompt; it does not install the Skill or write client configuration. Generating the prompt neither pairs a client nor starts the service. You still approve system permissions and initial client authorization locally, and existing profiles do not need pairing again.
+
+**Advanced connection** is collapsed by default. Expand it to select an existing profile or enter a new name, copy pairing commands and stdio MCP configuration, or enable local HTTP MCP. The default profile is `default`; the installation prompt, pairing command and MCP configuration share the selected name, and copied content contains no pairing credentials. From the package folder, `bin\node.exe runtime\cli.js skill prompt --profile default` prints the same installation prompt.
+
 ## On-demand startup and pause protection
 
-Complete Windows packages in v0.6.1 support on-demand startup. CLI and stdio MCP calls made with the package's own `bin\node.exe runtime\cli.js` first probe the default pipe. If unavailable, they invoke the same package’s startup check, which starts a host only when none is running and no pause/stop blocks it, then waits for readiness before the original RPC is sent. MCP `initialize` and `tools/list` neither connect to the runtime nor launch the tray app; the first actual tool call needs the host. Initial pairing still requires local approval and startup does not create a grant.
+Since v0.6.1, complete Windows packages support on-demand startup. CLI and stdio MCP calls made with the package's own `bin\node.exe runtime\cli.js` first probe the default pipe. If unavailable, they invoke the same package’s startup check, which starts a host only when none is running and no pause/stop blocks it, then waits for readiness before the original RPC is sent. MCP `initialize` and `tools/list` neither connect to the runtime nor launch the tray app; the first actual tool call needs the host. Initial pairing still requires local approval and startup does not create a grant.
 
-This requires the current user's interactive login desktop, not a service account or Session 0. Source execution, macOS, a custom `--socket`, HTTP and SSH tunnels do not use this automatic startup path. It does not search PATH or other installation folders for a host. Regenerate agent configuration after moving the package.
+This requires the current user's interactive login desktop, not a service account or Session 0. Source execution, a custom `--socket`, HTTP and SSH tunnels do not use this automatic startup path. In v0.7.0, complete macOS apps also support controlled startup from the same bundle; missing system permissions return an explicit error requiring the user to open the app. Neither platform searches PATH or other installation folders for a host. Regenerate agent configuration after moving the package.
 
-Pause and emergency stop are recorded in the current user's private `host-state.json` and continue to block automatic and sign-in startup after the tray app exits. The user must resume or restart services locally, or deliberately open the app after it has exited. Opening an already-running host only shows Settings and does not resume its service. The helper also leaves an existing failed or stopped host for local recovery. A startup failure sends no original business request; a connection failure after dispatch still has an uncertain outcome and is never automatically replayed.
+In v0.7.0, both Windows and macOS record pause and emergency stop in the current user's private `host-state.json`. They survive exit, reopening, login and update launches; only the local Resume/Restart Services buttons clear them. Opening the app shows its state without resuming. The helper also leaves a live failed or stopped host for local recovery. A startup failure sends no original business request; a connection failure after dispatch still has an uncertain outcome and is never automatically replayed.
 
 To check startup separately, run this in PowerShell from the complete installed or portable folder:
 
@@ -46,7 +52,7 @@ To check startup separately, run this in PowerShell from the complete installed 
 
 The helper waits up to 35 seconds and writes exactly one JSON line to stdout. Success is `{"ok":true,"state":"ready"}` with exit code 0. Failure exits nonzero and returns `ok: false`, `code` and `message`; codes are `paused`, `stopped`, `failed`, `non_interactive`, `timeout` or `launch_failed`. Success requires a matching session and host process identity plus a successful probe of the published pipe; an EXE process alone does not establish readiness. This command neither approves pairing nor resumes a pause or emergency stop, and it cannot remove Windows system blocks.
 
-This section describes interface behavior. See the [validation record](validation-results.md) for actual v0.6.1 build, VM and CI results; historical desktop acceptance does not automatically cover the new startup path.
+This section describes v0.7.0 interface behavior. See the [validation record](validation-results.md) for historical local-build and VM checks; v0.7.0 release artifacts and CI require separate verification.
 
 ## Build and start from source
 
@@ -75,9 +81,9 @@ The result is `artifacts\Computer Use Windows x64 Setup.exe`. `--smoke-test` ins
 
 Starting the program opens the settings window. Closing it leaves the service running in the notification area; double-click the tray icon or run the program again to reopen it. On the General page, “Start Computer Use when I sign in to Windows” adds a current-user startup entry that starts in the tray only; select it again after moving the portable folder.
 
-v0.6.1 adds the complete warm-white and dark-charcoal cursor icon to the EXE, tray, settings and approval windows, and installer. The icon identifies the app; it does not indicate signing or change startup and authorization rules.
+v0.6.1 introduced the complete warm-white and dark-charcoal cursor icon for the EXE, tray, settings and approval windows, and installer. The icon identifies the app; it does not indicate signing or change startup and authorization rules.
 
-Since v0.6.0, the window uses a sidebar with six sections: Status, Clients, Connect, General, Updates and About. Emergency Stop stays visible on every page. Status shows the service and pairing count and links to Connect, where you can copy the pairing command followed by stdio configuration. Clients shows scopes and offers revocation. The pairing dialog separates client identity, desktop scope, isolated browser access, foreground permission, duration and execution behavior. Long content scrolls while decision buttons stay visible. Deny remains the default button and has initial focus; closing the dialog or pressing Escape does not authorize access. Expiry or withdrawal closes the prompt, and an Allow decision requires runtime confirmation.
+Since v0.6.0, the window uses a sidebar with six sections: Status, Clients, Connect, General, Updates and About. Emergency Stop stays visible on every page. Status shows the service and pairing count and links to Connect, where you can copy the installation prompt. Manual pairing commands and stdio configuration are under Advanced connection, which is collapsed by default. Clients shows scopes and offers revocation. The pairing dialog separates client identity, desktop scope, isolated browser access, foreground permission, duration and execution behavior. Long content scrolls while decision buttons stay visible. Deny remains the default button and has initial focus; closing the dialog or pressing Escape does not authorize access. Expiry or withdrawal closes the prompt, and an Allow decision requires runtime confirmation.
 
 ## Updates
 
@@ -86,11 +92,11 @@ The Updates page checks stable GitHub releases once a day (this can be turned of
 - **Installed**: when the release includes an installer, downloads and verifies it; choose Run Installer and follow the setup wizard. Setup first has the tray app stop its service and quit, installs over the original folder and can start the app when it finishes. Cancelling before you choose Install leaves the tray app running.
 - **Portable**: only downloads and verifies the ZIP and shows it in File Explorer. Quit the tray app, extract the whole package and replace the current folder with the new one at the same path so absolute paths in agent configuration stay valid.
 
-Paired clients and settings are stored in `%LOCALAPPDATA%\Computer Use` and are kept either way.
+Paired clients and settings are stored in `%LOCALAPPDATA%\Computer Use` and are kept either way. Saved pause and emergency-stop states also remain in effect; launching the app after installation does not resume services automatically.
 
 ## Local Windows agent: stdio MCP
 
-Since v0.6.0, new pairings grant all desktop applications through one initial approval by default, without an application path; existing restricted clients do not gain a wider scope automatically. Local stdio and remote Mac access are alternatives; you do not need both.
+Since v0.6.0, new pairings grant all desktop applications through one initial approval by default, without an application path; existing restricted clients do not gain a wider scope automatically. The following is the manual setup flow under Advanced connection. Local stdio and remote Mac access are alternatives; you do not need both.
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # Installed copy or supplied ZIP: enter the install or extracted folder instead
@@ -124,7 +130,7 @@ Set-Location '.\artifacts\Computer Use Windows x64'
 
 Approve all applications for this client in the Windows tray. For fixture-only acceptance, add `--app 'C:\path\to\ComputerUseFixture.exe'` to restrict the pairing. Revoking this client invalidates its Mac credentials. Host connection metadata, credentials and logs are kept in the current user's protected `%LOCALAPPDATA%\Computer Use` directory. Do not start the host from a service account or a noninteractive session.
 
-Enable local HTTP MCP on the Connect page of Settings (it lasts for the current run only), then export a new private configuration file:
+Expand Advanced connection on the Connect page of Settings and enable local HTTP MCP (it lasts for the current run only), then export a new private configuration file:
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js config http --profile mac-codex --out "$env:LOCALAPPDATA\Computer Use\mac-codex-mcp.json"

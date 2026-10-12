@@ -4,6 +4,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { fetchRuntimes, ROOT, RUNTIMES } from './fetch-runtime.mjs';
+import { checkSkill } from './build-skill.mjs';
+import { verifySkillResources } from './package-skill.mjs';
 
 const OUTPUT = join(ROOT, 'artifacts', 'Computer Use.app');
 const MARKER = 'computer-use-package-v1';
@@ -95,11 +97,14 @@ export async function verify(app) {
     'Contents/Resources/bin/computer-use',
     'Contents/Resources/runtime/host.js',
     'Contents/Resources/runtime/cli.js',
+    'Contents/Resources/skills/computer-use/SKILL.md',
+    'Contents/Resources/skills/computer-use/instructions.md',
     'Contents/Resources/node_modules/@trycua/cua-driver/package.json',
   ]) {
     if (!(await exists(join(app, path)))) throw new Error(`Missing bundle resource: ${path}`);
   }
   const infoPlist = join(app, 'Contents', 'Info.plist');
+  await verifySkillResources(join(resources, 'skills', 'computer-use'));
   run('/usr/bin/plutil', ['-lint', infoPlist]);
   if (run('/usr/bin/plutil', ['-extract', 'CFBundleIdentifier', 'raw', infoPlist]) !== BUNDLE_ID) {
     throw new Error(`Bundle identifier must be ${BUNDLE_ID}.`);
@@ -192,8 +197,8 @@ async function build(identity) {
     await cp(archives.cuaLicense, join(resources, 'licenses', 'CUA-LICENSE'));
     await chmod(join(resources, 'licenses', 'CUA-LICENSE'), 0o644);
     for (const file of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) await cp(join(ROOT, file), join(resources, 'licenses', file));
-    if (await exists(join(ROOT, 'skills', 'computer-use', 'SKILL.md')))
-      await cp(join(ROOT, 'skills', 'computer-use'), join(resources, 'skills', 'computer-use'), { recursive: true });
+    await checkSkill();
+    await cp(join(ROOT, 'skills', 'computer-use'), join(resources, 'skills', 'computer-use'), { recursive: true });
     await writeFile(
       join(resources, 'build-receipt.json'),
       JSON.stringify(

@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { sha256 } from './fetch-runtime.mjs';
 import { assertInternalLinks, signingIdentity } from './package-app.mjs';
 import { parseArguments as parseDmgArguments } from './package-dmg.mjs';
+import { skillDirectory } from './build-skill.mjs';
+import { verifySkillResources } from './package-skill.mjs';
+
+test('packages require the complete generated Skill and matching installed instructions', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'cu-skill-package-'));
+  try {
+    await assert.rejects(verifySkillResources(directory), /ENOENT/);
+    await cp(skillDirectory, directory, { recursive: true });
+    await verifySkillResources(directory);
+    await writeFile(join(directory, 'SKILL.md'), 'outdated copy');
+    await assert.rejects(verifySkillResources(directory), /does not match/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('disk image CLI builds a development image, verifies one, or signs with a Developer ID', () => {
   assert.deepEqual(parseDmgArguments([]), { verifyOnly: false });

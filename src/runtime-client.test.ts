@@ -12,8 +12,10 @@ import { CuError } from './contracts.js';
 import { listenHttp } from './mcp.js';
 import {
   bundledWindowsHost,
+  bundledMacHost,
   createRuntimeClient,
   ensureWindowsHost,
+  ensureMacHost,
   probeRuntimePipe,
   type RuntimeClientOptions,
 } from './runtime-client.js';
@@ -191,14 +193,14 @@ describe('lazy Windows runtime connection', () => {
     expect(launch).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves explicit sockets and non-Windows calls on the original transport without probing', async () => {
+  it('leaves explicit sockets and unsupported platforms on the original transport without probing', async () => {
     const server = await pipeServer();
     const launch = vi.fn();
     const probe = vi.fn();
     const discover = vi.fn(async () => server.path);
     await createRuntimeClient(server.path, { ...options, defaultPath: discover, launch, probe }).call('fixture-token', 'doctor', {});
     expect(discover).not.toHaveBeenCalled();
-    await createRuntimeClient(undefined, { ...options, platform: 'darwin', defaultPath: discover, launch, probe }).call(
+    await createRuntimeClient(undefined, { ...options, platform: 'linux', defaultPath: discover, launch, probe }).call(
       'fixture-token',
       'doctor',
       {},
@@ -259,6 +261,84 @@ describe('same-bundle Windows host selection', () => {
   });
 });
 
+describe('same-bundle macOS background startup', () => {
+  async function macBundle() {
+    const app = join(directory, 'Computer Use.app');
+    const contents = join(app, 'Contents');
+    const resources = join(contents, 'Resources');
+    await mkdir(join(resources, 'runtime'), { recursive: true });
+    await mkdir(join(resources, 'bin'));
+    await mkdir(join(contents, 'MacOS'));
+    const host = join(contents, 'MacOS', 'ComputerUseHost');
+    for (const file of [
+      host,
+      join(resources, 'runtime', 'cli.js'),
+      join(resources, 'runtime', 'runtime-client.js'),
+      join(resources, 'bin', 'node'),
+    ])
+      await writeFile(file, 'fixture');
+    await writeFile(
+      join(contents, 'Info.plist'),
+      '<plist><dict><key>CFBundleIdentifier</key><string>com.starroy.computeruse</string><key>CFBundleExecutable</key><string>ComputerUseHost</string></dict></plist>',
+    );
+    await writeFile(join(resources, 'build-receipt.json'), JSON.stringify({ owner: 'computer-use-package-v1', arch: 'arm64' }));
+    const configured = {
+      ...options,
+      platform: 'darwin' as const,
+      modulePath: join(resources, 'runtime', 'runtime-client.js'),
+      entrypoint: join(resources, 'runtime', 'cli.js'),
+      executable: join(resources, 'bin', 'node'),
+    };
+    return { app, host, contents, resources, configured };
+  }
+  it('selects only the matching bundled host and shares concurrent cold starts', async () => {
+    const { host, configured } = await macBundle();
+    expect(await bundledMacHost(configured.modulePath, configured.entrypoint, configured.executable)).toBe(host);
+    let active: Awaited<ReturnType<typeof pipeServer>> | undefined;
+    const launch = vi.fn(async () => {
+      active = await pipeServer();
+    });
+    const client = createRuntimeClient(undefined, {
+      ...configured,
+      launch,
+      defaultPath: () => (active ? Promise.resolve(active.path) : noDiscovery()),
+    });
+    await Promise.all([client.call('fixture-token', 'doctor', {}), client.call('fixture-token', 'targets', {})]);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(launch.mock.calls[0]?.[0]).toBe(host);
+    expect(active!.requests).toHaveLength(2);
+  });
+  it.each(['receipt', 'identity', 'node', 'source'] as const)('rejects %s mismatch without invoking a helper', async problem => {
+    const { contents, resources, configured } = await macBundle();
+    if (problem === 'receipt') await writeFile(join(resources, 'build-receipt.json'), '{}');
+    if (problem === 'identity') await writeFile(join(contents, 'Info.plist'), '<plist/>');
+    if (problem === 'node') configured.executable = process.execPath;
+    if (problem === 'source') configured.modulePath = join(directory, 'src', 'runtime-client.ts');
+    const launch = vi.fn();
+    const client = createRuntimeClient(undefined, { ...configured, defaultPath: noDiscovery, launch });
+    await expect(client.call('fixture-token', 'doctor', {})).rejects.toMatchObject({ code: 'unavailable' });
+    expect(launch).not.toHaveBeenCalled();
+  });
+  it('never probes or starts a host for an explicit macOS socket', async () => {
+    const { configured } = await macBundle();
+    const server = await pipeServer();
+    const launch = vi.fn();
+    const probe = vi.fn();
+    await createRuntimeClient(server.path, { ...configured, launch, probe }).call('fixture-token', 'doctor', {});
+    expect(launch).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+  });
+  it('reports missing system permissions without retrying the helper', async () => {
+    const { child } = helperProcess();
+    const started = ensureMacHost('/fixture/ComputerUseHost');
+    child.stdout.write(
+      JSON.stringify({ ok: false, code: 'permissions_required', message: 'Open the local app to grant permissions.' }) + '\n',
+    );
+    child.emit('exit', 1, null);
+    await expect(started).rejects.toThrow('macOS host startup permissions_required');
+  });
+});
+
 function helperProcess() {
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), kill: vi.fn(() => true) });
   const spawn = vi.mocked(childProcess.spawn).mockReturnValueOnce(child as unknown as ReturnType<typeof childProcess.spawn>);
@@ -278,6 +358,7 @@ describe('bounded native startup helper', () => {
       cwd: bundle,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: expect.any(Object),
     });
     expect(child.kill).not.toHaveBeenCalled();
     expect(child.stdout.destroyed).toBe(true);

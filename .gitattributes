@@ -1,3 +1,4 @@
 *.ts text eol=lf
 *.mjs text eol=lf
 *.json text eol=lf
+skills/computer-use/* text eol=lf

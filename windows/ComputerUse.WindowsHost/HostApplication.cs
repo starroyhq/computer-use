@@ -23,6 +23,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private bool _busy;
     private bool _exiting;
     private bool _paused;
+    private int _controlRevision;
     private ApprovalDialog? _approvalDialog;
     private readonly HashSet<string> _pendingDecisions = new();
     private bool _httpEnabled;
@@ -40,7 +41,13 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     {
         _startup = startup ?? new HostStartupStore(dataDirectory);
         _showStartupErrors = showWindow;
-        PublishStartupState("starting");
+        // Opening the app (including after login or an update) only restores its
+        // controls. A persisted pause/stop needs an explicit local recovery action.
+        var blocked = HostStartup.BlockingCode(_startup.Read(), sameLiveProcess: false);
+        _autoStartBlocked = blocked is not null;
+        _paused = blocked == "paused";
+        _status = L10n.T(blocked == "paused" ? Msg.StatusPaused : blocked is not null ? Msg.StatusEmergencyStopped : Msg.StatusStarting);
+        PublishStartupState(blocked ?? "starting");
         var settings = new HostSettingsStore(dataDirectory ?? PrivateData.DirectoryPath);
         Updates = new UpdateService(AppContext.BaseDirectory, settings);
         _window = new SettingsForm(this);
@@ -95,12 +102,12 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         // 先创建窗口句柄：后台启动（不显示窗口）时，运行时事件与启动任务同样能投递到界面线程。
         _ = _window.Handle;
         if (showSignal is not null)
-            _showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => Post(() => _window.ShowPage()),
+            _showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => Post(() => _window.ShowPage(SettingsPage.Status)),
                 null, Timeout.Infinite, executeOnlyOnce: false);
         if (quitSignal is not null)
             _quitRegistration = ThreadPool.RegisterWaitForSingleObject(quitSignal, (_, _) => Post(() => _ = ExitAsync()),
                 null, Timeout.Infinite, executeOnlyOnce: true);
-        Post(() => _ = StartAsync());
+        if (!_autoStartBlocked) Post(() => _ = StartAsync());
         Updates.Start();
         if (showWindow) _window.ShowPage(SettingsPage.Status);
         StateChanged();
@@ -131,7 +138,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         _tray.Text = text.Length <= 63 ? text : "Computer Use";
         _tray.Icon = _running || _busy ? UiStyle.TrayIcon : SystemIcons.Warning;
         _pauseItem.Text = L10n.T(_paused ? Msg.TrayResume : Msg.TrayPause);
-        _pauseItem.Enabled = IsRunning;
+        _pauseItem.Enabled = !_busy && (IsRunning || _paused);
         _stopItem.Enabled = IsRunning || _busy;
         if (Updates.Announced is { } check)
         {
@@ -171,7 +178,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
 
     private async Task StartAsync()
     {
-        if (_busy || _runtime is not null || _exiting) return;
+        if (_busy || _runtime is not null || _exiting || _autoStartBlocked) return;
         _busy = true;
         SetStatus(L10n.T(Msg.StatusStartingRuntime));
         HostRuntime? next = null;
@@ -181,7 +188,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
             next = new HostRuntime(message => PostEvent(next, message));
             _runtime = next;
             await next.StartAsync();
-            if (_stopAfterStart is null && !_exiting)
+            if (_stopAfterStart is null && !_exiting && !_autoStartBlocked)
             {
                 _running = true;
                 _paused = false;
@@ -356,15 +363,29 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private async Task ControlAsync(string command, string status, string? clientId = null, string? sessionId = null)
     {
         if (!_running || _runtime is null) return;
-        try { await _runtime.SendControlAsync(command, clientId, sessionId); SetStatus(status); }
-        catch { await FailAsync(L10n.T(Msg.StatusSendControlFailed)); }
+        var source = _runtime;
+        var revision = _controlRevision;
+        try
+        {
+            await source.SendControlAsync(command, clientId, sessionId);
+            if (ReferenceEquals(_runtime, source) && IsRunning && revision == _controlRevision) SetStatus(status);
+        }
+        catch { if (ReferenceEquals(_runtime, source)) await FailAsync(L10n.T(Msg.StatusSendControlFailed)); }
     }
 
     // MARK: 设置窗口与托盘菜单的操作
 
     public async Task TogglePauseAsync()
     {
+        if (_busy || _exiting) return;
+        if (!IsRunning && _paused && _autoStartBlocked)
+        {
+            await RestartAsync();
+            return;
+        }
         if (!IsRunning) return;
+        var source = _runtime;
+        var revision = ++_controlRevision;
         var resume = _paused;
         if (!resume)
         {
@@ -377,7 +398,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
             }
         }
         await ControlAsync(resume ? "resume" : "pause", L10n.T(resume ? Msg.StatusReady : Msg.StatusPaused));
-        if (IsRunning)
+        if (IsRunning && ReferenceEquals(_runtime, source) && revision == _controlRevision)
         {
             _paused = !resume;
             _autoStartBlocked = !resume;
@@ -390,6 +411,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
 
     public Task EmergencyStopAsync()
     {
+        _controlRevision++;
         _autoStartBlocked = true;
         // Persist before waiting for an in-flight start/stop. Failure to persist
         // must never prevent the actual emergency stop.
@@ -420,6 +442,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private async Task RestartAsync()
     {
         if (_busy || _exiting) return;
+        _controlRevision++;
         // A later emergency stop must win while disposal is awaiting the worker.
         _autoStartBlocked = false;
         await StopAsync(L10n.T(Msg.StatusRestarting));
@@ -469,6 +492,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private async Task ExitAsync()
     {
         if (_exiting) return;
+        _controlRevision++;
         _exiting = true;
         PublishExitState();
         _showRegistration?.Unregister(null);

@@ -8,6 +8,8 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { checkSkill } from './build-skill.mjs';
+import { verifySkillResources } from './package-skill.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGETS = {
@@ -203,6 +205,8 @@ export async function verify(bundle, target) {
     'bin/cua_driver_node_runtime.node',
     'runtime/host.js',
     'runtime/cli.js',
+    'skills/computer-use/SKILL.md',
+    'skills/computer-use/instructions.md',
     'node_modules/@trycua/cua-driver/package.json',
     `node_modules/@trycua/cua-driver-win32-${target.npmArch}-msvc/package.json`,
     'licenses/NODE-LICENSE',
@@ -211,6 +215,7 @@ export async function verify(bundle, target) {
     'licenses/DOTNET-THIRD-PARTY-NOTICES',
   ];
   for (const name of required) if (!(await exists(join(bundle, name)))) throw new Error(`Missing Windows package resource: ${name}`);
+  await verifySkillResources(join(bundle, 'skills', 'computer-use'));
   await assertInternalLinks(bundle);
   for (const name of [
     'ComputerUse.WindowsHost.exe',
@@ -341,8 +346,8 @@ async function build(target) {
     if ((await sha256(cuaLicense)) !== CUA_LICENSE_SHA256) throw new Error('Cua license checksum mismatch.');
     await cp(cuaLicense, join(licenses, 'CUA-LICENSE'));
     for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) await cp(join(ROOT, name), join(licenses, name));
-    if (await exists(join(ROOT, 'skills', 'computer-use', 'SKILL.md')))
-      await cp(join(ROOT, 'skills', 'computer-use'), join(bundle, 'skills', 'computer-use'), { recursive: true });
+    await checkSkill();
+    await cp(join(ROOT, 'skills', 'computer-use'), join(bundle, 'skills', 'computer-use'), { recursive: true });
     await writeFile(
       join(bundle, 'build-receipt.json'),
       JSON.stringify({ owner: target.marker, arch: target.rid, node: target.node, cua: target.cua }, null, 2),

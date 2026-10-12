@@ -27,10 +27,10 @@ public enum L10nKey: String, CaseIterable {
     // 服务状态
     case statusNotStarted, statusPermissionsNeeded, statusStartingDriver, statusStartingRuntime, statusReady, statusPaused
     case statusControlling, statusEmergencyStopped, statusRestarting, statusQuitting, statusInstallingUpdate
-    case statusRequestExpired, statusReopenAfterGrant
+    case statusRequestExpired, statusReopenAfterGrant, statusStoppedPersistent, statusPausedPersistent
     // 服务失败
     case failureLaunchTitle, failureDriverTimeout, failureRuntimeTimeout, failureChildExited, childDriver, childRuntime
-    case failureReadEvents, failureRuntime, failureSendControl
+    case failureReadEvents, failureRuntime, failureSendControl, failureStartupState
     case errorUnsafeDirectory, errorAlreadyRunning, errorResourcesUnavailable, errorLineTooLong, errorInvalidEvent
     case errorSocketPathTooLong, errorSocketOccupied
     // 审批
@@ -53,6 +53,10 @@ public enum L10nKey: String, CaseIterable {
     // 接入
     case connectHTTP, connectHTTPToggle, connectHTTPHint, connectHTTPAddress, connectCopyAddress
     case connectStdio, connectCopy, connectCopied, connectCopiedBody, connectCopyFailed, connectPairing, connectPairingHint
+    case connectProfile, connectProfileHint, connectProfileInvalidName, connectProfileUnchecked, connectProfileMissing
+    case connectProfileInvalid, connectProfileUnverified, connectProfileValid, connectProfileUnauthorized, connectRefresh
+    case connectCopyPair, connectPairingSteps, connectCopyPrompt, connectInstallHint, connectAdvanced
+    case connectContentCopied, connectClipboardFailed, connectWorking, connectCLIUnavailable, connectCLITimeout, connectCLIOutput, connectCLIFailed
     // 更新
     case updatesVersion, updatesAutomatic, updatesAutomaticToggle, updatesAutomaticHint, updatesLastCheck, updatesNever
     case updatesCheckNow, updatesChecking, updatesUpToDate, updatesAvailable, updatesInstall, updatesDownload
@@ -188,6 +192,32 @@ public enum L10n {
         .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。旧配对保持原范围；需要改变时，撤销后重新配对。",
         .clientsRevokeTitle: "撤销“%@”？",
         .clientsRevokeBody: "该客户端的凭据会立即失效，需要重新配对才能再次使用。",
+
+        .statusStoppedPersistent: "服务已停止。请在 App 中重启服务。",
+        .statusPausedPersistent: "操作已暂停。请在 App 中恢复。",
+        .failureStartupState: "无法保存服务状态。请检查本机数据目录后重启服务。",
+        .connectProfile: "配对配置：",
+        .connectProfileHint: "选择已有 profile，或输入新名称；安装提示词、配对命令和 MCP 配置共用此选择。",
+        .connectProfileInvalidName: "名称需为 1–64 个英文字母、数字、下划线或连字符。",
+        .connectProfileUnchecked: "尚未检查此 profile 的本地配对状态。",
+        .connectProfileMissing: "尚未配对。请先运行配对命令，再在本机批准。",
+        .connectProfileInvalid: "本地配对资料不可用，请通过 CLI 检查后再使用。",
+        .connectProfileUnverified: "已找到本地配对资料；尚未验证授权是否有效。",
+        .connectProfileValid: "此 profile 的配对已验证。",
+        .connectProfileUnauthorized: "此 profile 的授权已失效，请在客户端页面检查。",
+        .connectRefresh: "刷新状态",
+        .connectCopyPair: "复制配对命令",
+        .connectPairingSteps: "仅首次配对时运行，并在 App 中批准。已有 profile 不必重复配对。",
+        .connectCopyPrompt: "复制安装提示词",
+        .connectInstallHint: "粘贴给你的 Agent，由它安装 Skill 并完成连接。",
+        .connectAdvanced: "高级接入",
+        .connectContentCopied: "已复制。",
+        .connectClipboardFailed: "无法写入剪贴板，请稍后再试。",
+        .connectWorking: "正在读取接入资料…",
+        .connectCLIUnavailable: "缺少可用的内置 CLI，请使用完整 App 安装包。",
+        .connectCLITimeout: "读取接入资料超时，请稍后刷新。",
+        .connectCLIOutput: "内置 CLI 返回的接入资料无效。",
+        .connectCLIFailed: "无法读取接入资料，请检查 CLI 后重试。",
 
         .connectHTTP: "本机 HTTP：",
         .connectHTTPToggle: "启用本机 HTTP MCP",
@@ -365,6 +395,32 @@ public enum L10n {
         .clientsHint: "All apps includes apps opened or installed later and their windows. Existing pairings keep their scope; revoke and pair again to change it.",
         .clientsRevokeTitle: "Revoke “%@”?",
         .clientsRevokeBody: "Its credentials stop working immediately. It must pair again to reconnect.",
+
+        .statusStoppedPersistent: "Services are stopped. Restart services in the app.",
+        .statusPausedPersistent: "Actions are paused. Resume them in the app.",
+        .failureStartupState: "Could not save the service state. Check the local data directory, then restart services.",
+        .connectProfile: "Profile:",
+        .connectProfileHint: "Choose an existing profile or enter a new name. The installation prompt, pairing and MCP configuration use this selection.",
+        .connectProfileInvalidName: "Use 1–64 letters, numbers, underscores or hyphens.",
+        .connectProfileUnchecked: "This profile's local pairing has not been checked.",
+        .connectProfileMissing: "Not paired yet. Run the pairing command and approve it locally.",
+        .connectProfileInvalid: "Local pairing data is unavailable. Check it with the CLI before use.",
+        .connectProfileUnverified: "Local pairing data exists; authorization has not been verified.",
+        .connectProfileValid: "This profile's pairing has been verified.",
+        .connectProfileUnauthorized: "This profile's authorization is no longer valid. Check the Clients page.",
+        .connectRefresh: "Refresh",
+        .connectCopyPair: "Copy Pairing Command",
+        .connectPairingSteps: "Run only for initial pairing, then approve in the app. Existing profiles do not need pairing again.",
+        .connectCopyPrompt: "Copy Installation Prompt",
+        .connectInstallHint: "Paste it into your agent to install the Skill and complete the connection.",
+        .connectAdvanced: "Advanced Connection",
+        .connectContentCopied: "Copied.",
+        .connectClipboardFailed: "Could not write to the clipboard. Please try again.",
+        .connectWorking: "Reading setup information…",
+        .connectCLIUnavailable: "The bundled CLI is unavailable. Use the complete app package.",
+        .connectCLITimeout: "Reading setup information timed out. Refresh to try again.",
+        .connectCLIOutput: "The bundled CLI returned invalid setup information.",
+        .connectCLIFailed: "Could not read setup information. Check the CLI and try again.",
 
         .connectHTTP: "Local HTTP:",
         .connectHTTPToggle: "Enable local HTTP MCP",

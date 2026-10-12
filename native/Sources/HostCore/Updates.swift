@@ -409,15 +409,15 @@ public enum UpdateInstaller {
       waited=$((waited + 1))
     done
     if ! /bin/mv "$current" "$backup"; then
-      "$opener" "$current"
+      "$opener" -g "$current" --args --background
       exit 4
     fi
     if ! /bin/mv "$next" "$current"; then
       /bin/mv "$backup" "$current"
-      "$opener" "$current"
+      "$opener" -g "$current" --args --background
       exit 5
     fi
-    "$opener" "$current"
+    "$opener" -g "$current" --args --background
     """
 
     public static func swapCommand(pid: Int32, current: URL, next: URL, backup: URL,

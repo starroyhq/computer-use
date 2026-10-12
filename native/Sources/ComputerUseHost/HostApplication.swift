@@ -43,6 +43,11 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private var updateItem: NSMenuItem!
     private var settings: SettingsWindowController?
     private var lock: HostLock?
+    private let backgroundLaunch: Bool
+    private lazy var startupStore = HostStartupStore(directory: paths.data)
+    private var startupLifecycle: HostStartupLifecycle?
+    private var statePersistenceFailed = false
+    private var terminating = false
     private var driver: Process?
     private var runtime: Process?
     private var liveness: FileHandle?
@@ -80,24 +85,40 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         return statusText
     }
 
+    init(background: Bool = false) {
+        backgroundLaunch = background
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = Self.mainMenu()
         buildMenu()
         do {
             lock = try HostLock(directory: paths.data)
+            guard let process = HostProcessIdentity.read(), let session = HostStartup.session() else {
+                throw StartupFailure.invalidState
+            }
+            startupLifecycle = HostStartupLifecycle(process: process, sessionID: session.id, previous: try startupStore.read())
+            try startupStore.write(startupLifecycle!.state)
         } catch {
             setStatus(error.localizedDescription, state: .failed)
-            Alerts.show(tr(.failureLaunchTitle), error.localizedDescription)
+            if !backgroundLaunch { Alerts.show(tr(.failureLaunchTitle), error.localizedDescription) }
             NSApp.terminate(nil)
             return
         }
         updates.host = self
         updates.onChange = { [weak self] in self?.stateChanged() }
         updates.start()
-        startServices()
+        if let blocked = startupLifecycle?.state.blockedReason {
+            setStatus(tr(blocked == .paused ? .statusPausedPersistent : .statusStoppedPersistent), state: blocked == .paused ? .paused : .stopped)
+        } else {
+            startServices()
+        }
         // 只在需要处理时打开设置窗口（首次安装或权限缺失）；平时只在菜单栏运行。
-        if !permissionsGranted { showSettings(.status) }
+        if !backgroundLaunch && !HostStartup.isLoginItemLaunch && (!permissionsGranted || startupLifecycle?.state.autoStartBlocked == true) {
+            showSettings(.status)
+        }
     }
 
     // 发行版只使用 App 自带的资源：同一用户的其他进程可以用 launchctl setenv 注入环境变量，
@@ -169,7 +190,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         guard item != nil else { return }
         statusLine.title = serviceStatus
         pauseItem.title = serviceState == .paused ? tr(.menuResume) : tr(.menuPause)
-        pauseItem.isEnabled = running
+        pauseItem.isEnabled = running || serviceState == .paused
         stopItem.isEnabled = running || serviceState == .starting
         if let check = updates.announced {
             updateItem.title = tr(.menuUpdateAvailable, check.latest)
@@ -206,10 +227,52 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         button.setAccessibilityLabel(description)
     }
 
-    private func setStatus(_ text: String, state: ServiceState? = nil) {
+    @discardableResult private func setStatus(_ text: String, state: ServiceState? = nil) -> Bool {
+        if let state, startupLifecycle != nil, !statePersistenceFailed {
+            let phase: StartupPhase
+            switch state {
+            case .starting: phase = .starting
+            case .ready: phase = .ready
+            case .paused: phase = .paused
+            case .stopped: phase = .stopped
+            case .failed: phase = .failed
+            case .needsPermissions: phase = .permissionsRequired
+            case .installing: phase = .exited
+            }
+            guard startupLifecycle?.transition(phase) == true else { return false }
+            do { try startupStore.write(startupLifecycle!.state) }
+            catch { stateStoreFailed(); return false }
+        }
         statusText = text
         if let state { serviceState = state }
         stateChanged()
+        return true
+    }
+
+    private func stateStoreFailed() {
+        statePersistenceFailed = true
+        startupLifecycle?.cancelRestart()
+        if !stopping { stopServices(message: tr(.failureStartupState), state: .failed) }
+        else { statusText = tr(.failureStartupState); serviceState = .failed; stateChanged() }
+    }
+
+    private func persistBlock(_ reason: StartupBlock) -> Bool {
+        startupLifecycle?.block(reason)
+        guard let state = startupLifecycle?.state else { return false }
+        do { try startupStore.write(state); return true }
+        catch { stateStoreFailed(); return false }
+    }
+
+    /// Only local UI actions call this. A launch, Reopen, login item or updater cannot clear a user's stop.
+    private func clearBlock() -> Bool {
+        guard var next = startupLifecycle else { return false }
+        next.resume()
+        do {
+            try startupStore.write(next.state)
+            startupLifecycle = next
+            statePersistenceFailed = false
+            return true
+        } catch { stateStoreFailed(); return false }
     }
 
     private func stateChanged() {
@@ -249,7 +312,8 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     // MARK: 服务
 
     private func startServices() {
-        guard driver == nil, runtime == nil, !stopping else { return }
+        guard driver == nil, runtime == nil, !stopping, !terminating,
+              !statePersistenceFailed, startupLifecycle?.state.autoStartBlocked != true else { return }
         guard permissionsGranted else {
             setStatus(tr(.statusPermissionsNeeded), state: .needsPermissions)
             return
@@ -278,7 +342,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             try? parentLiveness.fileHandleForReading.close()
             liveness = parentLiveness.fileHandleForWriting
             driver = process
-            setStatus(tr(.statusStartingDriver), state: .starting)
+            guard setStatus(tr(.statusStartingDriver), state: .starting) else { return }
             let deadline = Date().addingTimeInterval(15)
             startupTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 guard let self, self.generation == token else { timer.invalidate(); return }
@@ -302,7 +366,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         process.environment = paths.childEnvironment(from: ProcessInfo.processInfo.environment)
         process.standardInput = incoming
         process.standardOutput = outgoing
-        process.standardError = FileHandle.standardError
+        process.standardError = FileHandle.nullDevice
         process.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async { self?.childExited(token: token, child: tr(.childRuntime)) }
         }
@@ -313,7 +377,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         try outgoing.fileHandleForWriting.close()
         input = incoming.fileHandleForWriting
         output = outgoing.fileHandleForReading
-        setStatus(tr(.statusStartingRuntime), state: .starting)
+        guard setStatus(tr(.statusStartingRuntime), state: .starting) else { return }
         let handle = outgoing.fileHandleForReading
         readerQueue.async { [weak self] in
             var framer = LineFramer()
@@ -350,6 +414,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private func handle(_ event: HostEvent) {
         switch event.event {
         case "ready":
+            guard startupLifecycle?.state.autoStartBlocked != true, !statePersistenceFailed else { return }
             startupTimer?.invalidate(); startupTimer = nil
             running = true
             setStatus(tr(.statusReady), state: .ready)
@@ -447,28 +512,41 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         if let alert = activeAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
     }
 
-    private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) {
-        guard let input else { return }
-        do { try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps)) }
-        catch { if !stopping { fail(tr(.failureSendControl)) } }
+    @discardableResult private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) -> Bool {
+        guard let input else { return false }
+        do {
+            try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps))
+            return true
+        } catch { if !stopping { fail(tr(.failureSendControl)) }; return false }
     }
 
     // MARK: 控制
 
     func pauseActions() {
         guard running, serviceState == .ready else { return }
-        send("pause")
+        guard persistBlock(.paused), send("pause") else { return }
         setStatus(tr(.statusPaused), state: .paused)
     }
 
     func resumeActions() {
-        guard running, serviceState == .paused else { return }
-        send("resume")
-        setStatus(tr(.statusReady), state: .ready)
+        guard serviceState == .paused, !stopping, !terminating, clearBlock() else { return }
+        if running {
+            if send("resume") { setStatus(tr(.statusReady), state: .ready) }
+        } else { startServices() }
     }
 
-    func emergencyStop() { stopServices(message: tr(.statusEmergencyStopped), state: .stopped) }
-    func restartServices() { stopServices(message: tr(.statusRestarting), state: .starting) { [weak self] in self?.startServices() } }
+    func emergencyStop() {
+        startupLifecycle?.cancelRestart()
+        guard persistBlock(.stopped) else { return }
+        // A stop during the one-second restart shutdown also cancels the queued restart.
+        if stopping { setStatus(tr(.statusEmergencyStopped), state: .stopped) }
+        else { stopServices(message: tr(.statusEmergencyStopped), state: .stopped) }
+    }
+    func restartServices() {
+        guard !terminating, clearBlock() else { return }
+        startupLifecycle?.requestRestart()
+        if !stopping { stopServices(message: tr(.statusRestarting), state: .starting) }
+    }
     func revokeClient(_ id: String) { send("revoke", clientID: id) }
 
     func setHTTPEnabled(_ enabled: Bool) {
@@ -503,6 +581,9 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             self.terminateChildren()
             self.stopping = false
             completion?()
+            if !self.terminating && self.startupLifecycle?.takeRestart() == true {
+                self.startServices()
+            }
         }
     }
 
@@ -566,6 +647,8 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     @objc private func quit() { NSApp.terminate(nil) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        terminating = true
+        startupLifecycle?.cancelRestart()
         if driver == nil && runtime == nil { return .terminateNow }
         if stopping {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { NSApp.reply(toApplicationShouldTerminate: true) }
@@ -582,6 +665,11 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         updates.stop()
         for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
         terminateChildren()
+        if var lifecycle = startupLifecycle {
+            lifecycle.transition(.exited)
+            // Keep the last successfully persisted pause/stop if the filesystem is unavailable while exiting.
+            try? startupStore.write(lifecycle.state)
+        }
     }
 }
 

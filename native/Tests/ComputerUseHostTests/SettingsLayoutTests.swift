@@ -34,6 +34,88 @@ final class SettingsLayoutTests: XCTestCase {
                        "Computer Use v0.5.0\n\n- 新增：设置窗口\n#tag 保留")
     }
 
+    func testPersistedPauseCanBeResumedBeforeRuntimeStarts() throws {
+        let context = FakeContext()
+        context.isRunning = false
+        context.serviceState = .paused
+        let pane = StatusPane(context: context)
+        _ = pane.view
+        pane.refresh()
+        let resume = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
+            .first { $0.title == tr(.menuResume) })
+        XCTAssertTrue(resume.isEnabled)
+        resume.performClick(nil)
+        XCTAssertEqual(context.resumeCount, 1)
+    }
+
+    func testConnectProfileDrivesPreviewAndInvalidNamesDisableArtifacts() throws {
+        let suite = "ConnectPaneTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let context = FakeContext()
+        var calls = [[String]]()
+        let access = ConnectAccess(paths: context.paths, defaults: defaults) { arguments, completion in
+            calls.append(arguments)
+            completion(.failure(.unavailable))
+        }
+        let pane = ConnectPane(context: context, access: access)
+        _ = pane.view
+        pane.refresh()
+        pane.refresh()
+        XCTAssertTrue(calls.isEmpty, "The primary prompt flow does not need profile preflight")
+        let advanced = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "connect-advanced-toggle" })
+        XCTAssertEqual(advanced.state, .off)
+        advanced.performClick(nil)
+        let advancedForm = try XCTUnwrap(Self.descendants(pane.view).first { $0.identifier?.rawValue == "connect-advanced" })
+        XCTAssertFalse(advancedForm.isHidden)
+        XCTAssertEqual(calls, [["preflight", "--profile", "default"]])
+        let profile = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSComboBox }.first)
+        let preview = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTextView }.first)
+        let buttons = Self.descendants(pane.view).compactMap { $0 as? NSButton }
+        profile.stringValue = "work-agent"
+        pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: profile))
+        XCTAssertEqual(access.selectedProfile, "work-agent")
+        XCTAssertEqual(preview.string, ConnectAccess.pairCommand(paths: context.paths, profile: "work-agent"))
+        profile.stringValue = "../credentials"
+        pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: profile))
+        XCTAssertTrue(preview.string.isEmpty)
+        XCTAssertEqual(access.selectedProfile, "work-agent")
+        let artifactKeys: [L10nKey] = [.connectCopyPair, .connectCopy, .connectCopyPrompt]
+        for key in artifactKeys {
+            XCTAssertFalse(try XCTUnwrap(buttons.first { $0.title == tr(key) }).isEnabled)
+        }
+        XCTAssertEqual(calls.count, 1, "Editing or timer refresh must not spawn repeated CLI tasks")
+        advanced.performClick(nil)
+        XCTAssertTrue(advancedForm.isHidden)
+        XCTAssertEqual(access.selectedProfile, "work-agent", "Collapsing advanced access preserves the shared profile")
+    }
+
+    func testConnectPrimaryPromptAndAdvancedLayoutFitBothLanguages() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext()
+            let access = ConnectAccess(paths: context.paths) { _, completion in completion(.failure(.unavailable)) }
+            let pane = ConnectPane(context: context, access: access)
+            _ = pane.view
+            let buttons = Self.descendants(pane.view).compactMap { $0 as? NSButton }
+            XCTAssertEqual(buttons.filter { $0.title == tr(.connectCopyPrompt) }.count, 1)
+            let advanced = try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "connect-advanced-toggle" })
+            for expanded in [false, true, false] {
+                if (advanced.state == .on) != expanded { advanced.performClick(nil) }
+                pane.view.layoutSubtreeIfNeeded()
+                let content = try XCTUnwrap(pane.view.subviews.first)
+                XCTAssertLessThanOrEqual(content.fittingSize.width, Form.pageWidth - 56)
+                XCTAssertLessThan(pane.view.fittingSize.height, 720)
+                XCTAssertTrue(Self.ambiguousViews(in: pane.view).isEmpty)
+            }
+        }
+    }
+
+    private static func descendants(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap(descendants)
+    }
+
     func testPairingMessageDistinguishesAllAppsFromExistingRestrictedScope() throws {
         let all = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"all","name":"Agent","appIds":[],"allApps":true,"browser":false,"foreground":true}"#.utf8))
         let restricted = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"old","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false,"foreground":true}"#.utf8))
@@ -154,7 +236,7 @@ final class SettingsLayoutTests: XCTestCase {
 }
 
 private final class FakeContext: HostContext {
-    let paths = HostPaths(resources: URL(fileURLWithPath: "/Applications/Computer Use.app/Contents/Resources"),
+    let paths = HostPaths(resources: URL(fileURLWithPath: "/ComputerUseTests-MissingResources/Contents/Resources"),
                           home: FileManager.default.temporaryDirectory)
     var serviceState = ServiceState.ready
     var serviceStatus = tr(.statusReady)
@@ -168,7 +250,8 @@ private final class FakeContext: HostContext {
     lazy var updates = UpdateController(paths: paths, info: ["CFBundleShortVersionString": "0.4.0", "CFBundleVersion": "5"], teamID: teamID)
 
     func pauseActions() {}
-    func resumeActions() {}
+    var resumeCount = 0
+    func resumeActions() { resumeCount += 1 }
     func emergencyStop() {}
     func restartServices() {}
     func revokeClient(_ id: String) {}

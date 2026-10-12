@@ -10,7 +10,7 @@
 
 ## 安装与卸载
 
-从 [v0.6.1 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.6.1) 下载对应架构的 `computer-use-0.6.1-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.6.1-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
+从 [v0.7.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.7.0) 下载对应架构的 `computer-use-0.7.0-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.7.0-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
 
 v0.6.0 开始提供安装程序，v0.5.0 及更早版本只提供便携包。本地 ARM64 覆盖安装已验收，但从真实发布下载到完成安装版升级的完整流程、原生 x64 安装和 SmartScreen 表现仍待验证，见[验证记录](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10)。
 
@@ -30,13 +30,19 @@ Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
 
 无论哪种方式，预构建包都已内置运行组件，无需安装下节所述的构建工具。首次运行需在当前用户的交互登录桌面。包内不含别人的配对凭据，需要由使用者在本机新建并批准自己的配对。
 
+## 复制安装提示词接入 Agent
+
+v0.7.0 的 App“接入”页默认提供“复制安装提示词”。点击后把提示词粘贴给你的 Agent，由它安装 Skill 并完成连接。App 只生成并复制提示词，不替 Agent 安装 Skill 或写入客户端配置；生成提示词不发起配对、不启动服务。系统权限和首次客户端授权仍须由你在本机批准，已有 profile 不必重复配对。
+
+“高级接入”默认收起；展开后可选择已有 profile 或输入新名称、复制配对命令与 stdio MCP 配置，以及启用本机 HTTP MCP。默认 profile 为 `default`，安装提示词、配对命令与 MCP 配置共用所选名称，复制内容不包含配对凭据。在包目录中也可用 `bin\node.exe runtime\cli.js skill prompt --profile default` 输出同样的安装提示词。
+
 ## 按需启动与暂停保护
 
-v0.6.1 的完整 Windows 包支持按需启动：用同包 `bin\node.exe runtime\cli.js` 的 CLI 或 stdio MCP 访问默认管道时，先检查管道是否可连接；不可达时调用同包 Host 的启动检查，仅在没有已运行宿主且无暂停/紧停阻止时启动，等待就绪后发送原 RPC。MCP `initialize` 和 `tools/list` 不连接运行时、不启动托盘，首次实际工具调用才需要宿主。首次配对仍需用户在托盘批准，自动启动不创建授权。
+从 v0.6.1 起，完整 Windows 包支持按需启动：用同包 `bin\node.exe runtime\cli.js` 的 CLI 或 stdio MCP 访问默认管道时，先检查管道是否可连接；不可达时调用同包 Host 的启动检查，仅在没有已运行宿主且无暂停/紧停阻止时启动，等待就绪后发送原 RPC。MCP `initialize` 和 `tools/list` 不连接运行时、不启动托盘，首次实际工具调用才需要宿主。首次配对仍需用户在托盘批准，自动启动不创建授权。
 
-启动只适用于当前用户的交互式登录桌面，不适用于服务账号或 Session 0。源码运行、macOS、自定义 `--socket`、HTTP 和 SSH 隧道不使用这一自动启动路径；不会从 PATH 或其他安装目录搜索宿主。移动安装目录后仍需重新生成 Agent 配置。
+启动只适用于当前用户的交互式登录桌面，不适用于服务账号或 Session 0。源码运行、自定义 `--socket`、HTTP 和 SSH 隧道不使用这一自动启动路径。v0.7.0 的 macOS 完整 App 也支持同包受控启动，缺少系统权限时返回明确错误，需用户打开 App 处理；两平台均不会从 PATH 或其他安装目录搜索宿主。移动安装目录后仍需重新生成 Agent 配置。
 
-暂停和紧停写入当前用户私有目录的 `host-state.json`，退出托盘后仍会阻止自动启动和登录启动。需由用户在本机恢复暂停、重启服务，或在宿主已退出后主动打开 App；再次打开一个仍在运行的 Host 只显示设置，不替它恢复服务。已有但失败或停止的 Host 也不会被 helper 自动重启。就绪前失败不会发送原业务请求；已发送动作的连接失败仍按不确定结果处理，不自动重放。
+v0.7.0 在 Windows 与 macOS 上均将暂停和紧停写入当前用户私有目录的 `host-state.json`。退出、重新打开 App、登录及更新重开都保留阻止状态，只有用户在本机 App 内点击“恢复／重启服务”才能解除；再次打开只显示状态，不自动恢复。已有但失败或停止的 Host 也不会被 helper 自动重启。就绪前失败不会发送原业务请求；已发送动作的连接失败仍按不确定结果处理，不自动重放。
 
 需要单独检查启动时，在完整安装或便携目录的 PowerShell 中运行：
 
@@ -46,7 +52,7 @@ v0.6.1 的完整 Windows 包支持按需启动：用同包 `bin\node.exe runtime
 
 helper 最多等待 35 秒，stdout 只返回一行 JSON；成功为 `{"ok":true,"state":"ready"}` 并退出 0。失败退出非零，包含 `ok: false`、`code` 和 `message`；代码为 `paused`、`stopped`、`failed`、`non_interactive`、`timeout` 或 `launch_failed`。成功要求匹配当前会话和宿主进程身份，并实际探测已公布的管道；仅看到 EXE 进程不算就绪。这一命令不批准配对、不恢复暂停或紧停，也不解除 Windows 系统拦截。
 
-本节说明接口行为；v0.6.1 的实际构建、VM 与 CI 验证结果以[验证记录](validation-results.md)为准，历史桌面验收不自动覆盖新增启动路径。
+本节说明 v0.7.0 的接口行为；历史本地构建与 VM 验收见[验证记录](validation-results.md)，v0.7.0 发布产物与 CI 需独立验证。
 
 ## 从源码构建与启动
 
@@ -75,7 +81,7 @@ node scripts/package-windows-installer.mjs --arch x64 --verify-only --smoke-test
 
 v0.6.1 为 EXE、托盘、设置与授权窗口、安装器加入完整的暖白与深炭色光标图标。图标用于识别程序，不代表文件已经签名，也不改变启动或授权规则。
 
-从 v0.6.0 起，窗口采用状态、客户端、接入、通用、更新、关于 6 区侧栏，紧急停止在每一页常驻。状态页展示服务与配对数量，可进入接入页复制配对命令，再复制 stdio 配置；客户端页可查看范围并撤销授权。配对窗口分区列出客户端身份、桌面范围、独立浏览器、前台权限、有效期与执行方式，长内容可以滚动，决定按钮保持可见。默认按钮与初始焦点仍为拒绝；关闭窗口或按 Esc 不会授权，超时或请求撤回会关闭提示，允许决定以运行时确认为准。
+从 v0.6.0 起，窗口采用状态、客户端、接入、通用、更新、关于 6 区侧栏，紧急停止在每一页常驻。状态页展示服务与配对数量，可进入接入页复制安装提示词；手动配对命令与 stdio 配置位于默认收起的“高级接入”中。客户端页可查看范围并撤销授权。配对窗口分区列出客户端身份、桌面范围、独立浏览器、前台权限、有效期与执行方式，长内容可以滚动，决定按钮保持可见。默认按钮与初始焦点仍为拒绝；关闭窗口或按 Esc 不会授权，超时或请求撤回会关闭提示，允许决定以运行时确认为准。
 
 ## 更新
 
@@ -84,11 +90,11 @@ v0.6.1 为 EXE、托盘、设置与授权窗口、安装器加入完整的暖白
 - **安装版**：发布包含安装程序时，下载并校验新版本的安装程序，点“运行安装程序”后按向导完成。安装程序先让托盘程序停止服务并退出，再覆盖安装到原目录，完成页可直接启动；在点“安装”之前取消，托盘程序照常运行。
 - **便携版**：只下载并校验 ZIP，然后在资源管理器中显示。退出托盘程序，完整解压，用新文件夹替换当前文件夹并保持同一路径，这样 Agent 配置中的绝对路径仍然有效。
 
-已配对的客户端和设置保存在 `%LOCALAPPDATA%\Computer Use`，两种方式都不受影响。
+已配对的客户端和设置保存在 `%LOCALAPPDATA%\Computer Use`，两种方式都不受影响。已保存的暂停或紧停同样保留，安装完成后启动 App 不会自动恢复服务。
 
 ## Windows 本机 Agent：stdio MCP
 
-从 v0.6.0 起，新配对默认首次一次授权所有桌面应用，无需填写应用路径；已有受限客户端不会自动扩大范围。本节与后面的 Mac 远程接入是两种选择，无需都做。
+从 v0.6.0 起，新配对默认首次一次授权所有桌面应用，无需填写应用路径；已有受限客户端不会自动扩大范围。以下是“高级接入”的手动配置流程；本节与后面的 Mac 远程接入是两种选择，无需都做。
 
 ```powershell
 Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP：改为进入安装目录或解压目录
@@ -124,7 +130,7 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP�
 
 在 Windows 托盘中批准此客户端的全应用配对；如只做 Fixture 验收，在配对命令加 `--app 'C:\path\to\ComputerUseFixture.exe'` 限定范围。撤销后 Mac 的旧凭据应立即失效。Windows 宿主及 CLI 的管道、凭据和日志位于当前用户的 `%LOCALAPPDATA%\Computer Use`，不要从服务账号或未登录的后台会话启动宿主。
 
-在设置窗口的“接入”页启用本机 HTTP MCP（仅本次运行有效），然后生成供 Mac 使用的私有配置文件：
+在设置窗口的“接入”页展开“高级接入”，启用本机 HTTP MCP（仅本次运行有效），然后生成供 Mac 使用的私有配置文件：
 
 ```powershell
 & .\bin\node.exe .\runtime\cli.js config http --profile mac-codex --out "$env:LOCALAPPDATA\Computer Use\mac-codex-mcp.json"

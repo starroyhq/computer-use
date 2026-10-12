@@ -1,0 +1,245 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import test from 'node:test';
+import { checkSkill } from './build-skill.mjs';
+
+const markdown = await checkSkill();
+const marker = '<!-- computer-use-bootstrap:windows -->\n```powershell\n';
+const script = markdown.split(marker)[1].split('\n```')[0];
+const entry = '\ntry {\n    if ([Environment]::OSVersion.Platform';
+assert.equal(script.split(entry).length, 2);
+const windows = process.platform === 'win32';
+const quote = value => `'${value.replaceAll("'", "''")}'`;
+
+function powershell(code) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        Buffer.from(
+          '[Console]::InputEncoding = [Text.Encoding]::UTF8; [Console]::OutputEncoding = [Text.Encoding]::UTF8; & ([ScriptBlock]::Create([Console]::In.ReadToEnd()))',
+          'utf16le',
+        ).toString('base64'),
+      ],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    child.stdin.end(code);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', value => {
+      stdout += value;
+    });
+    child.stderr.on('data', value => {
+      stderr += value;
+    });
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stdout: stdout.replace(/^\uFEFF/, ''), stderr }));
+  });
+}
+
+async function fakePackage(path, arch, version) {
+  for (const file of [
+    'ComputerUse.WindowsHost.exe',
+    'bin/node.exe',
+    'bin/cua-driver.exe',
+    'runtime/cli.js',
+    'runtime/host.js',
+    'skills/computer-use/SKILL.md',
+  ]) {
+    await mkdir(dirname(join(path, file)), { recursive: true });
+    await writeFile(join(path, file), 'test fixture; never execute');
+  }
+  await mkdir(join(path, 'node_modules'));
+  await writeFile(join(path, 'package.json'), JSON.stringify({ version }));
+  await writeFile(
+    join(path, 'build-receipt.json'),
+    JSON.stringify({ owner: `computer-use-windows-${arch}-package-v1`, arch: `win-${arch}` }),
+  );
+}
+
+async function fixture(t, options = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'computer-use-bootstrap-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const archResult = await powershell(script.split(entry)[0] + '\nGet-NativeArchitecture');
+  assert.equal(archResult.code, 0, archResult.stderr);
+  const arch = archResult.stdout.trim();
+  assert.ok(['arm64', 'x64'].includes(arch));
+  const version = '99.0.1';
+  const platform = `windows-${arch}`;
+  const prefix = `computer-use-${version}-${platform}`;
+  const name = `${prefix}-setup.exe`;
+  const installer = Buffer.from('fixture installer that must never execute');
+  const digest = createHash('sha256').update(installer).digest('hex');
+  const metadata = {
+    version,
+    platform,
+    commit: 'a'.repeat(40),
+    sourceDirty: false,
+    archive: `${prefix}.zip`,
+    bytes: 1,
+    sha256: 'b'.repeat(64),
+    signing: 'unsigned',
+    installer: { name, bytes: installer.length, sha256: digest },
+    ...options.metadata,
+  };
+  const home = join(directory, "Local AppData '$HOME' 电脑");
+  await mkdir(home);
+  const packagePath = join(home, 'Programs', 'Computer Use');
+  const source = join(directory, 'source-package');
+  await fakePackage(source, arch, options.installedVersion ?? version);
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    const path = new URL(request.url, 'http://127.0.0.1').pathname;
+    if (path.endsWith('/releases/latest')) {
+      response.writeHead(302, { Location: options.latest ?? `https://github.com/starroyhq/computer-use/releases/tag/v${version}` });
+      response.end();
+    } else if (path.endsWith('.json')) response.end(JSON.stringify(metadata));
+    else if (path.endsWith('.sha256')) response.end(`${digest}  ${name}\n`);
+    else if (path.endsWith(name)) {
+      if (options.redirect) {
+        response.writeHead(302, { Location: options.redirect });
+        response.end();
+      } else response.end(options.corrupt ? Buffer.alloc(installer.length, 88) : options.truncated ? installer.subarray(2) : installer);
+    } else {
+      response.writeHead(404);
+      response.end();
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const port = server.address().port;
+  const overrides = `
+$env:LOCALAPPDATA = ${quote(home)}
+function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
+    Assert-TrustedUri $Uri
+    $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:${port}' + $Uri.PathAndQuery)
+    $request.AllowAutoRedirect = $false
+    $request.Timeout = $TimeoutMilliseconds
+    $request.ReadWriteTimeout = $TimeoutMilliseconds
+    return $request.GetResponse()
+}
+function Start-Process {
+    param($FilePath, $ArgumentList, [switch]$PassThru)
+    if ($ArgumentList.Count -ne 4 -or $ArgumentList[0] -ne '/VERYSILENT') { throw 'Unexpected installer arguments' }
+    New-Item -ItemType Directory -Path ${quote(dirname(packagePath))} -Force | Out-Null
+    Copy-Item -LiteralPath ${quote(source)} -Destination ${quote(packagePath)} -Recurse
+    $process = [pscustomobject]@{ ExitCode = 0 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Timeout) return $true }
+    return $process
+}
+`;
+  // Only this test copy substitutes network/process dependencies; production has no fixture/source override.
+  const registry = '{6C2B9F4E-4B7A-4E0F-9C59-3B1D2F8A7E41}_is1';
+  const copy = script.replace(registry, `computer-use-fixture-${Date.now()}-${Math.random()}_is1`).replace(entry, overrides + entry);
+  return {
+    arch,
+    packagePath,
+    credentialPath: join(home, 'Computer Use', 'credentials', 'default.json'),
+    requests,
+    run: () => powershell(copy),
+    source,
+    copy,
+  };
+}
+
+test('PowerShell parser accepts the exact script copied in Markdown', { skip: !windows }, async () => {
+  const result = await powershell(`$errors = $null; $tokens = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(${quote(script)}, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+'parsed'`);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'parsed');
+});
+
+test('Windows clean bootstrap uses native architecture and preserves an existing profile on rerun', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.credentialPath), { recursive: true });
+  const credential = JSON.stringify({ clientId: 'fixture-profile', token: 'fixture-secret-retained-only-in-test-directory' });
+  await writeFile(f.credentialPath, credential);
+  const first = await f.run();
+  assert.equal(first.code, 0, first.stderr);
+  const output = JSON.parse(first.stdout);
+  assert.equal(output.platform, `windows-${f.arch}`);
+  assert.equal(output.packageRoot, f.packagePath);
+  assert.equal(output.installed, true);
+  const requests = f.requests.length;
+  const second = await f.run();
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).installed, false);
+  assert.equal(f.requests.length, requests);
+  assert.equal(await readFile(f.credentialPath, 'utf8'), credential);
+});
+
+test('existing Windows v0.6.1 with a quoted CLI hint needs no network or process execution', { skip: !windows }, async t => {
+  const f = await fixture(t, { installedVersion: '0.6.1' });
+  const source = f.copy.replace("param([string]$Hint = '')", `param([string]$Hint = ${quote(join(f.source, 'runtime', 'cli.js'))})`);
+  const result = await powershell(source);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).installed, false);
+  assert.equal(f.requests.length, 0);
+});
+
+test('concurrent Windows bootstraps download once and reuse the installed package', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  const results = await Promise.all([f.run(), f.run()]);
+  for (const result of results) assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(results.map(result => JSON.parse(result.stdout).installed).sort(), [false, true]);
+  assert.equal(f.requests.filter(url => url.endsWith('/releases/latest')).length, 1);
+});
+
+test('an incomplete Windows package blocks installation without changing existing files', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  await mkdir(f.packagePath, { recursive: true });
+  const marker = join(f.packagePath, 'keep-me.txt');
+  await writeFile(marker, 'existing user work');
+  const result = await f.run();
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /incomplete, unknown or different-architecture/);
+  assert.equal(await readFile(marker, 'utf8'), 'existing user work');
+  assert.equal(f.requests.length, 0);
+});
+
+for (const [name, options, error] of [
+  ['hash mismatch', { corrupt: true }, /SHA-256/],
+  ['truncated download', { truncated: true }, /SHA-256/],
+  ['wrong platform', { metadata: { platform: 'macos-arm64' } }, /metadata/],
+  ['string sourceDirty', { metadata: { sourceDirty: 'false' } }, /metadata/],
+  ['boolean size', { metadata: { bytes: true } }, /metadata/],
+  ['unsafe redirect', { redirect: 'https://attacker.example/installer.exe' }, /untrusted/],
+  ['prerelease', { latest: 'https://github.com/starroyhq/computer-use/releases/tag/v9.9.9-rc.1' }, /stable version/],
+]) {
+  test(`Windows bootstrap rejects ${name} before invoking an installer`, { skip: !windows }, async t => {
+    const f = await fixture(t, options);
+    const result = await f.run();
+    assert.equal(result.code, 1, result.stdout);
+    assert.match(result.stderr, error);
+    await assert.rejects(readFile(join(f.packagePath, 'package.json')), /ENOENT/);
+  });
+}
+
+test('Windows URL validation rejects userinfo, HTTP, ports and untrusted hosts', { skip: !windows }, async () => {
+  const bad = [
+    'https://github.com@attacker.example/payload',
+    'http://github.com/file',
+    'https://github.com:444/file',
+    'https://github.com.attacker.example/file',
+  ];
+  for (const url of bad) {
+    const result = await powershell(
+      script.split(entry)[0] + `\ntry { Assert-TrustedUri ([Uri]${quote(url)}); exit 3 } catch { 'rejected' }`,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'rejected');
+  }
+});

@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -75,8 +74,6 @@ internal static class ReleaseVersion
 /// <summary>通过便携包内置的 CLI 检查与下载更新：检查逻辑只在 TypeScript 里实现一次，两个宿主共用。</summary>
 internal sealed class UpdateCommand(string node, string cli)
 {
-    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
-
     internal static UpdateCommand ForPackage(string root) =>
         new(Path.Combine(root, "bin", "node.exe"), Path.Combine(root, "runtime", "cli.js"));
 
@@ -104,68 +101,8 @@ internal sealed class UpdateCommand(string node, string cli)
         return download;
     }
 
-    private async Task<T> RunAsync<T>(string[] arguments, IProgress<(long, long)>? progress, CancellationToken cancellation)
-    {
-        var start = new ProcessStartInfo(node)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false),
-            WorkingDirectory = Path.GetDirectoryName(Path.GetDirectoryName(cli)) ?? AppContext.BaseDirectory
-        };
-        start.ArgumentList.Add(cli);
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        // 与运行时相同：Agent 可控的环境变量不能改变 Node 或驱动的行为。
-        foreach (var key in start.Environment.Keys.Where(key =>
-            key.StartsWith("CUA_", StringComparison.OrdinalIgnoreCase) || key.StartsWith("NODE_", StringComparison.OrdinalIgnoreCase)).ToArray())
-            start.Environment.Remove(key);
-
-        Process process;
-        try { process = Process.Start(start) ?? throw new UpdateFailure("launch", ""); }
-        catch (Exception error) when (error is not UpdateFailure) { throw new UpdateFailure("launch", error.Message); }
-        using (process)
-        {
-            process.StandardInput.Close();
-            using var registration = cancellation.Register(() =>
-            {
-                try { process.Kill(entireProcessTree: true); } catch { }
-            });
-            var output = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-            string? code = null, message = null;
-            var errors = Task.Run(async () =>
-            {
-                while (await process.StandardError.ReadLineAsync() is { } line)
-                {
-                    if (line.Length > 65536) continue;
-                    try
-                    {
-                        using var document = JsonDocument.Parse(line);
-                        var root = document.RootElement;
-                        if (root.ValueKind != JsonValueKind.Object) continue;
-                        if (root.TryGetProperty("event", out var kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() == "progress")
-                            progress?.Report((root.GetProperty("downloaded").GetInt64(), root.GetProperty("total").GetInt64()));
-                        else if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
-                        {
-                            code = error.GetProperty("code").GetString();
-                            message = error.GetProperty("message").GetString();
-                        }
-                    }
-                    catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException or KeyNotFoundException) { }
-                }
-            });
-            await process.WaitForExitAsync(CancellationToken.None);
-            var text = await output;
-            await errors;
-            cancellation.ThrowIfCancellationRequested();
-            if (process.ExitCode != 0) throw code is null ? new UpdateFailure("output", "") : new UpdateFailure(code, message ?? "");
-            try { return JsonSerializer.Deserialize<T>(text, Json) ?? throw new UpdateFailure("output", ""); }
-            catch (JsonException) { throw new UpdateFailure("output", ""); }
-        }
-    }
+    private Task<T> RunAsync<T>(string[] arguments, IProgress<(long, long)>? progress, CancellationToken cancellation) =>
+        new PackageCommand(node, cli).RunJsonAsync<T>(arguments, cancellation, progress);
 }
 
 internal enum UpdatePhase { Idle, Checking, UpToDate, Available, Downloading, Downloaded, Failed }

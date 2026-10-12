@@ -41,6 +41,20 @@ internal sealed class SettingsForm : Form
     private readonly string[] _pageTitles = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T).ToArray();
     private bool _refreshing;
     private string _shownClients = "";
+    private readonly IAgentCommand _agentCommand;
+    private readonly Func<string, bool> _copySetupPromptText;
+    private CancellationTokenSource? _promptCancellation;
+    private bool _promptCancelledByUser;
+    private CancellationTokenSource? _profileCancellation;
+    private bool _profilesLoaded;
+    private readonly ComboBox _profile = new() { DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 64, Text = "default", Margin = new Padding(0, 0, 0, 12) };
+    private readonly Label _profileStatus = MakeFeedback();
+    private readonly Button _refreshProfiles = MakeButton(Msg.ConnectRefreshProfiles);
+    private readonly Button _copySetupPrompt = MakeButton(Msg.ConnectCopySetupPrompt, ButtonTone.Primary);
+    private readonly Button _cancelSetupPrompt = MakeButton(Msg.UpdatesCancel);
+    private readonly Label _setupPromptStatus = MakeFeedback();
+    internal Task ProfileLoadTask { get; private set; } = Task.CompletedTask;
+    internal Task SetupPromptTask { get; private set; } = Task.CompletedTask;
 
     private readonly CheckBox _launch = MakeCheckBox(Msg.GeneralLaunchAtLogin);
     private readonly Label _launchNote = MakeNote();
@@ -97,9 +111,11 @@ internal sealed class SettingsForm : Form
     private FlowLayoutPanel _updateActions = null!;
     private readonly Label _aboutVersion = MakeNote();
 
-    internal SettingsForm(ISettingsHost host)
+    internal SettingsForm(ISettingsHost host, IAgentCommand? agentCommand = null, Func<string, bool>? copySetupPrompt = null)
     {
         _host = host;
+        _agentCommand = agentCommand ?? new AgentCommand(PackageCommand.ForPackage(host.PackageRoot));
+        _copySetupPromptText = copySetupPrompt ?? CopyText;
         SuspendLayout();
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -222,7 +238,7 @@ internal sealed class SettingsForm : Form
         return stack;
     }
 
-    private static Control Disclosure(Msg title, Control details)
+    private static Control Disclosure(Msg title, Control details, Action? onExpanded = null)
     {
         var toggle = MakeButton(title);
         toggle.AccessibleDescription = L10n.T(Msg.DetailsCollapsed);
@@ -232,6 +248,7 @@ internal sealed class SettingsForm : Form
             details.Visible = !details.Visible;
             toggle.Text = L10n.T(details.Visible ? Msg.DetailsHide : title);
             toggle.AccessibleDescription = L10n.T(details.Visible ? Msg.DetailsExpanded : Msg.DetailsCollapsed);
+            if (details.Visible) onExpanded?.Invoke();
         };
         return Stack(Flow(toggle), details);
     }
@@ -335,17 +352,130 @@ internal sealed class SettingsForm : Form
 
     private Control BuildConnect()
     {
-        _pairCommand.Text = PairCommand(_host.PackageRoot);
+        _profile.Items.Add("default");
+        _profile.AccessibleName = L10n.T(Msg.ConnectProfile);
+        _profile.TextChanged += (_, _) => { RefreshProfile(); _profileStatus.Visible = false; };
+        _profile.SelectionChangeCommitted += (_, _) => ProfileLoadTask = LoadProfilesAsync();
+        _refreshProfiles.Click += (_, _) => ProfileLoadTask = LoadProfilesAsync();
+        _copySetupPrompt.Click += (_, _) => SetupPromptTask = CopySetupPromptAsync();
+        _cancelSetupPrompt.Click += (_, _) => { _promptCancelledByUser = true; _promptCancellation?.Cancel(); };
+        _cancelSetupPrompt.Visible = false;
+        _pairCommand.Text = PairCommand(_host.PackageRoot, _profile.Text);
         _pairCommand.AccessibleName = L10n.T(Msg.ConnectPairing);
         _copyPair.Click += (_, _) => CopyWithFeedback(_pairCommand.Text, _pairCopied);
-        _copyStdio.Click += (_, _) => CopyWithFeedback(StdioConfiguration(_host.PackageRoot), _copied);
+        _copyStdio.Click += (_, _) => CopyWithFeedback(StdioConfiguration(_host.PackageRoot, _profile.Text), _copied);
         _http.CheckedChanged += async (_, _) => { if (!_refreshing) await _host.SetHttpAsync(_http.Checked); };
         _copyAddress.Click += (_, _) => { if (HttpAddress(_host.HttpStatus) is { } address) CopyWithFeedback(address, _copied); };
         _addressRow = Flow(_httpAddress, _copyAddress);
         return Stack(
-            Card(SectionTitle(Msg.ConnectStepPair), MakeNote().With(Msg.ConnectPairingHint), _pairCommand, Flow(_copyPair), _pairCopied),
-            Card(SectionTitle(Msg.ConnectStepConfig), MakeNote().With(Msg.ConnectConfigHint), Flow(_copyStdio), _copied),
-            Disclosure(Msg.ConnectAdvanced, Card(SectionTitle(Msg.ConnectHttp), _http, MakeNote().With(Msg.ConnectHttpHint), _addressRow)));
+            Card(SectionTitle(Msg.ConnectSetupPrompt), MakeNote().With(Msg.ConnectSetupPromptHint),
+                Flow(_copySetupPrompt, _cancelSetupPrompt), _setupPromptStatus),
+            Disclosure(Msg.ConnectAdvanced, Stack(
+                Card(SectionTitle(Msg.ConnectProfile), MakeNote().With(Msg.ConnectProfileHint), _profile, Flow(_refreshProfiles), _profileStatus),
+                Card(SectionTitle(Msg.ConnectStepPair), MakeNote().With(Msg.ConnectPairingHint), _pairCommand, Flow(_copyPair), _pairCopied),
+                Card(SectionTitle(Msg.ConnectStepConfig), MakeNote().With(Msg.ConnectConfigHint), Flow(_copyStdio), _copied),
+                Card(SectionTitle(Msg.ConnectHttp), _http, MakeNote().With(Msg.ConnectHttpHint), _addressRow)),
+                () => { if (!_profilesLoaded) ProfileLoadTask = LoadProfilesAsync(); }));
+    }
+
+    private void RefreshProfile()
+    {
+        var valid = AgentCommand.ValidProfile(_profile.Text);
+        var busy = _promptCancellation is not null;
+        _profile.Enabled = !busy;
+        _copyPair.Enabled = _copyStdio.Enabled = _copySetupPrompt.Enabled = valid && !busy;
+        _refreshProfiles.Enabled = valid && !busy && _profileCancellation is null;
+        _cancelSetupPrompt.Visible = busy;
+        _pairCommand.Text = valid ? PairCommand(_host.PackageRoot, _profile.Text) : L10n.T(Msg.ConnectProfileInvalid);
+    }
+
+    private async Task LoadProfilesAsync()
+    {
+        if (IsDisposed || _profileCancellation is not null || !AgentCommand.ValidProfile(_profile.Text)) return;
+        var profile = _profile.Text;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        _profileCancellation = cancellation;
+        RefreshProfile();
+        try
+        {
+            var result = await _agentCommand.PreflightAsync(profile, cancellation.Token);
+            if (IsDisposed || cancellation.IsCancellationRequested) return;
+            // A slow response must not change the profile currently being edited.
+            var selected = _profile.Text;
+            _profile.Items.Clear();
+            _profile.Items.AddRange(result.Profiles.Prepend("default").Distinct(StringComparer.Ordinal).Cast<object>().ToArray());
+            _profile.Text = selected;
+            _profilesLoaded = true;
+            if (selected == profile)
+            {
+                _profileStatus.Text = L10n.T(result.Profile.State switch
+                {
+                    "missing" => Msg.ConnectProfileMissing,
+                    "invalid" => Msg.ConnectProfileInvalidCredential,
+                    "unauthorized" => Msg.ConnectProfileUnauthorized,
+                    "valid" => Msg.ConnectProfileValid,
+                    _ => Msg.ConnectProfileUnverified
+                });
+                _profileStatus.ForeColor = UiStyle.Muted;
+                _profileStatus.Visible = true;
+            }
+        }
+        catch (Exception)
+        {
+            if (!IsDisposed && _profile.Text == profile)
+            {
+                _profileStatus.Text = L10n.T(Msg.ConnectProfileLoadFailed);
+                _profileStatus.ForeColor = UiStyle.Danger;
+                _profileStatus.Visible = true;
+            }
+        }
+        finally
+        {
+            _profileCancellation = null;
+            if (!IsDisposed) RefreshProfile();
+        }
+    }
+
+    private async Task CopySetupPromptAsync()
+    {
+        if (_promptCancellation is not null || !AgentCommand.ValidProfile(_profile.Text)) return;
+        var profile = _profile.Text;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        _promptCancellation = cancellation;
+        _promptCancelledByUser = false;
+        RefreshProfile();
+        PromptFeedback(Msg.ConnectSetupPromptBusy, false);
+        try
+        {
+            var text = await _agentCommand.SetupPromptAsync(profile, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (IsDisposed) return;
+            var copied = _copySetupPromptText(text);
+            PromptFeedback(copied ? Msg.ConnectSetupPromptCopied : Msg.CommonCopyFailed, !copied);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed) PromptFeedback(_promptCancelledByUser ? Msg.ConnectSetupPromptCancelled : Msg.ConnectSetupPromptFailed, !_promptCancelledByUser);
+        }
+        catch (Exception) { if (!IsDisposed) PromptFeedback(Msg.ConnectSetupPromptFailed, true); }
+        finally
+        {
+            _promptCancellation = null;
+            if (!IsDisposed) RefreshProfile();
+        }
+    }
+
+    private void PromptFeedback(Msg message, bool failure)
+    {
+        _setupPromptStatus.Text = L10n.T(message);
+        _setupPromptStatus.ForeColor = failure ? UiStyle.Danger : UiStyle.Muted;
+        _setupPromptStatus.Visible = true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { _promptCancellation?.Cancel(); _profileCancellation?.Cancel(); }
+        base.Dispose(disposing);
     }
 
     private Control BuildUpdates()
@@ -423,15 +553,15 @@ internal sealed class SettingsForm : Form
 
     private void RefreshStatus()
     {
-        var state = _host.IsBusy ? Msg.StatusBusyLabel : _host.IsRunning
-            ? _host.IsPaused ? Msg.StatusPausedLabel : Msg.StatusRunningLabel : Msg.StatusOfflineLabel;
+        var state = _host.IsBusy ? Msg.StatusBusyLabel : _host.IsPaused ? Msg.StatusPausedLabel
+            : _host.IsRunning ? Msg.StatusRunningLabel : Msg.StatusOfflineLabel;
         _serviceTitle.Text = _sidebarState.Text = L10n.T(state);
         _serviceTitle.ForeColor = _host.IsRunning && !_host.IsPaused ? UiStyle.Accent : UiStyle.Text;
         _pairedCount.Text = L10n.F(Msg.StatusClientCount, _host.Clients.Count);
         _service.Text = _host.ServiceStatus;
         _pipe.Text = _host.PipeName ?? L10n.T(Msg.StatusPipeNotReady);
         _pause.Text = L10n.T(_host.IsPaused ? Msg.TrayResume : Msg.TrayPause);
-        _pause.Enabled = _host.IsRunning;
+        _pause.Enabled = !_host.IsBusy && (_host.IsRunning || _host.IsPaused);
         _stop.Enabled = _host.IsRunning || _host.IsBusy;
         _restart.Enabled = !_host.IsBusy;
     }
@@ -588,15 +718,16 @@ internal sealed class SettingsForm : Form
     // Single-quoted PowerShell literals also preserve $ and backticks in user-selected install paths.
     private static string PowerShellLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
-    internal static string PairCommand(string root) => CliCommand(root) + " pair --name 'My Agent'";
+    internal static string PairCommand(string root, string profile = "default") =>
+        CliCommand(root) + " pair --name 'My Agent' --profile " + PowerShellLiteral(profile);
 
-    /// <summary>与 macOS“复制 stdio 配置”相同的通用 JSON：使用默认 profile，不含凭据。</summary>
-    internal static string StdioConfiguration(string root) => JsonSerializer.Serialize(
+    /// <summary>与配对和安装提示词使用相同 profile 的通用 JSON，不含凭据。</summary>
+    internal static string StdioConfiguration(string root, string profile = "default") => JsonSerializer.Serialize(
         new Dictionary<string, object>
         {
             ["mcpServers"] = new Dictionary<string, object>
             {
-                ["computer-use"] = new { command = Path.Combine(root, "bin", "node.exe"), args = new[] { Path.Combine(root, "runtime", "cli.js"), "mcp", "stdio" } }
+                ["computer-use"] = new { command = Path.Combine(root, "bin", "node.exe"), args = new[] { Path.Combine(root, "runtime", "cli.js"), "mcp", "stdio", "--profile", profile } }
             }
         },
         new JsonSerializerOptions { WriteIndented = true });

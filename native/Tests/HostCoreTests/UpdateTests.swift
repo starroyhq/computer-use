@@ -409,7 +409,7 @@ final class UpdateTests: XCTestCase {
     private func runSwap(pid: Int32, current: URL, next: URL, backup: URL, waitTenths: Int = 100) throws -> (Int32, String?) {
         let record = directory.appendingPathComponent("opened.txt")
         let opener = directory.appendingPathComponent("opener.sh")
-        try Data("#!/bin/sh\nprintf '%s' \"$1\" > '\(record.path)'\n".utf8).write(to: opener)
+        try Data("#!/bin/sh\n[ \"$1\" = '-g' ] && [ \"$3\" = '--args' ] && [ \"$4\" = '--background' ] || exit 91\nprintf '%s' \"$2\" > '\(record.path)'\n".utf8).write(to: opener)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: opener.path)
         let command = UpdateInstaller.swapCommand(pid: pid, current: current, next: next, backup: backup, opener: opener.path, waitTenths: waitTenths)
         let status = UpdateInstaller.runTool(command.executable.path, command.arguments)

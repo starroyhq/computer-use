@@ -49,8 +49,8 @@ internal static class Program
 
         using var quitSignal = OpenSignal(SignalName("Quit", suffix));
         var startup = new HostStartupStore();
-        // Automatic launches cannot undo an earlier pause or emergency stop.
-        if (background && HostStartup.BlockingCode(startup.Read(), sameLiveProcess: false) is not null) return 1;
+        // HostApplication restores a persisted pause/stop without starting a
+        // worker, so login/update launches still expose the local recovery UI.
         ApplicationConfiguration.Initialize();
         Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal, quitSignal: quitSignal,
             startup: startup));

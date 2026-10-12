@@ -17,6 +17,8 @@
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostSettings.cs" Link="HostSettings.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/LaunchAtLogin.cs" Link="LaunchAtLogin.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/Updater.cs" Link="Updater.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/PackageCommand.cs" Link="PackageCommand.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/AgentConnection.cs" Link="AgentConnection.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/PrivateData.cs" Link="PrivateData.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostStartup.cs" Link="HostStartup.cs" />
   </ItemGroup>

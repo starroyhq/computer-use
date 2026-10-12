@@ -117,7 +117,7 @@ final class StatusPane: PaneController, SettingsPaneView {
         accessibility.set(AXIsProcessTrusted())
         screenRecording.set(CGPreflightScreenCaptureAccess())
         pauseButton.title = context.serviceState == .paused ? tr(.menuResume) : tr(.menuPause)
-        pauseButton.isEnabled = context.isRunning
+        pauseButton.isEnabled = context.isRunning || context.serviceState == .paused
         stopButton.isEnabled = context.isRunning || context.serviceState == .starting
     }
 
@@ -242,20 +242,84 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
 
 // MARK: 接入
 
-final class ConnectPane: PaneController, SettingsPaneView {
+final class ConnectPane: PaneController, SettingsPaneView, NSComboBoxDelegate {
+    private let access: ConnectAccess
+    private let profile = NSComboBox()
+    private let profileStatus = Form.note()
+    private let feedback = Form.note()
+    private let pairPreview = NSTextView.scrollableTextView()
+    private var profileIsValid = true
+    private var shownProfiles: [String] = []
+    private lazy var refreshProfiles = Form.button(tr(.connectRefresh), self, #selector(reloadProfiles))
+    private lazy var copyPair = Form.button(tr(.connectCopyPair), self, #selector(copyPairCommand))
+    private lazy var copyMCP = Form.button(tr(.connectCopy), self, #selector(copyConfiguration))
+    private lazy var copyPrompt = Form.button(tr(.connectCopyPrompt), self, #selector(copyInstallationPrompt))
+    private lazy var advancedToggle = Form.button(tr(.connectAdvanced), self, #selector(toggleAdvanced))
+    private var advancedForm: NSGridView?
+    private var advancedExpanded = false
     private lazy var httpToggle = Form.checkbox(tr(.connectHTTPToggle), self, #selector(toggleHTTP))
     private let httpAddress = Form.value()
     private lazy var copyAddress = Form.button(tr(.connectCopyAddress), self, #selector(copyHTTPAddress))
     private var addressRow: NSGridRow?
 
+    init(context: HostContext, access: ConnectAccess? = nil) {
+        self.access = access ?? ConnectAccess(paths: context.paths)
+        super.init(context: context)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
     override func loadView() {
+        profile.delegate = self
+        profile.isEditable = true
+        profile.completes = false
+        profile.stringValue = access.selectedProfile
+        profile.setAccessibilityLabel(tr(.connectProfile))
+        profile.identifier = NSUserInterfaceItemIdentifier("connect-profile")
+        profile.translatesAutoresizingMaskIntoConstraints = false
+        profile.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        if let text = pairPreview.documentView as? NSTextView {
+            text.isEditable = false
+            text.isSelectable = true
+            text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            text.textContainerInset = NSSize(width: 4, height: 4)
+            text.setAccessibilityLabel(tr(.connectPairing))
+        }
+        pairPreview.borderType = .bezelBorder
+        pairPreview.hasVerticalScroller = true
+        pairPreview.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pairPreview.widthAnchor.constraint(equalToConstant: Form.textWidth),
+            pairPreview.heightAnchor.constraint(equalToConstant: 66),
+        ])
+        let main = FormBuilder()
+        main.add(nil, copyPrompt)
+        main.add(nil, Form.note(tr(.connectInstallHint)))
+        main.add(nil, feedback)
+        advancedToggle.setButtonType(.onOff)
+        advancedToggle.isBordered = false
+        advancedToggle.imagePosition = .imageLeft
+        advancedToggle.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        advancedToggle.identifier = NSUserInterfaceItemIdentifier("connect-advanced-toggle")
         let form = FormBuilder()
-        form.add(tr(.connectHTTP), httpToggle)
+        form.add(tr(.connectProfile), Form.row([profile, refreshProfiles]), center: true)
+        form.add(nil, Form.note(tr(.connectProfileHint)))
+        form.add(nil, profileStatus)
+        form.add(tr(.connectPairing), copyPair, gap: 8)
+        form.add(nil, pairPreview)
+        form.add(nil, Form.note(tr(.connectPairingSteps)))
+        form.add(tr(.connectStdio), copyMCP, gap: 8)
+        form.add(tr(.connectHTTP), httpToggle, gap: 8)
         form.add(nil, Form.note(tr(.connectHTTPHint)))
         addressRow = form.add(nil, Form.row([httpAddress, copyAddress]), center: true)
-        form.add(tr(.connectStdio), Form.button(tr(.connectCopy), self, #selector(copyConfiguration)), gap: 14)
-        form.add(tr(.connectPairing), Form.note(tr(.connectPairingHint)), gap: 14)
-        view = Form.page(form.grid)
+        advancedForm = form.grid
+        form.grid.identifier = NSUserInterfaceItemIdentifier("connect-advanced")
+        form.grid.isHidden = true
+        let content = Form.column([main.grid, advancedToggle, form.grid], spacing: 16)
+        content.detachesHiddenViews = true
+        view = Form.page(content)
+        access.onChange = { [weak self] in self?.renderAccess() }
+        renderAccess()
     }
 
     private var address: String? {
@@ -264,6 +328,9 @@ final class ConnectPane: PaneController, SettingsPaneView {
     }
 
     func refresh() {
+        // Basic setup only generates a prompt. Profile metadata is needed when Advanced is expanded.
+        if advancedExpanded { access.loadIfNeeded() }
+        renderAccess()
         httpToggle.state = context.httpEnabled ? .on : .off
         httpToggle.isEnabled = context.isRunning
         if let address {
@@ -276,13 +343,119 @@ final class ConnectPane: PaneController, SettingsPaneView {
         addressRow?.isHidden = context.httpStatus == nil
     }
 
+    private func renderAccess() {
+        guard isViewLoaded else { return }
+        if shownProfiles != access.profiles {
+            let entry = profile.stringValue
+            profile.removeAllItems()
+            profile.addItems(withObjectValues: access.profiles)
+            profile.stringValue = entry
+            shownProfiles = access.profiles
+        }
+        profile.isEnabled = !access.isBusy
+        refreshProfiles.isEnabled = !access.isBusy && profileIsValid
+        for button in [copyPair, copyMCP, copyPrompt] {
+            button.isEnabled = profileIsValid && !access.isBusy
+        }
+        (pairPreview.documentView as? NSTextView)?.string = profileIsValid
+            ? ConnectAccess.pairCommand(paths: context.paths, profile: access.selectedProfile) : ""
+        if !profileIsValid { profileStatus.stringValue = tr(.connectProfileInvalidName) }
+        else if access.isBusy { profileStatus.stringValue = tr(.connectWorking) }
+        else if let failure = access.failure { profileStatus.stringValue = Self.message(failure) }
+        else {
+            let key: L10nKey
+            switch access.profileState {
+            case .missing: key = .connectProfileMissing
+            case .invalid: key = .connectProfileInvalid
+            case .unverified: key = .connectProfileUnverified
+            case .valid: key = .connectProfileValid
+            case .unauthorized: key = .connectProfileUnauthorized
+            case nil: key = .connectProfileUnchecked
+            }
+            profileStatus.stringValue = tr(key)
+        }
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        updateSelection()
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        updateSelection()
+        if profileIsValid { access.reload() }
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        if profile.indexOfSelectedItem >= 0, let name = profile.itemObjectValue(at: profile.indexOfSelectedItem) as? String {
+            profile.stringValue = name
+        }
+        updateSelection()
+        if profileIsValid { access.reload() }
+    }
+
+    private func updateSelection() {
+        profileIsValid = ConnectAccess.validProfile(profile.stringValue)
+        if profileIsValid { _ = access.selectProfile(profile.stringValue) }
+        feedback.stringValue = ""
+        renderAccess()
+    }
+
+    @objc private func reloadProfiles() {
+        updateSelection()
+        if profileIsValid { access.reload() }
+    }
+
     @objc private func toggleHTTP() { context.setHTTPEnabled(httpToggle.state == .on) }
-    @objc private func copyConfiguration() { context.copyConfiguration() }
+
+    @objc private func toggleAdvanced() {
+        advancedExpanded = advancedToggle.state == .on
+        advancedForm?.isHidden = !advancedExpanded
+        advancedToggle.image = NSImage(systemSymbolName: advancedExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        if !profileIsValid { feedback.stringValue = tr(.connectProfileInvalidName) }
+        refresh()
+        (parent as? SettingsTabViewController)?.fitWindow(animated: true)
+    }
+
+    @objc private func copyPairCommand() {
+        guard profileIsValid else { return }
+        copy(ConnectAccess.pairCommand(paths: context.paths, profile: access.selectedProfile))
+    }
+
+    @objc private func copyConfiguration() {
+        guard profileIsValid, let configuration = ConnectAccess.configuration(paths: context.paths, profile: access.selectedProfile) else { return }
+        copy(configuration)
+    }
+
+    @objc private func copyInstallationPrompt() {
+        guard profileIsValid else { return }
+        feedback.stringValue = tr(.connectWorking)
+        access.installationPrompt { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let prompt): self.copy(prompt)
+            case .failure(let failure): self.feedback.stringValue = Self.message(failure)
+            }
+        }
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        feedback.stringValue = NSPasteboard.general.setString(text, forType: .string)
+            ? tr(.connectContentCopied) : tr(.connectClipboardFailed)
+    }
+
+    private static func message(_ failure: ConnectFailure) -> String {
+        switch failure {
+        case .unavailable: return tr(.connectCLIUnavailable)
+        case .timeout: return tr(.connectCLITimeout)
+        case .output: return tr(.connectCLIOutput)
+        case .command: return tr(.connectCLIFailed)
+        }
+    }
 
     @objc private func copyHTTPAddress() {
         guard let address else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(address, forType: .string)
+        copy(address)
     }
 }
 
