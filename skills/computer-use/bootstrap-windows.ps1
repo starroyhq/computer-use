@@ -6,6 +6,7 @@ $ProgressPreference = 'SilentlyContinue'
 $work = $null
 $mutex = $null
 $locked = $false
+$originalModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
 
 function Get-NativeArchitecture {
     if (-not ('ComputerUseBootstrapNativeV1' -as [type])) {
@@ -190,6 +191,9 @@ function Write-Result([string]$Package, [string]$Architecture, [bool]$Installed)
 try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
         [Environment]::OSVersion.Version -lt [version]'10.0.17763') { throw 'Windows 10 build 17763 or newer is required.' }
+    # An Agent launched from pwsh can pass PS7-only module paths through Node to Windows PowerShell.
+    # Resolve every system module against this engine first; restore the caller's path in finally.
+    $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + [IO.Path]::PathSeparator + $originalModulePath
     $architecture = Get-NativeArchitecture
     $package = Get-Installations $Hint $architecture
     if ($package) { Write-Result $package $architecture $false; return }
@@ -205,9 +209,6 @@ try {
     $security.SetAccessRuleProtection($true, $false)
     $security.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-    # An Agent launched from pwsh can pass PS7's module paths through Node to Windows PowerShell.
-    # Bind the security cmdlets to this engine's module instead of incompatible inherited paths.
-    Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
     Set-Acl -LiteralPath $work -AclObject $security
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $version = Get-LatestVersion
@@ -248,7 +249,9 @@ try {
     [Console]::Error.WriteLine('Computer Use: ' + $_.Exception.Message)
     exit 1
 } finally {
-    if ($work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($locked) { $mutex.ReleaseMutex() }
-    if ($mutex) { $mutex.Dispose() }
+    try {
+        if ($work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($locked) { $mutex.ReleaseMutex() }
+        if ($mutex) { $mutex.Dispose() }
+    } finally { [Environment]::SetEnvironmentVariable('PSModulePath', $originalModulePath, 'Process') }
 }

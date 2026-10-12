@@ -17,9 +17,9 @@
 
 `skill prompt`、`skill export`、`instructions` 和 `preflight` 均可在未配对时运行，不启动 Host。测试覆盖内容不含凭据、路径 JSON 转义、profile 一致性、文件拒绝覆盖、离线凭据未验证、撤销凭据拒绝，以及可连接但响应损坏的 Host 不被误报为正常。
 
-发布准备时，启用 `core.autocrlf=true` 的隔离 Git 检出确认 Skill 资源需要固定为 LF；新增 `.gitattributes` 规则后，生成一致性及两平台脚本逐字节抽取通过。首次发布 CI 的 Windows ARM64/x64 均在 `Set-Acl` 自动加载模块时失败，macOS 检查通过。原因是 PowerShell 7 经 Node 启动 Windows PowerShell 时继承了不兼容模块路径。安装脚本改为从当前 `$PSHOME` 显式加载系统安全模块；临时目录仍仅允许当前用户完全控制，未清空继承路径或改变系统执行策略来规避测试。
+发布准备时，启用 `core.autocrlf=true` 的隔离 Git 检出确认 Skill 资源需要固定为 LF；新增 `.gitattributes` 规则后，生成一致性及两平台脚本逐字节抽取通过。前两轮发布 CI 的 Windows ARM64/x64 先后暴露 `Set-Acl` 自动加载失败和 `Get-FileHash` 不可用，macOS 检查均通过。原因是 PowerShell 7 经 Node 启动 Windows PowerShell 时继承了不兼容模块路径。最终安装脚本在执行期间优先使用当前 `$PSHOME` 下的系统模块，清理后恢复调用方原路径；临时目录仍仅允许当前用户完全控制，未在测试启动前修正继承路径或改变系统执行策略来规避测试。
 
-修复后 Windows VM 的完整脚本测试为 14/14 通过；新增回归先确认不兼容模块路径触发自动加载失败，再验证实际嵌入脚本安装成功及私有目录 ACL。macOS/生成相关脚本测试 20/20 通过。发布准备补充日志位于 `.cache/skill-bootstrap-checks/release-ci-windows-final.log`。
+新增回归将模块路径限制为包含不兼容 Security、Utility、Management 模块的目录，先确认安全及哈希命令自动加载失败，再验证实际嵌入脚本的首装、离线复用、哈希拒绝和调用方路径恢复。私有目录 ACL 仍由实际系统命令核对。macOS/生成相关脚本测试 20/20 通过；最终 Windows 完整脚本测试 14/14 通过，日志为 `.cache/skill-bootstrap-checks/release-ci-modules-final.log`。
 
 ## macOS 安装版实测
 

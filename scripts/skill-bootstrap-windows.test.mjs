@@ -189,38 +189,68 @@ test('Windows clean bootstrap uses native architecture and preserves an existing
   assert.equal(await readFile(f.credentialPath, 'utf8'), credential);
 });
 
-test('Windows bootstrap uses its engine security module despite inherited incompatible module paths', { skip: !windows }, async t => {
+test('Windows bootstrap prioritizes all engine modules and restores a polluted caller module path', { skip: !windows }, async t => {
   const f = await fixture(t);
   const moduleRoot = join(f.directory, 'PowerShell 7 modules');
-  const moduleDirectory = join(moduleRoot, 'Microsoft.PowerShell.Security');
-  await mkdir(moduleDirectory, { recursive: true });
-  // The inherited module is discoverable but cannot load in this engine, as with PS7 assemblies.
-  await writeFile(
-    join(moduleDirectory, 'Microsoft.PowerShell.Security.psd1'),
-    `@{
+  // All three inherited modules are discoverable but cannot load in this engine, as with PS7 assemblies.
+  for (const [name, commands] of [
+    ['Security', ['Set-Acl', 'Get-Acl']],
+    ['Utility', ['Get-FileHash', 'Add-Type', 'ConvertFrom-Json', 'ConvertTo-Json', 'Select-Object', 'New-Object']],
+    ['Management', ['Get-Item', 'Join-Path', 'Test-Path', 'Remove-Item', 'Start-Process']],
+  ]) {
+    const moduleDirectory = join(moduleRoot, `Microsoft.PowerShell.${name}`);
+    await mkdir(moduleDirectory, { recursive: true });
+    await writeFile(
+      join(moduleDirectory, `Microsoft.PowerShell.${name}.psd1`),
+      `@{
 RootModule = 'incompatible.psm1'
 ModuleVersion = '7.0.0'
 PowerShellVersion = '5.1'
-FunctionsToExport = @('Set-Acl')
+FunctionsToExport = @(${commands.map(quote).join(', ')})
 }`,
-  );
-  await writeFile(join(moduleDirectory, 'incompatible.psm1'), "throw 'Incompatible fixture module must never execute'\n");
-  const inherited = await powershell('$env:PSModulePath');
-  assert.equal(inherited.code, 0, inherited.stderr);
+    );
+    await writeFile(join(moduleDirectory, 'incompatible.psm1'), "throw 'Incompatible fixture module must never execute'\n");
+  }
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PSMODULEPATH'));
-  env.PSModulePath = `${moduleRoot};${inherited.stdout.trim()}`;
-  const unqualified = await powershell(
-    `$ErrorActionPreference = 'Stop'
-try { Set-Acl -LiteralPath ${quote(join(f.directory, 'missing'))} -AclObject ([Security.AccessControl.DirectorySecurity]::new()); exit 3 }
+  // PS7 -> Node can omit Windows PowerShell's module directory entirely. Do not repair it in the harness.
+  env.PSModulePath = moduleRoot;
+  for (const command of [
+    `Set-Acl -LiteralPath ${quote(f.directory)} -AclObject ([Security.AccessControl.DirectorySecurity]::new())`,
+    `Get-FileHash -LiteralPath ${quote(join(f.source, 'package.json'))} -Algorithm SHA256`,
+  ]) {
+    const unqualified = await powershell(
+      `$ErrorActionPreference = 'Stop'
+try { ${command}; exit 3 }
 catch { [Console]::Error.WriteLine($_.FullyQualifiedErrorId); exit 1 }`,
-    env,
-  );
-  assert.equal(unqualified.code, 1);
-  assert.match(unqualified.stderr, /CouldNotAutoloadMatchingModule/);
-  const result = await f.run(env);
+      env,
+    );
+    assert.equal(unqualified.code, 1);
+    assert.match(unqualified.stderr, /CouldNotAutoloadMatchingModule/);
+  }
+  const run = fixture =>
+    powershell(
+      `
+$callerModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+try { & {
+${fixture.copy}
+} } finally {
+    if ([Environment]::GetEnvironmentVariable('PSModulePath', 'Process') -cne $callerModulePath) {
+        [Console]::Error.WriteLine('Caller PSModulePath was not restored')
+        exit 4
+    }
+}`,
+      env,
+    );
+  const result = await run(f);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).installed, true);
   assert.ok(f.requests.length > 0);
+  const repeated = await run(f);
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.equal(JSON.parse(repeated.stdout).installed, false);
+  const corrupt = await run(await fixture(t, { corrupt: true }));
+  assert.equal(corrupt.code, 1, corrupt.stderr);
+  assert.match(corrupt.stderr, /SHA-256/);
 });
 
 test('existing Windows v0.6.1 with a quoted CLI hint needs no network or process execution', { skip: !windows }, async t => {
