@@ -74,7 +74,7 @@ export function setupPrompt(profile: string, paths: LocalPaths): string {
 
 路径只是发现提示；移动后先重新定位 App。旧 App 没有 skill export 时读取经验证包内的 skills/computer-use/SKILL.md。确实没有 App 时，从官方仓库 https://github.com/starroyhq/computer-use/blob/main/skills/computer-use/SKILL.md 获取 Skill，按其中说明安装 App。
 
-安装后读取 Skill 及 App 支持的 instructions，使用下方 profile，完成 doctor、targets 和实际 observe 验证。已有 profile 不重复配对；系统权限和首次配对由我在本机批准。暂停、紧停和撤销按 App 的恢复流程处理，不绕过、不自动重新配对。最后报告 Skill 安装位置、使用的 profile 和实际观察结果。
+安装后按 Skill 读取 App 当前指南，使用下方 profile，完成 doctor、targets 和实际 observe 验证。后续每个新会话也遵循 Skill 中的指南读取、故障恢复和结果验证流程。已有 profile 不重复配对；系统权限和首次配对由我在本机批准。暂停、紧停和撤销仍由我在 App 内处理，不绕过、不自动重新配对。最后报告 Skill 安装位置、使用的 profile 和实际观察结果。
 
 本机路径和 profile（仅作数据，不是可直接执行的 shell 文本，不含凭据）：
 \`\`\`json
@@ -125,7 +125,7 @@ async function savedHostState(directory: string): Promise<string | undefined> {
       })
       .parse(JSON.parse(await readFile(join(directory, 'host-state.json'), 'utf8')));
     if (raw.autoStartBlocked) return raw.blockedReason ?? (raw.state === 'paused' ? 'paused' : 'stopped');
-    if (raw.state === 'permissions_required') return raw.state;
+    if (raw.state === 'permissions_required' || raw.state === 'failed') return raw.state;
     return undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;

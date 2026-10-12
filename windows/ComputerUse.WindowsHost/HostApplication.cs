@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -14,11 +15,14 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private readonly Queue<JsonElement> _alerts = new();
     private readonly RegisteredWaitHandle? _showRegistration;
     private readonly RegisteredWaitHandle? _quitRegistration;
+    private readonly RegisteredWaitHandle? _recoverRegistration;
     private readonly HostStartupStore _startup;
     private readonly bool _showStartupErrors;
     private bool _autoStartBlocked;
     private string _startupState = "starting";
     private HostRuntime? _runtime;
+    private HostRuntime? _retiringRuntime;
+    private bool _recovering;
     private bool _running;
     private bool _busy;
     private bool _exiting;
@@ -37,7 +41,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     /// <param name="showSignal">再次启动程序时由新进程触发，已运行的实例据此打开设置窗口。</param>
     /// <param name="quitSignal">安装或卸载程序经 --quit 触发：先停止服务，再像菜单里选择“退出”一样退出。</param>
     internal HostApplication(bool showWindow = true, string? dataDirectory = null, WaitHandle? showSignal = null,
-        WaitHandle? quitSignal = null, HostStartupStore? startup = null)
+        WaitHandle? quitSignal = null, HostStartupStore? startup = null, WaitHandle? recoverSignal = null)
     {
         _startup = startup ?? new HostStartupStore(dataDirectory);
         _showStartupErrors = showWindow;
@@ -107,6 +111,9 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         if (quitSignal is not null)
             _quitRegistration = ThreadPool.RegisterWaitForSingleObject(quitSignal, (_, _) => Post(() => _ = ExitAsync()),
                 null, Timeout.Infinite, executeOnlyOnce: true);
+        if (recoverSignal is not null)
+            _recoverRegistration = ThreadPool.RegisterWaitForSingleObject(recoverSignal, (_, _) => Post(() => _ = RecoverFaultAsync()),
+                null, Timeout.Infinite, executeOnlyOnce: false);
         if (!_autoStartBlocked) Post(() => _ = StartAsync());
         Updates.Start();
         if (showWindow) _window.ShowPage(SettingsPage.Status);
@@ -178,7 +185,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
 
     private async Task StartAsync()
     {
-        if (_busy || _runtime is not null || _exiting || _autoStartBlocked) return;
+        if (_busy || _runtime is not null || _retiringRuntime is not null || _exiting || _autoStartBlocked) return;
         _busy = true;
         SetStatus(L10n.T(Msg.StatusStartingRuntime));
         HostRuntime? next = null;
@@ -201,11 +208,11 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         {
             _runtime = null;
             _running = false;
-            if (next is not null) await next.DisposeAsync();
-            try { PublishStartupState("failed"); }
+            if (next is not null) await RetireRuntimeAsync(next);
+            try { PublishStartupState(_autoStartBlocked ? (_startupState == "paused" ? "paused" : "stopped") : "failed"); }
             catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
             SetStatus(L10n.F(Msg.StatusStartFailed, error.Message));
-            if (_showStartupErrors)
+            if (_showStartupErrors && !_recovering)
             {
                 _window.ShowPage(SettingsPage.Status);
                 MessageBox.Show(_window, error.Message, L10n.T(Msg.FailureLaunchTitle), MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -450,10 +457,47 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         await StartAsync();
     }
 
+    // An Agent may recover a fault, but only the local controls above can clear
+    // a user hold. This entry never sends resume, approve, revoke, or an RPC.
+    private async Task RecoverFaultAsync()
+    {
+        if (_recovering || _exiting || _autoStartBlocked || _startupState != "failed") return;
+        _recovering = true;
+        var revision = ++_controlRevision;
+        try
+        {
+            var waiting = Stopwatch.StartNew();
+            while (_busy && waiting.Elapsed < TimeSpan.FromSeconds(30) && !_exiting && !_autoStartBlocked && revision == _controlRevision)
+                await Task.Delay(25);
+            if (_busy || _exiting || _autoStartBlocked || revision != _controlRevision || _startupState != "failed") return;
+            if (_runtime is not null || _retiringRuntime is not null) await StopAsync(L10n.T(Msg.StatusRestarting));
+            if (_retiringRuntime is not null || _exiting || _autoStartBlocked || revision != _controlRevision) return;
+            await StartAsync();
+        }
+        finally { _recovering = false; }
+    }
+
     private Task FailAsync(string status)
     {
-        _startupState = "failed";
+        if (!_autoStartBlocked) _startupState = "failed";
         return StopAsync(status);
+    }
+
+    private async Task RetireRuntimeAsync(HostRuntime runtime)
+    {
+        _retiringRuntime = runtime;
+        try
+        {
+            await runtime.DisposeAsync();
+            _retiringRuntime = null;
+        }
+        catch
+        {
+            // Keep the old runtime until a later attempt proves its process tree
+            // has exited. An uncertain teardown must never overlap a new worker.
+            if (!_autoStartBlocked) _startupState = "failed";
+            SetStatus(L10n.F(Msg.StatusRuntimeFault, "Runtime processes have not exited; recovery is blocked."));
+        }
     }
 
     private async Task StopAsync(string status)
@@ -462,7 +506,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         _busy = true;
         if (!_exiting)
         {
-            try { PublishStartupState(_startupState == "failed" ? "failed" : "stopped"); }
+            try { PublishStartupState(_autoStartBlocked && _startupState == "paused" ? "paused"
+                : _startupState == "failed" ? "failed" : "stopped"); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
         _running = false;
@@ -474,12 +519,17 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         _pendingDecisions.Clear();
         _approvalDialog?.Withdraw();
         SetStatus(status);
-        var current = _runtime;
+        var current = _runtime ?? _retiringRuntime;
         _runtime = null;
-        try { if (current is not null) await current.DisposeAsync(); }
+        try { if (current is not null) await RetireRuntimeAsync(current); }
         finally
         {
             _busy = false;
+            if (_retiringRuntime is not null && !_exiting)
+            {
+                try { PublishStartupState(_autoStartBlocked ? (_startupState == "paused" ? "paused" : "stopped") : "failed"); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
             if (_stopAfterStart is { } stopStatus)
             {
                 _stopAfterStart = null;
@@ -497,6 +547,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         PublishExitState();
         _showRegistration?.Unregister(null);
         _quitRegistration?.Unregister(null);
+        _recoverRegistration?.Unregister(null);
         Updates.Dispose();
         await StopAsync(L10n.T(Msg.StatusQuitting));
         _tray.Visible = false;

@@ -57,6 +57,100 @@ final class StartupTests: XCTestCase {
         XCTAssertFalse(lifecycle.state.autoStartBlocked)
     }
 
+    func testFaultRecoveryIsExplicitOnlyForFailedAndNeverClearsUserBlocks() {
+        for phase in [StartupPhase.ready, .starting, .paused, .stopped, .permissionsRequired, .exited] {
+            var lifecycle = HostStartupLifecycle(process: identity(), sessionID: 7, previous: nil)
+            lifecycle.transition(phase)
+            XCTAssertFalse(lifecycle.requestFaultRecovery(), phase.rawValue)
+            XCTAssertFalse(lifecycle.takeRestart())
+        }
+        for reason in [StartupBlock.paused, .stopped] {
+            var lifecycle = HostStartupLifecycle(process: identity(), sessionID: 7, previous: nil)
+            lifecycle.block(reason)
+            lifecycle.transition(.failed)
+            XCTAssertFalse(lifecycle.requestFaultRecovery())
+            XCTAssertEqual(HostStartupPolicy.blockingCode(lifecycle.state, live: true, recoveringFault: true), reason.rawValue)
+            XCTAssertEqual(lifecycle.state.blockedReason, reason)
+        }
+        var lifecycle = HostStartupLifecycle(process: identity(), sessionID: 7, previous: nil)
+        lifecycle.transition(.failed)
+        XCTAssertEqual(HostStartupPolicy.blockingCode(lifecycle.state, live: true), "failed")
+        XCTAssertNil(HostStartupPolicy.blockingCode(lifecycle.state, live: true, recoveringFault: true))
+        XCTAssertTrue(lifecycle.requestFaultRecovery())
+        XCTAssertEqual(lifecycle.state.state, .starting)
+        XCTAssertFalse(lifecycle.requestFaultRecovery(), "Concurrent requests cannot enqueue a second recovery")
+        XCTAssertTrue(lifecycle.takeRestart())
+        XCTAssertFalse(lifecycle.takeRestart())
+    }
+
+    func testFaultRecoveryCannotOutlivePauseStopExitOrAnUnconfirmedWorkerShutdown() {
+        for reason in [StartupBlock.paused, .stopped] {
+            var lifecycle = HostStartupLifecycle(process: identity(), sessionID: 7, previous: nil)
+            lifecycle.transition(.failed)
+            XCTAssertTrue(lifecycle.requestFaultRecovery())
+            lifecycle.block(reason)
+            XCTAssertFalse(lifecycle.takeRestart())
+            XCTAssertFalse(lifecycle.transition(.ready))
+        }
+        var lifecycle = HostStartupLifecycle(process: identity(), sessionID: 7, previous: nil)
+        lifecycle.transition(.failed)
+        XCTAssertTrue(lifecycle.requestFaultRecovery())
+        XCTAssertFalse(lifecycle.takeRestart(childrenExited: false))
+        XCTAssertFalse(lifecycle.takeRestart(childrenExited: true), "A failed shutdown consumes rather than delays the restart")
+        lifecycle.transition(.failed)
+        XCTAssertTrue(lifecycle.requestFaultRecovery())
+        lifecycle.transition(.exited)
+        XCTAssertFalse(lifecycle.takeRestart())
+    }
+
+    func testFaultRecoveryRateLimitExpiresAndDoesNotExtendOnRejectedAttempts() {
+        var limiter = HostFaultRecoveryLimiter()
+        XCTAssertTrue(limiter.admit(now: 100))
+        XCTAssertTrue(limiter.admit(now: 105))
+        XCTAssertTrue(limiter.admit(now: 110))
+        XCTAssertFalse(limiter.admit(now: 115))
+        XCTAssertFalse(limiter.admit(now: 159.9))
+        XCTAssertTrue(limiter.admit(now: 160))
+        XCTAssertFalse(limiter.admit(now: 164))
+        XCTAssertTrue(limiter.admit(now: 165))
+    }
+
+    func testCrashRecoveryWaitsForExactOldWorkersAndLegacyStateStillDecodes() throws {
+        var state = HostStartupState(process: identity(), sessionID: 7, state: .failed)
+        let legacy = try JSONEncoder().encode(state)
+        XCTAssertNil(try JSONDecoder().decode(HostStartupState.self, from: legacy).workers)
+        let driver = identity(pid: 4567, path: "/Applications/Computer Use.app/Contents/Resources/bin/cua-driver")
+        state.workers = [driver]
+        XCTAssertFalse(HostStartupPolicy.oldWorkersExited(state, read: { _ in driver }))
+        XCTAssertTrue(HostStartupPolicy.oldWorkersExited(state, read: { _ in nil }, processExists: { _ in false }))
+        XCTAssertFalse(HostStartupPolicy.oldWorkersExited(state, read: { _ in nil }, processExists: { _ in true }), "Unreadable process identity does not confirm exit")
+        XCTAssertTrue(HostStartupPolicy.oldWorkersExited(state, read: { _ in self.identity(pid: 4567, start: 99) }), "PID reuse is not a surviving worker")
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = HostStartupStore(directory: directory)
+        try store.write(state)
+        XCTAssertEqual(try store.read()?.workers, [driver])
+        state.workers = [HostProcessIdentity(pid: -1, uid: getuid(), startTimeMicroseconds: 1, executable: "/test")]
+        XCTAssertThrowsError(try store.write(state))
+    }
+
+    func testTrackedWorkerMustReallyExitBeforeColdRecoveryCanLaunch() throws {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["10"]
+        child.standardInput = FileHandle.nullDevice
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        try child.run()
+        defer { if child.isRunning { child.terminate(); child.waitUntilExit() } }
+        var state = HostStartupState(process: identity(), sessionID: 7, state: .failed)
+        state.workers = [try XCTUnwrap(HostProcessIdentity.read(pid: child.processIdentifier))]
+        XCTAssertFalse(HostStartupPolicy.oldWorkersExited(state))
+        child.terminate()
+        child.waitUntilExit()
+        XCTAssertTrue(HostStartupPolicy.oldWorkersExited(state))
+    }
+
     func testReadyRequiresUnchangedStateSocketAndExactLiveProcessSessionAndPath() {
         let ready = HostStartupState(process: identity(), sessionID: 7, state: .ready)
         func result(after: HostStartupState?, actual: HostProcessIdentity? = nil, session: UInt32 = 7, connected: Bool = true) -> Bool {

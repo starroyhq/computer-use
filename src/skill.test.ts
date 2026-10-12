@@ -116,6 +116,26 @@ describe('local onboarding', () => {
     await writeFile(join(directory, 'host-state.json'), JSON.stringify({ state: 'exited', autoStartBlocked: true, blockedReason: reason }));
     expect((await preflight(options())).host.state).toBe(reason);
   });
+  it('reports a saved service fault without mistaking it for a user stop or an offline credential for a valid grant', async () => {
+    await credential();
+    const hostState = JSON.stringify({ state: 'failed', autoStartBlocked: false });
+    await writeFile(join(directory, 'host-state.json'), hostState);
+    const offline = await preflight(options());
+    expect(offline.host.state).toBe('failed');
+    expect(offline.profile.state).toBe('unverified');
+
+    const methods: string[] = [];
+    const socket = await server((request, peer) => {
+      methods.push(request.method);
+      peer.end(JSON.stringify({ id: request.id, result: { paused: true, stopped: true } }) + '\n');
+    });
+    const connected = await preflight({ ...options(), discover: async () => socket });
+    expect(connected.host.state).toBe('failed');
+    expect(connected.profile.state).toBe('valid');
+    expect(methods).toEqual(['capabilities']);
+    expect(await readFile(join(directory, 'host-state.json'), 'utf8')).toBe(hostState);
+    expect(JSON.stringify([offline, connected])).not.toContain(token);
+  });
   it('verifies a credential only through the read-only capabilities method', async () => {
     await credential();
     const methods: string[] = [];

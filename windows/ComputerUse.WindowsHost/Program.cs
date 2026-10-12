@@ -25,11 +25,12 @@ internal static class Program
         }
         // 安装与卸载程序用：请当前会话里正在运行的托盘程序停止服务后退出，并等它退出。
         if (args.Length == 1 && args[0] == QuitArgument) return QuitRunningInstance();
-        if (args.Length == 1 && args[0] == HostStartup.EnsureArgument)
+        if (args.Length == 1 && args[0] is HostStartup.EnsureArgument or HostStartup.RecoverArgument)
         {
             Console.OutputEncoding = new UTF8Encoding(false);
             var ensureSuffix = InstanceSuffix();
-            return HostStartup.EnsureRunning(MutexName(ensureSuffix), SignalName("Ensure", ensureSuffix));
+            return HostStartup.EnsureRunning(MutexName(ensureSuffix), SignalName("Ensure", ensureSuffix),
+                args[0] == HostStartup.RecoverArgument ? SignalName("Recover", ensureSuffix) : null);
         }
         // 登录时启动项带 --background：只在托盘运行，不打开设置窗口。
         var background = args.Length == 1 && args[0] == LaunchAtLogin.BackgroundArgument;
@@ -48,12 +49,30 @@ internal static class Program
         }
 
         using var quitSignal = OpenSignal(SignalName("Quit", suffix));
+        using var recoverSignal = OpenSignal(SignalName("Recover", suffix));
         var startup = new HostStartupStore();
+        var previous = startup.Read();
+        // Manual/login launches have the same old-worker fence as the helper.
+        // Do not replace its persisted identity until all descendants are gone.
+        if (previous is not null)
+        {
+            var waiting = Stopwatch.StartNew();
+            while (!RuntimeProcessGroup.PreviousHasExited(previous.ProcessId, previous.ProcessStartTimeUtcTicks))
+            {
+                if (waiting.Elapsed >= TimeSpan.FromSeconds(5))
+                {
+                    if (!background) MessageBox.Show("Computer Use is still stopping its previous runtime. Wait before reopening the app.",
+                        "Computer Use", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return 1;
+                }
+                Thread.Sleep(50);
+            }
+        }
         // HostApplication restores a persisted pause/stop without starting a
         // worker, so login/update launches still expose the local recovery UI.
         ApplicationConfiguration.Initialize();
         Application.Run(new HostApplication(showWindow: !background, showSignal: showSignal, quitSignal: quitSignal,
-            startup: startup));
+            startup: startup, recoverSignal: recoverSignal));
         return 0;
     }
 

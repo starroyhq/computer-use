@@ -46,6 +46,7 @@ internal static class Program
         CheckStandardHandleInheritance();
         CheckStartupState();
         CheckStartupLifecycle();
+        CheckFaultRecovery();
         var data = Path.Combine(Path.GetTempPath(), "cu-host-tests-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -304,9 +305,22 @@ internal static class Program
             Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) == "stopped", "emergency stop blocks cold start after host exit");
             store.Write("failed", blocked: false);
             Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: true) == "failed", "live failed host requires local restart");
+            Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: true, recoverFault: true) is null,
+                "explicit recovery permits a fault without changing normal startup policy");
+            Check(HostStartup.BlockingCode(paused, sameLiveProcess: true, recoverFault: true) == "paused"
+                && HostStartup.BlockingCode(paused with { State = "stopped" }, false, recoverFault: true) == "stopped"
+                && HostStartup.BlockingCode(paused with { State = "failed" }, true, recoverFault: true) == "stopped",
+                "fault recovery cannot bypass live or persisted user holds even after a subsequent failure");
             Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) is null, "dead failed host does not permanently block launch");
             store.Write("exited", blocked: false);
             Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) is null, "normal exit permits cold start");
+            var recoveryTime = DateTimeOffset.UtcNow;
+            Check(HostRecoveryBudget.TryConsume(data, recoveryTime) && HostRecoveryBudget.TryConsume(data, recoveryTime)
+                && HostRecoveryBudget.TryConsume(data, recoveryTime) && !HostRecoveryBudget.TryConsume(data, recoveryTime),
+                "automatic recovery is limited to three attempts per minute across store instances");
+            Check(!HostRecoveryBudget.TryConsume(data, recoveryTime.AddSeconds(-1))
+                && HostRecoveryBudget.TryConsume(data, recoveryTime.AddSeconds(60)),
+                "a backward clock cannot reset recovery allowance and the cooldown expires");
             var statePath = Path.Combine(data, "host-state.json");
             Check(PrivateData.FileLockName(statePath).StartsWith(@"Global\ComputerUse.PrivateData.")
                 && PrivateData.FileLockName(statePath) == PrivateData.FileLockName(statePath.ToUpperInvariant()),
@@ -511,6 +525,103 @@ internal static class Program
             Directory.Delete(raceData, recursive: true);
         }
         Console.WriteLine("PASS: Windows startup lifecycle, late ready, and stop during startup");
+    }
+
+    private static void CheckFaultRecovery()
+    {
+        var data = Path.Combine(Path.GetTempPath(), "cu-fault-recovery-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var host = new HostApplication(showWindow: false, dataDirectory: data);
+            Pump();
+            var store = new HostStartupStore(data);
+            var starts = HostRuntime.StartCount;
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(HostRuntime.StartCount == starts, "recovery on a ready host is a no-op");
+            host.TogglePauseAsync().GetAwaiter().GetResult();
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(host.IsPaused && store.Read() is { State: "paused", AutoStartBlocked: true }
+                && HostRuntime.StartCount == starts, "remote fault recovery cannot resume a user pause");
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(!host.IsRunning && store.Read() is { State: "stopped", AutoStartBlocked: true }
+                && HostRuntime.StartCount == starts, "remote fault recovery cannot clear emergency stop");
+
+            host.RestartServicesAsync().GetAwaiter().GetResult();
+            host.RevokeAsync("revoked-client").GetAwaiter().GetResult();
+            var commands = HostRuntime.Commands.ToArray();
+            var old = HostRuntime.Last!;
+            starts = HostRuntime.StartCount;
+            var disposal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HostRuntime.NextDispose = disposal.Task;
+            old.Emit(new { @event = "fatal", message = "uncertain action" });
+            Pump();
+            var recovering = Invoke(host, "RecoverFaultAsync");
+            var duplicate = Invoke(host, "RecoverFaultAsync");
+            Check(!recovering.IsCompleted && duplicate.IsCompleted && host.IsBusy && HostRuntime.StartCount == starts,
+                "concurrent recovery waits for retiring worker disposal without a duplicate start");
+            disposal.SetResult();
+            AwaitUi(recovering);
+            old.Emit(new { @event = "fatal", message = "late old worker event" });
+            old.Emit(new { @event = "ready" });
+            Pump();
+            Check(host.IsRunning && HostRuntime.StartCount == starts + 1
+                && store.Read() is { State: "ready", AutoStartBlocked: false },
+                "fault recovery starts one replacement and ignores old worker events");
+            Check(commands.SequenceEqual(HostRuntime.Commands),
+                "recovery sends no action, authorization, resume, or approval command after revocation");
+
+            starts = HostRuntime.StartCount;
+            disposal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HostRuntime.NextDispose = disposal.Task;
+            HostRuntime.Last!.Emit(new { @event = "fatal", message = "uncertain action" });
+            Pump();
+            recovering = Invoke(host, "RecoverFaultAsync");
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            disposal.SetResult();
+            AwaitUi(recovering);
+            Check(!host.IsRunning && HostRuntime.StartCount == starts && store.Read() is { State: "stopped", AutoStartBlocked: true },
+                "emergency stop during retiring-worker wait cancels recovery and remains persisted");
+
+            host.RestartServicesAsync().GetAwaiter().GetResult();
+            starts = HostRuntime.StartCount;
+            HostRuntime.NextDispose = Task.FromException(new IOException("worker did not exit"));
+            HostRuntime.Last!.Emit(new { @event = "fatal", message = "uncertain teardown" });
+            Pump();
+            Check(Field(host, "_retiringRuntime") is not null && !host.IsRunning,
+                "failed disposal retains the old runtime rather than declaring its processes gone");
+            HostRuntime.NextDispose = Task.FromException(new IOException("worker still alive"));
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(HostRuntime.StartCount == starts && Field(host, "_retiringRuntime") is not null,
+                "recovery cannot start while the old worker exit remains unconfirmed");
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(host.IsRunning && HostRuntime.StartCount == starts + 1,
+                "a later recovery may start only after old worker disposal is confirmed");
+
+            HostRuntime.Last!.Emit(new { @event = "fatal", message = "startup stop race" });
+            Pump();
+            var starting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HostRuntime.NextStart = starting.Task;
+            recovering = Invoke(host, "RecoverFaultAsync");
+            Check(host.IsBusy && !host.IsRunning, "replacement startup is pending");
+            host.EmergencyStopAsync().GetAwaiter().GetResult();
+            starting.SetResult();
+            AwaitUi(recovering);
+            Check(!host.IsRunning && store.Read() is { State: "stopped", AutoStartBlocked: true },
+                "late replacement ready cannot overwrite emergency stop during recovery");
+            Invoke(host, "ExitAsync").GetAwaiter().GetResult();
+            Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
+            Check(!host.IsRunning && store.Read() is { State: "stopped", AutoStartBlocked: true },
+                "an exiting GUI cannot recover or clear its persisted stop");
+        }
+        finally
+        {
+            HostRuntime.NextStart = null;
+            HostRuntime.NextDispose = null;
+            HostRuntime.NextControl = null;
+            Directory.Delete(data, recursive: true);
+        }
+        Console.WriteLine("PASS: generic fault recovery, concurrency, old-worker exit, no replay and user-stop precedence");
     }
 
     private static void CheckAuthorizationLifecycle(HostApplication host)

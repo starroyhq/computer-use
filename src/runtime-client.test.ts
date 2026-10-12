@@ -16,6 +16,8 @@ import {
   createRuntimeClient,
   ensureWindowsHost,
   ensureMacHost,
+  recoverPackagedHost,
+  recoverRuntime,
   probeRuntimePipe,
   type RuntimeClientOptions,
 } from './runtime-client.js';
@@ -344,6 +346,125 @@ function helperProcess() {
   const spawn = vi.mocked(childProcess.spawn).mockReturnValueOnce(child as unknown as ReturnType<typeof childProcess.spawn>);
   return { child, spawn };
 }
+
+describe('explicit agent-independent fault recovery', () => {
+  it('uses the recovery helper once and authenticates the selected profile without sending any action', async () => {
+    const server = await pipeServer((request, socket) => {
+      socket.end(JSON.stringify({ id: request.id, result: { paused: false, stopped: false } }) + '\n');
+    });
+    const recover = vi.fn(async () => {});
+    const result = await recoverRuntime('selected-profile-token', undefined, {
+      ...options,
+      recover,
+      defaultPath: async () => server.path,
+    });
+    expect(recover).toHaveBeenCalledExactlyOnceWith(join(bundle, 'ComputerUse.WindowsHost.exe'), 'Windows', 40_000);
+    expect(server.requests).toHaveLength(2);
+    for (const request of server.requests)
+      expect(request).toMatchObject({ token: 'selected-profile-token', method: 'capabilities', params: {} });
+    expect(result).toEqual({ ok: true, state: 'ready', actionsReplayed: false, requiresNewSession: true, requiresFreshObservation: true });
+  });
+  it.each(['paused', 'stopped', 'recovery_limited', 'recovery_failed'])(
+    'does not send another request or retry after helper refusal: %s',
+    async code => {
+      const recover = vi.fn(async () => {
+        throw new CuError('unavailable', code);
+      });
+      const discover = vi.fn(async () => {
+        throw new CuError('unavailable', 'Offline.');
+      });
+      await expect(recoverRuntime('token', undefined, { ...options, recover, defaultPath: discover })).rejects.toThrow(code);
+      expect(recover).toHaveBeenCalledTimes(1);
+      expect(discover).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('does not report successful recovery or re-pair when credentials were revoked', async () => {
+    const server = await pipeServer((request, socket) => {
+      socket.end(
+        JSON.stringify({ id: request.id, error: { code: 'unauthorized', message: 'Client credential is invalid or revoked.' } }) + '\n',
+      );
+    });
+    const recover = vi.fn();
+    await expect(
+      recoverRuntime('revoked-token', undefined, {
+        ...options,
+        recover,
+        defaultPath: async () => server.path,
+      }),
+    ).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(recover).not.toHaveBeenCalled();
+    expect(server.requests.map(request => request.method)).toEqual(['capabilities']);
+  });
+  it('authenticates again when a previously offline service becomes ready and rejects a revoked profile', async () => {
+    const server = await pipeServer((request, socket) => {
+      socket.end(JSON.stringify({ id: request.id, error: { code: 'unauthorized', message: 'Revoked.' } }) + '\n');
+    });
+    let recovered = false;
+    const recover = vi.fn(async () => {
+      recovered = true;
+    });
+    await expect(
+      recoverRuntime('revoked-token', undefined, {
+        ...options,
+        recover,
+        defaultPath: async () => {
+          if (!recovered) throw new CuError('unavailable', 'Offline.');
+          return server.path;
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(server.requests.map(request => request.method)).toEqual(['capabilities']);
+  });
+  it.each([
+    [{ paused: true, stopped: false }, 'paused'],
+    [{ paused: true, stopped: true }, 'unavailable'],
+    [{ unexpected: true }, 'unavailable'],
+  ])('checks authoritative runtime state after helper readiness: %j', async (status, code) => {
+    const server = await pipeServer((request, socket) => {
+      socket.end(JSON.stringify({ id: request.id, result: status }) + '\n');
+    });
+    await expect(
+      recoverRuntime('token', undefined, {
+        ...options,
+        recover: async () => {},
+        defaultPath: async () => server.path,
+      }),
+    ).rejects.toMatchObject({ code });
+    expect(server.requests.map(request => request.method)).toEqual(['capabilities', 'capabilities']);
+  });
+  it('refuses custom endpoints, unsupported platforms, and source execution before requesting recovery', async () => {
+    const recover = vi.fn();
+    await expect(recoverRuntime('token', 'custom-endpoint', { ...options, recover })).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(recoverRuntime('token', undefined, { ...options, recover, platform: 'linux' })).rejects.toMatchObject({
+      code: 'unavailable',
+    });
+    await expect(
+      recoverRuntime('token', undefined, { ...options, recover, entrypoint: join(directory, 'other-cli.js') }),
+    ).rejects.toMatchObject({ code: 'unavailable' });
+    expect(recover).not.toHaveBeenCalled();
+  });
+  it('keeps the helper command separate from startup and never passes credentials or request IDs to it', async () => {
+    const { child, spawn } = helperProcess();
+    const host = join(bundle, 'ComputerUse.WindowsHost.exe');
+    const recovering = recoverPackagedHost(host, 'Windows');
+    child.stdout.write('{"ok":true,"state":"ready"}\n');
+    child.emit('exit', 0, null);
+    await recovering;
+    expect(spawn.mock.calls[0]?.slice(0, 2)).toEqual([host, ['--recover-fault']]);
+  });
+  it('reports rate limiting with a fixed recovery reason and does not retry the helper', async () => {
+    const { child, spawn } = helperProcess();
+    const recovering = recoverPackagedHost(join(bundle, 'ComputerUse.WindowsHost.exe'), 'Windows');
+    child.stdout.write(JSON.stringify({ ok: false, code: 'recovery_limited', message: 'Recovery limit reached.' }) + '\n');
+    child.emit('exit', 1, null);
+    await expect(recovering).rejects.toMatchObject({
+      code: 'busy',
+      message: 'Windows host recovery recovery_limited (exit 1): Recovery limit reached.',
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('bounded native startup helper', () => {
   it('uses an absolute executable and literal arguments, accepting a fragmented single JSON line', async () => {

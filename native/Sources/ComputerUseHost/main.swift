@@ -6,8 +6,8 @@ import HostCore
 // 由 send 的错误处理进入停服流程。
 signal(SIGPIPE, SIG_IGN)
 guard let mode = HostLaunchMode.parse(Array(CommandLine.arguments.dropFirst())) else { exit(2) }
-if mode == .ensureRunning {
-    let result = HostStartup.ensureRunning()
+if mode == .ensureRunning || mode == .recoverFault {
+    let result = HostStartup.ensureRunning(recoveringFault: mode == .recoverFault)
     if let data = try? JSONEncoder().encode(result) {
         try? FileHandle.standardOutput.write(contentsOf: data + Data([10]))
     }

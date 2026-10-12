@@ -4,13 +4,14 @@ import HostCore
 import Security
 
 enum HostLaunchMode: Equatable {
-    case normal, background, ensureRunning
+    case normal, background, ensureRunning, recoverFault
 
     static func parse(_ arguments: [String]) -> HostLaunchMode? {
         switch arguments {
         case []: return .normal
         case ["--background"]: return .background
         case ["--ensure-running"]: return .ensureRunning
+        case ["--recover-fault"]: return .recoverFault
         default: return nil
         }
     }
@@ -28,7 +29,9 @@ struct HostStartupResult: Encodable, Equatable {
         switch code {
         case "paused": message = "Computer Use is paused. Resume it in the local app."
         case "stopped": message = "Computer Use was stopped. Restart services in the local app."
-        case "failed": message = "Computer Use failed. Check the local app and restart services."
+        case "failed": message = "Computer Use failed. Run CLI recover or restart services in the local app; do not replay the previous action."
+        case "recovery_failed": message = "Computer Use could not recover its workers. Check the local app; do not replay the previous action."
+        case "recovery_limited": message = "Computer Use fault recovery is limited to three attempts per minute. Wait before trying again."
         case "permissions_required": message = "Open Computer Use and grant Accessibility and Screen Recording in System Settings."
         case "non_interactive": message = "Open Computer Use in the signed-in user's graphical session."
         case "timeout": message = "Computer Use did not become ready within 35 seconds. Check its status in the local app."
@@ -93,7 +96,7 @@ enum HostStartup {
         return paths
     }
 
-    static func ensureRunning() -> HostStartupResult {
+    static func ensureRunning(recoveringFault: Bool = false) -> HostStartupResult {
         let deadline = ProcessInfo.processInfo.systemUptime + 35
         guard let session = session(), session.graphical, getuid() != 0, getuid() == geteuid() else {
             return .failure("non_interactive")
@@ -108,7 +111,8 @@ enum HostStartup {
             // Reading existing state is non-mutating, including a missing first-install directory.
             stage = .initialState
             let previous = try store.read()
-            if let code = HostStartupPolicy.blockingCode(previous, live: previous.map { HostProcessIdentity.read(pid: $0.process.pid) == $0.process } ?? false) {
+            if let code = HostStartupPolicy.blockingCode(previous, live: previous.map { HostProcessIdentity.read(pid: $0.process.pid) == $0.process } ?? false,
+                                                         recoveringFault: recoveringFault) {
                 return .failure(code)
             }
             stage = .gate
@@ -116,14 +120,21 @@ enum HostStartup {
             return try withExtendedLifetime(gate) {
                 var launched = false
                 var launchError: Error?
+                var recovery: HostFaultRecoveryRequest?
+                var recoveryReply: String?
+                var recoveryObserver: NSObjectProtocol?
+                defer { if let recoveryObserver { DistributedNotificationCenter.default().removeObserver(recoveryObserver) } }
                 while ProcessInfo.processInfo.systemUptime < deadline {
                     stage = .state
                     let state = try store.read()
                     let actual = state.flatMap { HostProcessIdentity.read(pid: $0.process.pid) }
                     let live = state != nil && actual == state?.process
-                    if let code = HostStartupPolicy.blockingCode(state, live: live) { return .failure(code) }
+                    if let code = HostStartupPolicy.blockingCode(state, live: live, recoveringFault: recoveringFault) { return .failure(code) }
                     if live, let state, !HostStartupPolicy.matches(state, process: actual, executable: own.executable, sessionID: session.id) {
                         return .launchFailure(.existingIdentity)
+                    }
+                    if let recoveryReply, recoveryReply != "ready", recoveryReply != "starting" {
+                        return .failure(recoveryReply)
                     }
                     if live, let state, state.state == .ready {
                         stage = .socket
@@ -136,9 +147,16 @@ enum HostStartup {
                             return .ready
                         }
                     }
+                    if recoveringFault, recovery == nil, live, let state, state.state == .failed {
+                        let request = HostFaultRecoveryRequest(sender: own, target: state.process)
+                        recovery = request
+                        recoveryObserver = HostFaultRecoveryIPC.observeReply(to: request) { recoveryReply = $0 }
+                        HostFaultRecoveryIPC.post(request)
+                    }
                     if let launchError { return .launchFailure(.launch, error: launchError) }
                     stage = .launch
-                    if !launched, !live, try !HostStartupGate.instanceExists(directory: paths.data) {
+                    if !launched, !live, HostStartupPolicy.oldWorkersExited(state),
+                       try !HostStartupGate.instanceExists(directory: paths.data) {
                         try preventOutputInheritance()
                         let configuration = NSWorkspace.OpenConfiguration()
                         configuration.activates = false

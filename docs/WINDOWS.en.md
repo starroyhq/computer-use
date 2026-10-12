@@ -10,7 +10,7 @@ The isolated browser has a separate boundary: the current Playwright backend's [
 
 ## Install and uninstall
 
-Download `computer-use-0.7.0-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.7.0](https://github.com/starroyhq/computer-use/releases/tag/v0.7.0). For a portable copy, download `computer-use-0.7.0-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
+Download `computer-use-0.7.1-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.7.1](https://github.com/starroyhq/computer-use/releases/tag/v0.7.1). For a portable copy, download `computer-use-0.7.1-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
 
 Installers are available starting with v0.6.0; v0.5.0 and earlier provide only portable packages. Installation over an existing local ARM64 build has been tested. The complete flow from downloading a real release to completing an installer upgrade, native x64 installation and SmartScreen behavior remain unverified; see the [validation record](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10) (Chinese).
 
@@ -42,7 +42,7 @@ Since v0.6.1, complete Windows packages support on-demand startup. CLI and stdio
 
 This requires the current user's interactive login desktop, not a service account or Session 0. Source execution, a custom `--socket`, HTTP and SSH tunnels do not use this automatic startup path. In v0.7.0, complete macOS apps also support controlled startup from the same bundle; missing system permissions return an explicit error requiring the user to open the app. Neither platform searches PATH or other installation folders for a host. Regenerate agent configuration after moving the package.
 
-In v0.7.0, both Windows and macOS record pause and emergency stop in the current user's private `host-state.json`. They survive exit, reopening, login and update launches; only the local Resume/Restart Services buttons clear them. Opening the app shows its state without resuming. The helper also leaves a live failed or stopped host for local recovery. A startup failure sends no original business request; a connection failure after dispatch still has an uncertain outcome and is never automatically replayed.
+Since v0.7.0, both Windows and macOS record pause and emergency stop in the current user's private `host-state.json`. They survive exit, reopening, login and update launches; only the local Resume/Restart Services buttons clear them. Opening the app shows its state without resuming. The startup helper does not restart a live failed or stopped host; v0.7.1 adds the explicit fault-recovery command below. A startup failure sends no original business request; a connection failure after dispatch still has an uncertain outcome and is never automatically replayed.
 
 To check startup separately, run this in PowerShell from the complete installed or portable folder:
 
@@ -52,7 +52,21 @@ To check startup separately, run this in PowerShell from the complete installed 
 
 The helper waits up to 35 seconds and writes exactly one JSON line to stdout. Success is `{"ok":true,"state":"ready"}` with exit code 0. Failure exits nonzero and returns `ok: false`, `code` and `message`; codes are `paused`, `stopped`, `failed`, `non_interactive`, `timeout` or `launch_failed`. Success requires a matching session and host process identity plus a successful probe of the published pipe; an EXE process alone does not establish readiness. This command neither approves pairing nor resumes a pause or emergency stop, and it cannot remove Windows system blocks.
 
-This section describes v0.7.0 interface behavior. See the [validation record](validation-results.md) for historical local-build and VM checks; v0.7.0 release artifacts and CI require separate verification.
+This section describes v0.7.1 interface behavior. See the [validation record](validation-results.md) for historical local-build and VM checks; each release's artifacts and CI require separate verification.
+
+## General Agent fault recovery
+
+At the first Computer Use operation in every new Agent conversation, read the same package's CLI `--help`, then run and read `instructions` when supported; an existing Skill or profile does not replace the current guide. Preserve an uncertain action's original requestId, query `action_status`, then read `preflight --profile NAME`. Within an authorized task, when the Host is `failed`, or its connection is lost after an unknown desktop action without a user stop, make one autonomous attempt:
+
+```powershell
+& .\bin\node.exe .\runtime\cli.js recover --profile NAME
+```
+
+Available since v0.7.1, `recover` repairs service faults through the same package's default local pipe only; source execution, custom `--socket`, remote HTTP and SSH tunnels are unsupported. It preserves credentials and grants, leaves a healthy service running, never re-pairs, and cannot bypass pause, emergency stop, revocation or system permissions. A missing profile, invalid or revoked credentials, user stop, system block or non-interactive desktop requires local action. Older packages without this command still require App recovery; never delete state or use ordinary startup to bypass a stop. Report failure, rate limiting or another immediate fault instead of looping.
+
+Success establishes service availability only and reports `actionsReplayed: false`, `requiresNewSession: true` and `requiresFreshObservation: true`. Query the original requestId after recovery, open a new background session and observe; old sessions, element IDs and snapshots must not be reused. An `unknown` does not become successful through recovery: never replay it with a new UUID, coordinates or equivalent action. Unchanged visuals do not prove that input was not delivered. An `executed` / `unconfirmed` action or stale snapshot only needs observation. See [Usage](USAGE.md#通用故障恢复--general-fault-recovery) for the full flow.
+
+Windows Host / UI, process and transport isolation checks passed for this change, but **fault recovery with a real Agent and desktop driver remains unverified**. Isolated tests do not establish desktop workflow acceptance; see the [fault-recovery record](validation-fault-recovery-20261012.md#windows-隔离验收) (Chinese).
 
 ## Build and start from source
 
@@ -181,7 +195,7 @@ Run `dotnet run --project validation/windows/ComputerUse.WindowsHostTests` on an
 
 Add `-- --screenshots <folder>` to save PNGs of all six pages in both languages, the installed update state, narrow Clients/Connect/Updates windows, and all-application and multiple-path scoped pairing dialogs. These screenshots use simulated data and do not establish Windows 10 or desktop input acceptance. The separate `-- --live-update <old-package-folder>` mode checks and downloads the real latest release through that package's CLI, including its installer when the release has one (network required). See the [UI test instructions](../validation/windows/README.md).
 
-- `doctor` cannot connect: the bundled default-pipe client starts the host on demand. Keep the error code and check the complete package, interactive login session and host status. `paused` / `stopped` require local user recovery; inspect Settings for `failed`, and use the login desktop for `non_interactive`. For `timeout` / `launch_failed`, check system block messages, bundled components and matching host/driver versions. Do not delete state files or repeatedly launch the app to clear a user's pause.
+- `doctor` cannot connect: the bundled default-pipe client starts the host on demand. Keep the error code and check the complete package, interactive login session and host status. `paused` / `stopped` require local user recovery; for `failed`, follow the one-attempt `recover` flow above when supported, and use the login desktop for `non_interactive`. For `timeout` / `launch_failed`, check system block messages, bundled components and matching host/driver versions. Do not delete state files or repeatedly launch the app to clear a user's pause.
 - Codex connection refused: check HTTP is enabled, the SSH tunnel is alive and it owns Mac port 47631. Do not open Windows MCP firewall access to troubleshoot.
 - `targets` blocked by MCP approval: check the Codex approval policy; dedicated noninteractive fixture tests can use the temporary setting above.
 - `401`: check the Mac JSON belongs to the current, unrevoked pairing and has mode `0600`. The helper should output one JSON header object; do not paste that credential-bearing output into logs or chat.

@@ -836,6 +836,69 @@ describe('Runtime authorization and execution', () => {
     },
   );
 
+  it('recovers from an uncertain dispatch without replaying it or accepting pre-recovery sessions and snapshots', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const request = await actionInput(token, sessionId);
+    vi.mocked(backend.act).mockRejectedValueOnce(new CuError('unknown_outcome', 'Driver disconnected after dispatch.'));
+    const uncertain = await call(token, 'act', request);
+    expect(uncertain).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
+    expect(backend.act).toHaveBeenCalledTimes(1);
+    await expect(session(token)).rejects.toMatchObject({ code: 'unavailable' });
+
+    // A native recovery must retire the old process before creating the next runtime.
+    // This new backend represents the new driver process, not a reconnect to the old input queue.
+    await runtime.close();
+    const recoveredBackend = fakeBackend();
+    events = [];
+    runtime = new Runtime({ dataDir: directory, backends: [recoveredBackend], emit: event => events.push(event), now: () => clock });
+    await runtime.start();
+    expect(recoveredBackend.act).not.toHaveBeenCalled();
+    expect(await call(token, 'action_status', { requestId: request.requestId })).toEqual(uncertain);
+    expect(await call(token, 'act', request)).toEqual(uncertain);
+    await expect(observation(token, sessionId)).rejects.toMatchObject({ code: 'not_found' });
+    await expect(call(token, 'act', { ...request, requestId: randomUUID() })).rejects.toMatchObject({ code: 'not_found' });
+
+    const fresh = await session(token);
+    expect(fresh.sessionId).not.toBe(sessionId);
+    await expect(call(token, 'act', { ...request, sessionId: fresh.sessionId })).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(call(token, 'act', { ...request, requestId: randomUUID(), sessionId: fresh.sessionId })).rejects.toMatchObject({
+      code: 'stale_snapshot',
+    });
+    expect(recoveredBackend.act).not.toHaveBeenCalled();
+    const nextRequest = await actionInput(token, fresh.sessionId);
+    expect(nextRequest.snapshotId).not.toBe(request.snapshotId);
+    expect(await call(token, 'act', nextRequest)).toMatchObject({ state: 'executed' });
+    expect(recoveredBackend.act).toHaveBeenCalledTimes(1);
+    expect(await call(token, 'action_status', { requestId: request.requestId })).toEqual(uncertain);
+    expect(events.some(event => event.event === 'pair_request')).toBe(false);
+  });
+
+  it('keeps a revoked credential unauthorized after recovering from a dispatched action failure', async () => {
+    const { token, clientId } = await pair(),
+      { sessionId } = await session(token);
+    const request = await actionInput(token, sessionId);
+    vi.mocked(backend.act).mockRejectedValueOnce(new CuError('unknown_outcome', 'Driver disconnected after dispatch.'));
+    expect(await call(token, 'act', request)).toMatchObject({ state: 'unknown' });
+    await runtime.control({ command: 'revoke', clientId });
+    await runtime.close();
+
+    const recoveredBackend = fakeBackend();
+    runtime = new Runtime({ dataDir: directory, backends: [recoveredBackend], emit: event => events.push(event), now: () => clock });
+    await runtime.start();
+    for (const [method, params] of [
+      ['doctor', {}],
+      ['session_open', { targetId: target.id }],
+      ['action_status', { requestId: request.requestId }],
+      ['act', request],
+    ] as const)
+      await expect(call(token, method, params)).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(recoveredBackend.act).not.toHaveBeenCalled();
+    expect(recoveredBackend.targets).not.toHaveBeenCalled();
+    expect(recoveredBackend.doctor).not.toHaveBeenCalled();
+    expect(runtime.clients.clients.has(clientId)).toBe(false);
+  });
+
   it('revokes credentials and session ownership immediately', async () => {
     const { token, clientId } = await pair(),
       { sessionId } = await session(token);

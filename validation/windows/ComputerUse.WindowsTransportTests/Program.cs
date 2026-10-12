@@ -13,15 +13,74 @@ internal static class Program
     private const int FileNotFound = 2;
     private const int PipeBusy = 231;
 
-    private static async Task Main()
+    private static async Task Main(string[] args)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Real Windows named pipes are required.");
+        if (args is ["--job-grandchild"]) { await Task.Delay(Timeout.Infinite); return; }
+        if (args is ["--job-child"])
+        {
+            if (await Console.In.ReadLineAsync() is null) return;
+            using var descendant = Process.Start(new ProcessStartInfo(Environment.ProcessPath!)
+            { UseShellExecute = false, CreateNoWindow = true, ArgumentList = { "--job-grandchild" } })!;
+            Console.WriteLine(descendant.Id);
+            await Task.Delay(Timeout.Infinite);
+            return;
+        }
+        await RuntimeJobStopsDescendants();
         await ProbeThenRequest();
         await ConcurrentProbes();
         await CapacityAndIdleTimeout();
         await CancellationAtCapacity();
         await ListenerCreationFailure();
         Console.WriteLine("PASS: all real Windows transport regressions (no worker, desktop or private user data)");
+    }
+
+    private static async Task RuntimeJobStopsDescendants()
+    {
+        foreach (var closeHandle in new[] { false, true })
+        {
+            using var group = new RuntimeProcessGroup();
+            using var parent = Process.Start(new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+                RedirectStandardOutput = true, ArgumentList = { "--job-child" }
+            })!;
+            Process? descendant = null;
+            try
+            {
+                group.Assign(parent);
+                await parent.StandardInput.WriteLineAsync("assigned");
+                await parent.StandardInput.FlushAsync();
+                var id = int.Parse(await parent.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5))
+                    ?? throw new IOException("Job fixture did not start its descendant."));
+                descendant = Process.GetProcessById(id);
+                Check(group.ActiveProcesses >= 2, $"Job contains the isolated parent and its descendants (active={group.ActiveProcesses}).");
+                using var owner = Process.GetCurrentProcess();
+                Check(!RuntimeProcessGroup.PreviousHasExited(owner.Id, owner.StartTime.ToUniversalTime().Ticks),
+                    "Cold-start discovery waits for the old owner's live process descendants.");
+                // Model a Node crash leaving a still-running native driver.
+                if (!closeHandle)
+                {
+                    parent.Kill();
+                    await parent.WaitForExitAsync();
+                    Check(!descendant.HasExited, "A child can remain after its direct parent exits.");
+                    await group.StopAsync();
+                    Check(group.ActiveProcesses == 0, "Recovery confirms every owned process has exited.");
+                    Check(RuntimeProcessGroup.PreviousHasExited(owner.Id, owner.StartTime.ToUniversalTime().Ticks),
+                        "Cold-start discovery accepts only an empty old runtime job.");
+                }
+                else group.Dispose();
+                await parent.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await descendant.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally
+            {
+                if (!parent.HasExited) parent.Kill(entireProcessTree: true);
+                if (descendant is not null && !descendant.HasExited) descendant.Kill();
+                descendant?.Dispose();
+            }
+        }
+        Console.WriteLine("PASS: owned runtime descendants stop after parent crash and Job handle close");
     }
 
     private static async Task ProbeThenRequest()

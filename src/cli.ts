@@ -6,7 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
-import { createRuntimeClient } from './runtime-client.js';
+import { createRuntimeClient, recoverRuntime } from './runtime-client.js';
 import { CuError, errorResult } from './contracts.js';
 import { credentialDir, dataDir } from './paths.js';
 import { atomicJson, privateDirectory, readJson } from './storage.js';
@@ -41,6 +41,7 @@ computer-use <method> --json '<JSON>' [--profile default]
 computer-use call <method> --input request.json
 computer-use schema <method>
 computer-use preflight [--profile default]
+computer-use recover [--profile default]
 computer-use instructions
 computer-use skill export [--profile default] [--out SKILL.md]
 computer-use skill prompt [--profile default]
@@ -63,6 +64,8 @@ Approval persists until revoked. Sessions default to background execution.
 Pairing requires local app approval. Enable HTTP in the app before using its
 loopback endpoint. Credentials are stored in private files, never printed.
 CLI operation does not depend on MCP. Images are written to private files.
+recover repairs service faults only; it never clears pause/stop, grants access,
+or replays actions. Use a new session and fresh observation after recovery.
 `;
 const credentialSchema = z.object({ clientId: z.string(), token: z.string().min(20) });
 const pairResultSchema = credentialSchema;
@@ -199,7 +202,19 @@ async function main(): Promise<void> {
     return;
   }
   const credential = credentialSchema.safeParse(await readJson(credentialsPath));
-  if (!credential.success) throw new CuError('unauthorized', 'No valid credential profile. Run computer-use pair first.');
+  if (!credential.success)
+    throw new CuError(
+      'unauthorized',
+      command === 'recover'
+        ? 'Fault recovery requires an existing credential profile. Review authorization in the local app; do not re-pair automatically.'
+        : 'No valid credential profile. Run computer-use pair first.',
+    );
+  if (command === 'recover') {
+    if (positionals.length !== 1 || Object.keys(values).some(key => key !== 'profile' && key !== 'socket'))
+      throw new CuError('invalid_request', 'Use recover --profile NAME without action arguments.');
+    process.stdout.write(JSON.stringify({ ...(await recoverRuntime(credential.data.token, values.socket)), profile }) + '\n');
+    return;
+  }
   if (command === 'mcp' && positionals[1] === 'stdio') {
     const { runStdio } = await import('./mcp.js');
     await runStdio(await connect(), credential.data.token);

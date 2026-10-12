@@ -10,7 +10,7 @@
 
 ## 安装与卸载
 
-从 [v0.7.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.7.0) 下载对应架构的 `computer-use-0.7.0-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.7.0-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
+从 [v0.7.1 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.7.1) 下载对应架构的 `computer-use-0.7.1-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.7.1-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
 
 v0.6.0 开始提供安装程序，v0.5.0 及更早版本只提供便携包。本地 ARM64 覆盖安装已验收，但从真实发布下载到完成安装版升级的完整流程、原生 x64 安装和 SmartScreen 表现仍待验证，见[验证记录](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10)。
 
@@ -42,7 +42,7 @@ v0.7.0 的 App“接入”页默认提供“复制安装提示词”。点击后
 
 启动只适用于当前用户的交互式登录桌面，不适用于服务账号或 Session 0。源码运行、自定义 `--socket`、HTTP 和 SSH 隧道不使用这一自动启动路径。v0.7.0 的 macOS 完整 App 也支持同包受控启动，缺少系统权限时返回明确错误，需用户打开 App 处理；两平台均不会从 PATH 或其他安装目录搜索宿主。移动安装目录后仍需重新生成 Agent 配置。
 
-v0.7.0 在 Windows 与 macOS 上均将暂停和紧停写入当前用户私有目录的 `host-state.json`。退出、重新打开 App、登录及更新重开都保留阻止状态，只有用户在本机 App 内点击“恢复／重启服务”才能解除；再次打开只显示状态，不自动恢复。已有但失败或停止的 Host 也不会被 helper 自动重启。就绪前失败不会发送原业务请求；已发送动作的连接失败仍按不确定结果处理，不自动重放。
+自 v0.7.0 起，Windows 与 macOS 均将暂停和紧停写入当前用户私有目录的 `host-state.json`。退出、重新打开 App、登录及更新重开都保留阻止状态，只有用户在本机 App 内点击“恢复／重启服务”才能解除；再次打开只显示状态，不自动恢复。启动 helper 不重启已运行但失败或停止的 Host；v0.7.1 增加下述显式故障恢复命令。就绪前失败不会发送原业务请求；已发送动作的连接失败仍按不确定结果处理，不自动重放。
 
 需要单独检查启动时，在完整安装或便携目录的 PowerShell 中运行：
 
@@ -52,7 +52,21 @@ v0.7.0 在 Windows 与 macOS 上均将暂停和紧停写入当前用户私有目
 
 helper 最多等待 35 秒，stdout 只返回一行 JSON；成功为 `{"ok":true,"state":"ready"}` 并退出 0。失败退出非零，包含 `ok: false`、`code` 和 `message`；代码为 `paused`、`stopped`、`failed`、`non_interactive`、`timeout` 或 `launch_failed`。成功要求匹配当前会话和宿主进程身份，并实际探测已公布的管道；仅看到 EXE 进程不算就绪。这一命令不批准配对、不恢复暂停或紧停，也不解除 Windows 系统拦截。
 
-本节说明 v0.7.0 的接口行为；历史本地构建与 VM 验收见[验证记录](validation-results.md)，v0.7.0 发布产物与 CI 需独立验证。
+本节说明 v0.7.1 的接口行为；历史本地构建与 VM 验收见[验证记录](validation-results.md)，每版发布产物与 CI 需独立验证。
+
+## Agent 通用故障恢复
+
+每个新的 Agent 对话首次使用时，先读取同包 CLI 的 `--help`，再执行并阅读受支持的 `instructions`；已有 Skill / profile 不替代当前指南。遇到故障先保留不确定动作的原 requestId 并查询 `action_status`，再查看 `preflight --profile NAME`。在已授权任务中，Host 为 `failed`，或桌面动作 unknown 后连接丢失且没有用户停止状态时，可自主执行一次：
+
+```powershell
+& .\bin\node.exe .\runtime\cli.js recover --profile NAME
+```
+
+`recover` 从 v0.7.1 起可用，只恢复同包默认本地管道的服务故障；源码运行、自定义 `--socket`、远程 HTTP 和 SSH 隧道不支持。它保留现有凭据及授权，不重启健康服务、不重新配对，也不能绕过暂停、紧停、撤销或系统权限。缺少 profile、无效或撤销凭据、用户停止、系统拦截及非交互桌面需本机处理。旧版缺少命令时仍由用户在 App 内处理，不通过删除状态或普通启动绕过。失败、限流或下一步再故障时报告具体原因，不循环恢复。
+
+成功仅表示服务可用，返回 `actionsReplayed: false`、`requiresNewSession: true` 和 `requiresFreshObservation: true`。恢复后补查原 requestId，建立新后台会话并重新观察；旧会话、元素 ID 与快照不能复用。`unknown` 不会因恢复变成成功，不能换 UUID、坐标或等价动作重放；画面没变化不证明输入未送达。`executed` / `unconfirmed` 和过期快照只需重新观察。完整流程见[使用说明](USAGE.md#通用故障恢复--general-fault-recovery)。
+
+本次 Windows 已通过 Host / UI、进程和传输隔离检查，**尚未完成真实 Agent / driver 故障恢复验收**，不把隔离测试当作桌面业务验收。覆盖范围见[故障恢复记录](validation-fault-recovery-20261012.md#windows-隔离验收)。
 
 ## 从源码构建与启动
 

@@ -43,13 +43,13 @@ Windows 原生界面，截图使用 UI 测试演示数据。[截图来源](docs/
 
 ## 安装正式版
 
-**当前为开发预览版。** 下载 v0.7.0 安装包，或前往 [Releases](https://github.com/starroyhq/computer-use/releases/latest) 查看最新版本、便携 ZIP 与校验文件。
+**当前为开发预览版。** 下载 v0.7.1 安装包，或前往 [Releases](https://github.com/starroyhq/computer-use/releases/latest) 查看最新版本、便携 ZIP 与校验文件。
 
 | 系统 | 下载 | 安装方式 |
 | --- | --- | --- |
-| **macOS · Apple Silicon** | [下载 DMG](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-macos-arm64.dmg) | macOS 14+；拖入“应用程序”后打开 |
-| **Windows · x64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-x64-setup.exe) | 当前用户安装，无需管理员权限 |
-| **Windows · ARM64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-arm64-setup.exe) | Windows on ARM 设备使用 |
+| **macOS · Apple Silicon** | [下载 DMG](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-macos-arm64.dmg) | macOS 14+；拖入“应用程序”后打开 |
+| **Windows · x64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-windows-x64-setup.exe) | 当前用户安装，无需管理员权限 |
+| **Windows · ARM64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-windows-arm64-setup.exe) | Windows on ARM 设备使用 |
 
 macOS 正式包已使用 Developer ID 签名并经过 Apple 公证。Windows 包目前未签名，可能被 SmartScreen、Smart App Control 或系统策略拦截，按需启动不会绕过这些限制。Windows 兼容目标为 **Windows 10 1809+**，实测范围见[平台与验证](#平台与验证)。
 
@@ -128,6 +128,8 @@ computer-use config codex --profile default
 
 **暂停与紧停跨退出、重新打开、登录和更新保留。** Agent 调用和后台启动不能清除停止状态。
 
+v0.7.1 新增所有 Agent 通用的 `recover --profile NAME`：仅恢复服务故障，不解除暂停、紧停或撤销，不重放结果不确定的动作。Skill 要求每个新会话读取已安装 App 的当前指南，并在恢复后建立新会话、重新观察。
+
 配对授权包含前台操作权限，但执行默认仍为后台，**不会自动切换前台模式**。后台能力依赖应用与控件，不能保证完全不影响焦点。源码运行、自定义 socket 和远程 HTTP 不自动启动宿主。
 
 HTTP 默认关闭，启用后仅监听本机回环地址；跨机器连接使用手动 SSH 隧道。默认动作日志不保存截图、输入、URL 或窗口标题；CLI 截图会保存在本机。发给云端 Agent 的截图与结果仍由你选择的模型服务处理。更多[权限与操作边界](docs/USAGE.md)。
@@ -142,6 +144,8 @@ HTTP 默认关闭，启用后仅监听本机回环地址；跨机器连接使用
 | **macOS Intel / Linux** | 暂无宿主交付 |
 
 Windows 10 尚未实测。现有桌面记录针对本地构建与限定测试应用，不代表逐个验证了正式发布产物或任意第三方应用；全新系统首装、其他 Agent 的实际 Skill 安装仍未完整验收。详见[验证结果](docs/validation-results.md)和 [v0.7.0 接入验收](docs/validation-skill-link-20261012.md)。
+
+v0.7.1 已完成 macOS WorkBuddy 实际故障恢复及首次文本点击修复验收。Windows Host/UI、进程隔离与传输测试通过，Windows 真实 Agent/driver 恢复流程尚未验收。详见[故障恢复记录](docs/validation-fault-recovery-20261012.md)和[首次点击记录](docs/validation-first-click-20261012.md)。
 
 ## 开发
 

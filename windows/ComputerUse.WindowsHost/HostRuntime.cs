@@ -19,9 +19,12 @@ internal sealed class HostRuntime : IAsyncDisposable
     private readonly CancellationTokenSource _pipesCancellation = new();
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Process? _process;
+    private RuntimeProcessGroup? _processGroup;
+    private bool _workerAssigned;
     private Task? _reader;
     private Task? _listener;
     private bool _closing;
+    private bool _disposed;
     private readonly string _pipeShortName = "computer-use-" + Guid.NewGuid().ToString("N");
     internal string PipeName => @"\\.\pipe\" + _pipeShortName;
 
@@ -46,7 +49,11 @@ internal sealed class HostRuntime : IAsyncDisposable
             RedirectStandardError = true,
             WorkingDirectory = root
         };
-        foreach (var argument in new[] { host, "--windows", "--driver-binary", driver, "--data-dir", PrivateData.DirectoryPath })
+        // Do not import the worker (which may launch a desktop driver) until its
+        // process is inside the kill-on-close job. EOF before that point leaves
+        // no worker running if the GUI exits in the launch/assignment gap.
+        const string bootstrap = "const eof=()=>process.exit(1);process.stdin.once('end',eof);process.stdin.once('data',()=>{process.stdin.removeListener('end',eof);process.stdin.pause();void import(require('node:url').pathToFileURL(process.argv[1]).href)});";
+        foreach (var argument in new[] { "--input-type=commonjs", "--eval", bootstrap, host, "--windows", "--driver-binary", driver, "--data-dir", PrivateData.DirectoryPath })
             start.ArgumentList.Add(argument);
         foreach (var key in start.Environment.Keys.Cast<string>().Where(key =>
             key.StartsWith("CUA_", StringComparison.OrdinalIgnoreCase) ||
@@ -59,11 +66,16 @@ internal sealed class HostRuntime : IAsyncDisposable
         start.Environment["CUA_DRIVER_RS_UPDATE_CHECK"] = "false";
         start.Environment["DO_NOT_TRACK"] = "1";
 
-        _process = Process.Start(start) ?? throw new IOException("Could not launch Node runtime.");
-        _process.BeginErrorReadLine(); // Diagnostics may contain desktop content; deliberately discard.
-        _reader = ReadWorkerAsync(_process.StandardOutput.BaseStream);
         try
         {
+            _processGroup = new RuntimeProcessGroup();
+            _process = Process.Start(start) ?? throw new IOException("Could not launch Node runtime.");
+            _process.BeginErrorReadLine(); // Diagnostics may contain desktop content; deliberately discard.
+            _processGroup.Assign(_process);
+            _workerAssigned = true;
+            _reader = ReadWorkerAsync(_process.StandardOutput.BaseStream);
+            await _process.StandardInput.WriteLineAsync("computer-use-start");
+            await _process.StandardInput.FlushAsync();
             await _ready.Task.WaitAsync(TimeSpan.FromSeconds(30));
             _listener = AcceptConnectionsAsync(_pipesCancellation.Token);
             PrivateData.WriteDiscovery(PipeName);
@@ -304,12 +316,17 @@ internal sealed class HostRuntime : IAsyncDisposable
 
     internal async Task StopAsync()
     {
-        if (_closing) return;
-        try { await SendControlAsync("stop").WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
-        _closing = true;
-        _pipesCancellation.Cancel();
-        foreach (var pipe in _connections.Values) pipe.Dispose();
-        PrivateData.RemoveDiscovery(PipeName);
+        if (_disposed) return;
+        if (!_closing)
+        {
+            // An unassigned bootstrap must receive EOF, never a control line:
+            // its first line would release the worker outside the process job.
+            if (_workerAssigned) try { await SendControlAsync("stop").WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
+            _closing = true;
+            _pipesCancellation.Cancel();
+            foreach (var pipe in _connections.Values) pipe.Dispose();
+            PrivateData.RemoveDiscovery(PipeName);
+        }
         if (_process is not null)
         {
             try { _process.StandardInput.Close(); } catch { }
@@ -319,9 +336,19 @@ internal sealed class HostRuntime : IAsyncDisposable
                 try { _process.Kill(entireProcessTree: true); } catch { }
                 try { await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
             }
-            _process.Dispose();
-            _process = null;
         }
+        // The Node parent may already have exited while a native driver remains.
+        // Job emptiness, rather than Node exit alone, establishes safe recovery.
+        if (_processGroup is not null) await _processGroup.StopAsync();
+        // A failed assignment leaves a bootstrap-only Node outside the job.
+        // Always stop the job first, even when Node's individual kill failed, so
+        // an uncertain parent exit cannot leave its driver descendants running.
+        if (_process is not null && !_process.HasExited)
+            throw new IOException("Runtime has not exited; recovery is blocked.");
+        _process?.Dispose();
+        _process = null;
+        _processGroup?.Dispose();
+        _processGroup = null;
         foreach (var pending in _pending.Values) pending.TrySetException(new IOException("Runtime stopped."));
         _pending.Clear();
         if (_listener is not null) try { await _listener.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
@@ -330,9 +357,11 @@ internal sealed class HostRuntime : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_disposed) return;
         await StopAsync();
         _inputLock.Dispose();
         _pipesCancellation.Dispose();
+        _disposed = true;
     }
 }
 

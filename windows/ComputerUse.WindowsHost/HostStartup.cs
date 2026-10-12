@@ -44,14 +44,16 @@ internal sealed class HostStartupStore
 internal static class HostStartup
 {
     internal const string EnsureArgument = "--ensure-running";
+    internal const string RecoverArgument = "--recover-fault";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(35);
 
     // A pause or emergency stop survives process exit. A failed/dead process may be
-    // cold-started again; a live failed process requires an explicit local restart.
-    internal static string? BlockingCode(HostStartupState? state, bool sameLiveProcess)
+    // cold-started again; a live failed process needs explicit fault recovery.
+    internal static string? BlockingCode(HostStartupState? state, bool sameLiveProcess, bool recoverFault = false)
     {
         if (state?.AutoStartBlocked == true) return state.State == "paused" ? "paused" : "stopped";
-        if (sameLiveProcess && state?.State is "paused" or "stopped" or "failed") return state.State;
+        if (sameLiveProcess && state?.State is "paused" or "stopped") return state.State;
+        if (sameLiveProcess && state?.State == "failed" && !recoverFault) return "failed";
         return null;
     }
 
@@ -72,7 +74,7 @@ internal static class HostStartup
             or NotSupportedException) { return false; }
     }
 
-    internal static int EnsureRunning(string mutexName, string gateName)
+    internal static int EnsureRunning(string mutexName, string gateName, string? recoverSignal = null)
     {
         if (!Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0)
             return Failure("non_interactive", "Open Computer Use in the signed-in user's interactive desktop session.");
@@ -81,7 +83,7 @@ internal static class HostStartup
         {
             using var gate = new Mutex(false, gateName);
             if (!Acquire(gate, Timeout)) return Failure("timeout", "Timed out waiting for Computer Use startup.");
-            try { return EnsureCore(mutexName, elapsed); }
+            try { return EnsureCore(mutexName, elapsed, recoverSignal); }
             finally { gate.ReleaseMutex(); }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException
@@ -100,20 +102,22 @@ internal static class HostStartup
         return $"Computer Use could not be started ({code}). Open the installed app and check its status.";
     }
 
-    private static int EnsureCore(string mutexName, Stopwatch elapsed)
+    private static int EnsureCore(string mutexName, Stopwatch elapsed, string? recoverSignal)
     {
         var executable = Environment.ProcessPath ?? throw new IOException("Executable path is unavailable.");
         var session = Process.GetCurrentProcess().SessionId;
         var store = new HostStartupStore(readOnly: true);
         Process? child = null;
         var launched = false;
+        var recoveryRequested = false;
+        var recoveryStarted = false;
         try
         {
             while (elapsed.Elapsed < Timeout)
             {
                 var state = store.Read();
                 var live = state is not null && IsLive(state, executable);
-                var blocked = BlockingCode(state, live);
+                var blocked = BlockingCode(state, live, recoverFault: recoverSignal is not null);
                 if (blocked is not null) return Failure(blocked, blocked switch
                 {
                     "paused" => "Computer Use is paused. Resume it in the local app.",
@@ -122,6 +126,11 @@ internal static class HostStartup
                 });
                 if (live && state!.SessionId != session)
                     return Failure("launch_failed", "Computer Use is running in another Windows session. Use its interactive session.");
+                if (recoverSignal is not null && live && state!.State == "exited")
+                    return Failure("recovery_failed", "Computer Use is exiting or being updated. Wait for it to finish before requesting recovery.");
+                if (recoveryRequested && state?.State == "starting") recoveryStarted = true;
+                if (recoveryStarted && state?.State == "failed")
+                    return Failure("recovery_failed", "Computer Use failed during recovery. Check its status in the local app. No action was replayed.");
                 if (live && state!.State == "ready" && CanConnect(state.PipeName))
                 {
                     // A pause/stop may arrive while the pipe probe is completing.
@@ -133,8 +142,29 @@ internal static class HostStartup
                     }
                     continue;
                 }
+                if (recoverSignal is not null && live && state!.State == "failed" && !recoveryRequested)
+                {
+                    if (!HostRecoveryBudget.TryConsume()) return RecoveryLimited();
+                    if (!EventWaitHandle.TryOpenExisting(recoverSignal, out var signal))
+                        return Failure("recovery_failed", "This Computer Use instance cannot accept recovery requests. Update or restart it in the local app.");
+                    using (signal) signal.Set();
+                    recoveryRequested = true;
+                }
                 if (!launched && !InstanceExists(mutexName))
                 {
+                    // The previous GUI's final job handle closes on a crash, but
+                    // process termination is asynchronous. Wait for its driver
+                    // descendants before creating a replacement runtime.
+                    if (state is not null && !RuntimeProcessGroup.PreviousHasExited(state.ProcessId, state.ProcessStartTimeUtcTicks))
+                    {
+                        Thread.Sleep(100);
+                        continue;
+                    }
+                    if (recoverSignal is not null && !recoveryRequested)
+                    {
+                        if (!HostRecoveryBudget.TryConsume()) return RecoveryLimited();
+                        recoveryRequested = true;
+                    }
                     PreventStandardHandleInheritance();
                     var start = new ProcessStartInfo(executable)
                     {
@@ -157,6 +187,9 @@ internal static class HostStartup
         }
         finally { child?.Dispose(); }
     }
+
+    private static int RecoveryLimited() => Failure("recovery_limited",
+        "Computer Use has already attempted recovery three times in 60 seconds. Wait before retrying or check the local app. No action was replayed.");
 
     internal static void PreventStandardHandleInheritance()
     {
@@ -230,5 +263,29 @@ internal static class HostStartup
     {
         Console.WriteLine(JsonSerializer.Serialize(new { ok = false, code, message }));
         return 1;
+    }
+}
+
+internal sealed record HostRecoveryAttempts(int Version, long[] Attempts);
+
+internal static class HostRecoveryBudget
+{
+    // Called under the helper's startup gate; persisted separately so restarting
+    // or crashing the GUI cannot reset the bound on repeated automatic recovery.
+    internal static bool TryConsume(string? directory = null, DateTimeOffset? now = null)
+    {
+        directory ??= PrivateData.DirectoryPath;
+        PrivateData.ValidateDirectory(directory);
+        if (!Directory.Exists(directory)) PrivateData.EnsureDirectory(directory);
+        var path = Path.Combine(directory, "host-recovery.json");
+        var stored = PrivateData.ReadPrivateJson<HostRecoveryAttempts>(path);
+        if (stored is not null && (stored.Version != 1 || stored.Attempts is null || stored.Attempts.Length > 3
+            || stored.Attempts.Any(value => value <= 0))) throw new IOException("Computer Use recovery state is invalid.");
+        var timestamp = (now ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds();
+        var recent = (stored?.Attempts ?? []).Where(value => value > timestamp - 60_000).ToList();
+        if (recent.Count >= 3) return false;
+        recent.Add(timestamp);
+        PrivateData.WritePrivateJson(path, new HostRecoveryAttempts(1, recent.ToArray()));
+        return true;
     }
 }

@@ -54,6 +54,16 @@ function fixture() {
   return { client, backend: new CuaBackend('/test/driver.sock', connector, 'darwin'), state, connector };
 }
 
+function textFixture(role = 'AXTextField') {
+  const value = fixture();
+  Object.assign(value.state.elements![0]!, {
+    role,
+    actions: ['AXShowMenu', 'AXConfirm'],
+    frame: { x: 30, y: 40, w: 100, h: 30 },
+  });
+  return value;
+}
+
 describe('Cua socket adapter', () => {
   it('uses a verified executable identity and Windows health checks', async () => {
     vi.useFakeTimers();
@@ -232,6 +242,149 @@ describe('Cua socket adapter', () => {
       backend.act(observation, { type: 'click', elementId: 's1:1' }, 'foreground', new AbortController().signal),
     ).rejects.toMatchObject({ code: 'stale_snapshot' });
     expect(client.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { role: 'AXTextField', mode: 'background', width: 600, height: 400, x: 140, y: 70 },
+    { role: 'AXTextArea', mode: 'foreground', width: 600, height: 400, x: 140, y: 70 },
+    { role: 'AXTextField', mode: 'foreground', width: 150, height: 100, x: 35, y: 17.5 },
+    { role: 'AXTextArea', mode: 'background', width: 150, height: 100, x: 35, y: 17.5 },
+  ] as const)(
+    'dispatches one exact-window $role click in $mode using $width-pixel geometry',
+    async ({ role, mode, width, height, x, y }) => {
+      const { client, backend, state } = textFixture(role);
+      state.screenshotWidth = width;
+      state.screenshotHeight = height;
+      client.callTool.mockResolvedValue({ ...success(), action: { effect: 2, route: 1 } });
+      const dispatched = vi.fn();
+      const observation = await backend.observe(target);
+      await expect(
+        backend.act(observation, { type: 'click', elementId: 's1:1' }, mode, new AbortController().signal, dispatched),
+      ).resolves.toEqual({ effect: 'unconfirmed' });
+      expect(dispatched).toHaveBeenCalledTimes(1);
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(client.callTool.mock.calls[0]![0]).toBe('click');
+      expect(JSON.parse(client.callTool.mock.calls[0]![1])).toEqual({
+        pid: 42,
+        window_id: 19,
+        session: client.getWindowState.mock.calls[0]![0].session,
+        delivery_mode: mode,
+        button: 'left',
+        count: 1,
+        x,
+        y,
+      });
+      expect(client.getWindowState).toHaveBeenCalledTimes(1);
+      await expect(
+        backend.act(observation, { type: 'click', elementId: 's1:1' }, mode, new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'stale_snapshot' });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    { label: 'text field advertising press', role: 'AXTextField', actions: ['AXPress'], button: 'left' },
+    { label: 'text area advertising press', role: 'AXTextArea', actions: ['AXPress', 'AXShowMenu'], button: 'left' },
+    { label: 'unknown text capabilities', role: 'AXTextField', actions: undefined, button: 'left' },
+    { label: 'button', role: 'AXButton', actions: ['AXPress'], button: 'left' },
+    { label: 'other role without press', role: 'AXStaticText', actions: [], button: 'left' },
+    { label: 'right text click', role: 'AXTextField', actions: ['AXConfirm'], button: 'right' },
+    { label: 'middle text click', role: 'AXTextField', actions: ['AXConfirm'], button: 'middle' },
+  ] as const)('preserves the element token for $label', async ({ role, actions, button }) => {
+    const { client, backend, state } = textFixture(role);
+    if (actions === undefined) delete state.elements![0]!.actions;
+    else state.elements![0]!.actions = [...actions];
+    await backend.act(
+      await backend.observe(target),
+      { type: 'click', elementId: 's1:1', button },
+      'background',
+      new AbortController().signal,
+    );
+    expect(client.callTool).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ element_token: 's1:1', button, delivery_mode: 'background' });
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).not.toHaveProperty('x');
+  });
+
+  it('keeps the Windows semantic route for text controls without AXPress', async () => {
+    const { client } = textFixture();
+    const backend = new CuaBackend(
+      'C:\\Driver\\cua-driver.exe',
+      async () => client,
+      'win32',
+      async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+    );
+    const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+    await backend.act(
+      await backend.observe(windowsTarget),
+      { type: 'click', elementId: 's1:1' },
+      'foreground',
+      new AbortController().signal,
+    );
+    expect(client.callTool).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ element_token: 's1:1', delivery_mode: 'background' });
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).not.toHaveProperty('x');
+  });
+
+  it.each([
+    { label: 'missing', frame: undefined },
+    { label: 'non-finite position', frame: { x: Number.NaN, y: 40, w: 100, h: 30 } },
+    { label: 'non-finite size', frame: { x: 30, y: 40, w: Number.POSITIVE_INFINITY, h: 30 } },
+    { label: 'zero width', frame: { x: 30, y: 40, w: 0, h: 30 } },
+    { label: 'negative height', frame: { x: 30, y: 40, w: 100, h: -1 } },
+    { label: 'partially outside left edge', frame: { x: 9, y: 40, w: 100, h: 30 } },
+    { label: 'partially outside top edge', frame: { x: 30, y: 19, w: 100, h: 30 } },
+    { label: 'partially outside right edge', frame: { x: 220, y: 40, w: 100, h: 30 } },
+    { label: 'partially outside bottom edge', frame: { x: 30, y: 200, w: 100, h: 30 } },
+  ])('rejects $label text geometry before dispatch', async ({ frame }) => {
+    const { client, backend, state } = textFixture();
+    if (frame) state.elements![0]!.frame = frame;
+    else delete state.elements![0]!.frame;
+    const dispatched = vi.fn();
+    await expect(
+      backend.act(
+        await backend.observe(target),
+        { type: 'click', elementId: 's1:1' },
+        'background',
+        new AbortController().signal,
+        dispatched,
+      ),
+    ).rejects.toMatchObject({ code: 'background_unavailable' });
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(client.callTool).not.toHaveBeenCalled();
+  });
+
+  it('rejects disabled text controls without consuming their observation or sending input', async () => {
+    const { client, backend, state } = textFixture();
+    state.elements![0]!.enabled = false;
+    const observation = await backend.observe(target);
+    const dispatched = vi.fn();
+    await expect(
+      backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal, dispatched),
+    ).rejects.toMatchObject({ code: 'background_unavailable' });
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(client.callTool).not.toHaveBeenCalled();
+    expect(await backend.validate(observation)).toBe(true);
+  });
+
+  it.each(['driver error', 'transport error'] as const)('never retries a routed text click after %s', async failure => {
+    const { client, backend, connector, state } = textFixture();
+    state.elements![0]!.actions = [];
+    if (failure === 'driver error') client.callTool.mockResolvedValueOnce({ ...success(), isError: true });
+    else client.callTool.mockRejectedValueOnce(new Error('uncertain transport'));
+    const observation = await backend.observe(target);
+    const dispatched = vi.fn();
+    await expect(
+      backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal, dispatched),
+    ).rejects.toMatchObject({ code: 'unknown_outcome' });
+    expect(dispatched).toHaveBeenCalledTimes(1);
+    expect(client.callTool).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ x: 140, y: 70, delivery_mode: 'background' });
+    expect(JSON.parse(client.callTool.mock.calls[0]![1])).not.toHaveProperty('element_token');
+    await expect(
+      backend.act(observation, { type: 'click', elementId: 's1:1' }, 'foreground', new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'stale_snapshot' });
+    expect(client.callTool).toHaveBeenCalledTimes(1);
+    expect(connector).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry refused background actions in foreground', async () => {
@@ -634,17 +787,65 @@ describe('Cua socket adapter', () => {
     expect(client.getWindowState.mock.calls.filter(([input]) => !input.includeAccessibilityTree)).toHaveLength(0);
   });
 
-  it('warms a pointer action once the observation frame is a second old', async () => {
+  it.each(['point', 'text element'] as const)('warms a %s action once the observation frame is a second old', async path => {
     vi.useFakeTimers();
     try {
-      const { client, backend } = fixture();
+      const { client, backend } = path === 'point' ? fixture() : textFixture();
       const observation = await backend.observe(target);
       await vi.advanceTimersByTimeAsync(1_000);
-      await backend.act(observation, { type: 'click', point: { x: 25, y: 50 } }, 'foreground', new AbortController().signal);
+      await backend.act(
+        observation,
+        path === 'point' ? { type: 'click', point: { x: 25, y: 50 } } : { type: 'click', elementId: 's1:1' },
+        'foreground',
+        new AbortController().signal,
+      );
       const warm = client.getWindowState.mock.calls.filter(([input]) => !input.includeAccessibilityTree);
       expect(warm).toHaveLength(1);
       expect(warm[0]?.[0]).toMatchObject({ includeScreenshot: true, pid: 42, windowId: 19n });
       expect(client.listApps).toHaveBeenCalledTimes(2);
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(client.callTool.mock.calls[0]![1])).not.toHaveProperty('element_token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each<{ label: string; patch?: Partial<WindowStateOutput> }>([
+    { label: 'capture failure' },
+    { label: 'empty screenshot', patch: { images: [] } },
+    { label: 'invalid screenshot frame', patch: { screenshotFrameValid: false } },
+    { label: 'different process', patch: { pid: 99 } },
+    { label: 'different window', patch: { windowId: 20n } },
+    { label: 'moved window', patch: { windowBounds: { ...bounds, x: 11 } } },
+    { label: 'resized window', patch: { windowBounds: { ...bounds, width: 301 } } },
+    { label: 'changed image width', patch: { screenshotWidth: 300 } },
+    { label: 'changed image height', patch: { screenshotHeight: 200 } },
+  ])('refuses text clicks after warm-up with $label before any dispatch', async ({ patch }) => {
+    vi.useFakeTimers();
+    try {
+      const { client, backend, state, connector } = textFixture();
+      const observation = await backend.observe(target);
+      await vi.advanceTimersByTimeAsync(1_000);
+      if (patch) client.getWindowState.mockResolvedValueOnce({ ...state, ...patch });
+      else client.getWindowState.mockRejectedValueOnce(new Error('capture failed'));
+      const dispatched = vi.fn();
+      await expect(
+        backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal, dispatched),
+      ).rejects.toMatchObject({ code: 'stale_snapshot' });
+      expect(client.getWindowState).toHaveBeenCalledTimes(2);
+      expect(client.getWindowState.mock.calls[1]![0]).toMatchObject({
+        pid: 42,
+        windowId: 19n,
+        includeScreenshot: true,
+        includeAccessibilityTree: false,
+      });
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(connector).toHaveBeenCalledTimes(1);
+      await expect(
+        backend.act(await backend.observe(target), { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal),
+      ).resolves.toEqual({ effect: 'confirmed' });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

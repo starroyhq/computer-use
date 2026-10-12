@@ -39,6 +39,8 @@ public struct HostStartupState: Codable, Equatable {
     public var state: StartupPhase
     public var autoStartBlocked: Bool
     public var blockedReason: StartupBlock?
+    /// Optional for compatibility with state files written before fault recovery existed.
+    public var workers: [HostProcessIdentity]?
 
     public init(process: HostProcessIdentity, sessionID: UInt32, state: StartupPhase,
                 blockedReason: StartupBlock? = nil) {
@@ -50,6 +52,10 @@ public struct HostStartupState: Codable, Equatable {
         guard schemaVersion == 1, process.pid > 0, process.startTimeMicroseconds > 0,
               process.executable.hasPrefix("/"), autoStartBlocked == (blockedReason != nil) else {
             throw StartupFailure.invalidState
+        }
+        if let workers {
+            guard workers.count <= 2, workers.allSatisfy({ $0.pid > 0 && $0.startTimeMicroseconds > 0
+                && $0.uid == process.uid && $0.executable.hasPrefix("/") }) else { throw StartupFailure.invalidState }
         }
     }
 }
@@ -86,14 +92,45 @@ public struct HostStartupLifecycle {
 
     public mutating func requestRestart() { if !state.autoStartBlocked { restartRequested = true } }
     public mutating func cancelRestart() { restartRequested = false }
-    public mutating func takeRestart() -> Bool {
-        let requested = restartRequested && !state.autoStartBlocked
+    public mutating func trackWorkers(_ workers: [HostProcessIdentity]) { state.workers = workers }
+    public mutating func takeRestart(childrenExited: Bool = true) -> Bool {
+        let requested = restartRequested && !state.autoStartBlocked && childrenExited
         restartRequested = false
         return requested
+    }
+
+    /// Fault recovery never clears a local pause/stop or revives another lifecycle phase.
+    @discardableResult public mutating func requestFaultRecovery() -> Bool {
+        guard state.state == .failed, !state.autoStartBlocked else { return false }
+        restartRequested = true
+        state.state = .starting
+        return true
+    }
+}
+
+/// Bound repeated recoveries while the GUI stays alive across failed worker generations.
+public struct HostFaultRecoveryLimiter {
+    private var attempts: [TimeInterval] = []
+    public init() {}
+    public mutating func admit(now: TimeInterval) -> Bool {
+        attempts.removeAll { $0 <= now - 60 }
+        guard attempts.count < 3 else { return false }
+        attempts.append(now)
+        return true
     }
 }
 
 public enum HostStartupPolicy {
+    public static func oldWorkersExited(_ state: HostStartupState?,
+                                        read: (Int32) -> HostProcessIdentity? = { HostProcessIdentity.read(pid: $0) },
+                                        processExists: (Int32) -> Bool = { kill($0, 0) == 0 || errno != ESRCH }) -> Bool {
+        state?.workers?.allSatisfy {
+            if let actual = read($0.pid) { return actual != $0 }
+            // A failed identity probe is not evidence of process exit.
+            return !processExists($0.pid)
+        } ?? true
+    }
+
     public static func socketAcceptsConnections(path: String) throws -> Bool {
         var metadata = stat()
         guard lstat(path, &metadata) == 0 else {
@@ -106,10 +143,13 @@ public enum HostStartupPolicy {
         return try LocalSocket.acceptsConnections(path: path)
     }
 
-    public static func blockingCode(_ state: HostStartupState?, live: Bool) -> String? {
+    public static func blockingCode(_ state: HostStartupState?, live: Bool, recoveringFault: Bool = false) -> String? {
         guard let state else { return nil }
         if let blocked = state.blockedReason { return blocked.rawValue }
-        if live && [.paused, .stopped, .failed, .permissionsRequired].contains(state.state) { return state.state.rawValue }
+        if live && [.paused, .stopped, .failed, .permissionsRequired].contains(state.state) {
+            if recoveringFault && state.state == .failed { return nil }
+            return state.state.rawValue
+        }
         return nil
     }
 

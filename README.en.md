@@ -43,13 +43,13 @@ Native Windows interface, shown with UI test fixture data. [Screenshot sources](
 
 ## Install a release
 
-**Currently a development preview.** Download v0.7.0 below, or visit [Releases](https://github.com/starroyhq/computer-use/releases/latest) for the latest version, portable ZIPs and checksums.
+**Currently a development preview.** Download v0.7.1 below, or visit [Releases](https://github.com/starroyhq/computer-use/releases/latest) for the latest version, portable ZIPs and checksums.
 
 | System | Download | Installation |
 | --- | --- | --- |
-| **macOS · Apple Silicon** | [Download DMG](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-macos-arm64.dmg) | macOS 14+; drag to Applications and open |
-| **Windows · x64** | [Download installer](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-x64-setup.exe) | Installs for the current user; no administrator rights needed |
-| **Windows · ARM64** | [Download installer](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-arm64-setup.exe) | For Windows on ARM devices |
+| **macOS · Apple Silicon** | [Download DMG](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-macos-arm64.dmg) | macOS 14+; drag to Applications and open |
+| **Windows · x64** | [Download installer](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-windows-x64-setup.exe) | Installs for the current user; no administrator rights needed |
+| **Windows · ARM64** | [Download installer](https://github.com/starroyhq/computer-use/releases/download/v0.7.1/computer-use-0.7.1-windows-arm64-setup.exe) | For Windows on ARM devices |
 
 Official macOS packages are Developer ID signed and Apple notarized. Windows packages are currently unsigned and may be blocked by SmartScreen, Smart App Control or system policy; on-demand startup does not bypass those restrictions. Windows compatibility targets **Windows 10 1809+**; see [platforms and validation](#platforms-and-validation) for tested coverage.
 
@@ -128,6 +128,8 @@ Manage service status, paired clients and updates in the native App. Release bui
 
 **Pause and emergency stop persist across exit, reopening, login and updates.** Agent calls and background startup cannot clear these states.
 
+v0.7.1 adds `recover --profile NAME` for any Agent. It restores service faults without clearing pause, emergency stop or revocation, and never replays actions with uncertain outcomes. The Skill requires each new session to read the installed App's current instructions, and requires a new session and observation after recovery.
+
 Pairing includes permission for foreground actions, while execution defaults to background mode and **never switches to foreground mode automatically**. Background support depends on the application and control; it cannot guarantee zero focus changes. Source execution, custom sockets and remote HTTP do not start the host automatically.
 
 HTTP is off by default and listens only on loopback when enabled; cross-machine connections use a manual SSH tunnel. Default action logs exclude screenshots, typed text, URLs and window titles; CLI screenshots are saved locally. Screenshots and results sent to a cloud Agent are still processed by your chosen model provider. See [permissions and action limits](docs/USAGE.md).
@@ -142,6 +144,8 @@ HTTP is off by default and listens only on loopback when enabled; cross-machine 
 | **macOS Intel / Linux** | No host package available |
 
 Windows 10 has not been tested. Desktop records cover local builds and specific test applications, not every published artifact or arbitrary third-party application. Fresh-system installation and actual Skill installation by other Agents have not been fully validated. See the [validation results](docs/validation-results.md) and [v0.7.0 onboarding validation](docs/validation-skill-link-20261012.md).
+
+v0.7.1 includes real macOS WorkBuddy acceptance for fault recovery and the text-control first-click fix. Windows Host/UI, process isolation and transport tests passed; real Windows Agent/driver recovery acceptance is still pending. See the [recovery record](docs/validation-fault-recovery-20261012.md) and [first-click record](docs/validation-first-click-20261012.md).
 
 ## Development
 

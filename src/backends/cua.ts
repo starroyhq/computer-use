@@ -571,6 +571,7 @@ export class CuaBackend implements Backend {
       return id;
     };
     let tool: string;
+    let textClickPoint = false;
     switch (action.type) {
       case 'click':
         if (Boolean(action.elementId) === Boolean(action.point))
@@ -584,6 +585,36 @@ export class CuaBackend implements Backend {
           button: action.button ?? 'left',
           count: action.count ?? 1,
         });
+        if (this.platform === 'darwin' && action.elementId && (action.button ?? 'left') === 'left') {
+          const native = state.snapshot.elements?.find(item => item.elementToken === action.elementId);
+          // Addressable text controls need not implement AXPress (AppKit's
+          // NSTextField exposes AXConfirm/AXShowMenu instead). Choose the
+          // driver's exact-window pixel route BEFORE dispatch, never retry an
+          // AX failure: that failure may already have delivered input.
+          if (
+            native &&
+            ['AXTextField', 'AXTextArea'].includes(native.role) &&
+            native.actions !== undefined &&
+            !native.actions.includes('AXPress')
+          ) {
+            const bounds = observation.elements.find(item => item.id === action.elementId)?.bounds;
+            if (
+              native.enabled === false ||
+              !bounds ||
+              ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) ||
+              bounds.width <= 0 ||
+              bounds.height <= 0 ||
+              bounds.x < 0 ||
+              bounds.y < 0 ||
+              bounds.x + bounds.width > observation.imageWidth ||
+              bounds.y + bounds.height > observation.imageHeight
+            )
+              throw new CuError('background_unavailable', 'Text control has no enabled, fully visible click target in this snapshot.');
+            delete args.element_token;
+            Object.assign(args, point({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, observation));
+            textClickPoint = true;
+          }
+        }
         // Cua's Windows foreground element path forces SendInput, which
         // intermittently failed on WPF controls. Its background path tries
         // UIA semantic patterns before coordinate delivery.
@@ -650,13 +681,27 @@ export class CuaBackend implements Backend {
       // 超过这个窗口后，不预热的派发会以 px_capture_unavailable 失败，所以仍要紧挨着抓一次。
       const pointer = tool === 'drag' || tool === 'scroll' || (tool === 'click' && !args.element_token);
       if (pointer && !this.takeFreshCapture(observation.target)) {
-        await client
+        const warmed = await client
           .getWindowState(
             { pid, windowId, session: state.session, includeAccessibilityTree: false, includeScreenshot: true },
             readOptions(),
           )
           .catch(() => undefined);
         if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
+        // Warming updates the driver's pixel scale. A text element's center
+        // was derived from the original image, so a resize or display change
+        // must invalidate it rather than send old coordinates into a new frame.
+        if (
+          textClickPoint &&
+          (!warmed ||
+            !captured(warmed) ||
+            warmed.pid !== pid ||
+            warmed.windowId !== windowId ||
+            !sameBounds(warmed.windowBounds!, observation.bounds) ||
+            warmed.screenshotWidth !== observation.imageWidth ||
+            warmed.screenshotHeight !== observation.imageHeight)
+        )
+          throw new CuError('stale_snapshot', 'Text click geometry changed or could not be verified; observe again before acting.');
       }
       // 从这里到 callTool 之间没有 await：通过此处检查后不会再被中止打断，回调与派发处于同一时刻。
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');

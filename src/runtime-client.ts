@@ -17,7 +17,17 @@ const helperResult = z.discriminatedUnion('ok', [
   z
     .object({
       ok: z.literal(false),
-      code: z.enum(['paused', 'stopped', 'failed', 'non_interactive', 'timeout', 'launch_failed', 'permissions_required']),
+      code: z.enum([
+        'paused',
+        'stopped',
+        'failed',
+        'non_interactive',
+        'timeout',
+        'launch_failed',
+        'permissions_required',
+        'recovery_limited',
+        'recovery_failed',
+      ]),
       message: z.string().min(1).max(1024),
     })
     .strict(),
@@ -125,10 +135,15 @@ export function ensureMacHost(host: string, timeoutMs = HELPER_TIMEOUT_MS): Prom
   return ensurePackagedHost(host, 'macOS', timeoutMs);
 }
 
-function ensurePackagedHost(host: string, platform: string, timeoutMs: number): Promise<void> {
+export function recoverPackagedHost(host: string, platform: string, timeoutMs = HELPER_TIMEOUT_MS): Promise<void> {
+  return ensurePackagedHost(host, platform, timeoutMs, '--recover-fault');
+}
+
+function ensurePackagedHost(host: string, platform: string, timeoutMs: number, argument = '--ensure-running'): Promise<void> {
+  const operation = argument === '--recover-fault' ? 'recovery' : 'startup';
   return new Promise((resolveStart, reject) => {
     // 一次性 helper 等待就绪；长期后台宿主由 native 创建。
-    const child = spawn(host, ['--ensure-running'], {
+    const child = spawn(host, [argument], {
       cwd: dirname(host),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -216,8 +231,14 @@ function ensurePackagedHost(host: string, platform: string, timeoutMs: number): 
         const message = result.message.replace(/\p{Cc}/gu, ' ');
         finish(
           new CuError(
-            result.code === 'paused' ? 'paused' : result.code === 'timeout' ? 'timeout' : 'unavailable',
-            `${platform} host startup ${result.code} (${exitDescription()}): ${message}`,
+            result.code === 'paused'
+              ? 'paused'
+              : result.code === 'timeout'
+                ? 'timeout'
+                : result.code === 'recovery_limited'
+                  ? 'busy'
+                  : 'unavailable',
+            `${platform} host ${operation} ${result.code} (${exitDescription()}): ${message}`,
           ),
         );
       } else if (exited.code !== 0) finish(new CuError('unavailable', `${platform} host startup helper failed (${exitDescription()}).`));
@@ -238,6 +259,47 @@ export interface RuntimeClientOptions {
   readyTimeoutMs?: number;
   helperTimeoutMs?: number;
   retryMs?: number;
+}
+
+export interface RuntimeRecoveryOptions extends RuntimeClientOptions {
+  recover?: typeof recoverPackagedHost;
+}
+
+/** Explicit fault recovery is separate from ordinary RPC: it never receives or replays an action. */
+export async function recoverRuntime(token: string, socket?: string, options: RuntimeRecoveryOptions = {}) {
+  if (socket !== undefined)
+    throw new CuError('invalid_request', 'Fault recovery requires the installed package and default local endpoint; omit --socket.');
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' && platform !== 'darwin')
+    throw new CuError('unavailable', 'Fault recovery requires an installed macOS or Windows package.');
+  const host = await (platform === 'win32' ? bundledWindowsHost : bundledMacHost)(
+    options.modulePath ?? fileURLToPath(import.meta.url),
+    options.entrypoint ?? process.argv[1] ?? '',
+    options.executable ?? process.execPath,
+  );
+  const discover = options.defaultPath ?? defaultIpcPath;
+  try {
+    // Refuse a known revoked client before changing a live service. An offline
+    // service cannot authenticate: native recovery only restores availability,
+    // and the mandatory post-recovery check below still decides authorization.
+    await new IpcClient(await discover(), 1500).call(token, 'capabilities', {});
+  } catch (error) {
+    if (error instanceof CuError && (error.code === 'unauthorized' || error.code === 'permission_denied')) throw error;
+  }
+  await (options.recover ?? recoverPackagedHost)(
+    host,
+    platform === 'win32' ? 'Windows' : 'macOS',
+    options.helperTimeoutMs ?? HELPER_TIMEOUT_MS,
+  );
+  // Read discovery again because recovery can replace the pipe. Authenticate against
+  // the new runtime; a credential file or a ready helper is not proof of a grant.
+  const path = await discover();
+  const result = await new IpcClient(path, 1500).call(token, 'capabilities', {});
+  const capability = z.object({ paused: z.boolean(), stopped: z.boolean() }).safeParse(result);
+  if (!capability.success) throw new CuError('unavailable', 'Recovered runtime returned invalid status. No action was sent.');
+  if (capability.data.stopped) throw new CuError('unavailable', 'Runtime stopped during recovery. Inspect its state in the local app.');
+  if (capability.data.paused) throw new CuError('paused', 'Execution was paused during recovery. Resume it in the local app.');
+  return { ok: true, state: 'ready', actionsReplayed: false, requiresNewSession: true, requiresFreshObservation: true } as const;
 }
 
 export function createRuntimeClient(socket?: string, options: RuntimeClientOptions = {}): RpcService {

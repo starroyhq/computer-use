@@ -58,6 +58,9 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private var running = false
     private var stopping = false
     private var quittingForUpdate = false
+    private var recoveryObserver: NSObjectProtocol?
+    private var recoveryRequest: HostFaultRecoveryRequest?
+    private var recoveryLimiter = HostFaultRecoveryLimiter()
     private var alertActive = false
     // 审批请求队列；运行时回报请求已结束时，据此撤回排队中或正在显示的弹窗。
     private var approvals = ApprovalQueue()
@@ -99,8 +102,11 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             guard let process = HostProcessIdentity.read(), let session = HostStartup.session() else {
                 throw StartupFailure.invalidState
             }
-            startupLifecycle = HostStartupLifecycle(process: process, sessionID: session.id, previous: try startupStore.read())
+            let previous = try startupStore.read()
+            guard HostStartupPolicy.oldWorkersExited(previous) else { throw StartupFailure.unsafeState }
+            startupLifecycle = HostStartupLifecycle(process: process, sessionID: session.id, previous: previous)
             try startupStore.write(startupLifecycle!.state)
+            recoveryObserver = HostFaultRecoveryIPC.observeRequests(current: process) { [weak self] in self?.recoverFault($0) }
         } catch {
             setStatus(error.localizedDescription, state: .failed)
             if !backgroundLaunch { Alerts.show(tr(.failureLaunchTitle), error.localizedDescription) }
@@ -239,12 +245,34 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             case .needsPermissions: phase = .permissionsRequired
             case .installing: phase = .exited
             }
+            var workers: [HostProcessIdentity] = []
+            for child in [driver, runtime].compactMap({ $0 }) where child.isRunning {
+                if let identity = HostProcessIdentity.read(pid: child.processIdentifier) { workers.append(identity) }
+                else if kill(child.processIdentifier, 0) == 0 || errno != ESRCH {
+                    stateStoreFailed()
+                    return false
+                }
+            }
+            startupLifecycle?.trackWorkers(workers)
             guard startupLifecycle?.transition(phase) == true else { return false }
             do { try startupStore.write(startupLifecycle!.state) }
             catch { stateStoreFailed(); return false }
         }
         statusText = text
         if let state { serviceState = state }
+        if let state, let request = recoveryRequest {
+            let code: String?
+            switch state {
+            case .ready: code = "ready"
+            case .paused: code = "paused"
+            case .stopped: code = "stopped"
+            case .failed: code = "recovery_failed"
+            case .needsPermissions: code = "permissions_required"
+            case .installing: code = "stopped"
+            case .starting: code = nil
+            }
+            if let code { recoveryRequest = nil; HostFaultRecoveryIPC.reply(request, result: code) }
+        }
         stateChanged()
         return true
     }
@@ -547,6 +575,39 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         startupLifecycle?.requestRestart()
         if !stopping { stopServices(message: tr(.statusRestarting), state: .starting) }
     }
+
+    /// Unlike the local Restart button this does not clear persistent user intent.
+    private func recoverFault(_ request: HostFaultRecoveryRequest) {
+        if let reason = startupLifecycle?.state.blockedReason {
+            HostFaultRecoveryIPC.reply(request, result: reason.rawValue)
+            return
+        }
+        guard !terminating, !quittingForUpdate, !statePersistenceFailed else {
+            HostFaultRecoveryIPC.reply(request, result: "recovery_failed")
+            return
+        }
+        guard permissionsGranted else {
+            HostFaultRecoveryIPC.reply(request, result: "permissions_required")
+            return
+        }
+        guard serviceState == .failed, recoveryRequest == nil else {
+            HostFaultRecoveryIPC.reply(request, result: serviceState == .ready ? "ready" : serviceState == .starting ? "starting" : "recovery_failed")
+            return
+        }
+        guard recoveryLimiter.admit(now: ProcessInfo.processInfo.systemUptime) else {
+            HostFaultRecoveryIPC.reply(request, result: "recovery_limited")
+            return
+        }
+        guard startupLifecycle?.requestFaultRecovery() == true else {
+            HostFaultRecoveryIPC.reply(request, result: "recovery_failed")
+            return
+        }
+        recoveryRequest = request
+        // A failure may still be draining its old workers. Queue exactly one restart
+        // after that shutdown, preserving emergency-stop cancellation of the queue.
+        if stopping { setStatus(tr(.statusRestarting), state: .starting) }
+        else { stopServices(message: tr(.statusRestarting), state: .starting) }
+    }
     func revokeClient(_ id: String) { send("revoke", clientID: id) }
 
     func setHTTPEnabled(_ enabled: Bool) {
@@ -578,16 +639,20 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         // Give the runtime a bounded opportunity to release keys and close sessions.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
-            self.terminateChildren()
+            let childrenExited = self.terminateChildren()
             self.stopping = false
             completion?()
-            if !self.terminating && self.startupLifecycle?.takeRestart() == true {
+            if !childrenExited {
+                self.startupLifecycle?.cancelRestart()
+                self.setStatus(tr(.failureRuntime), state: .failed)
+            }
+            if !self.terminating && self.startupLifecycle?.takeRestart(childrenExited: childrenExited) == true {
                 self.startServices()
             }
         }
     }
 
-    private func terminateChildren() {
+    @discardableResult private func terminateChildren() -> Bool {
         try? liveness?.close(); liveness = nil
         try? input?.close(); input = nil
         for child in [runtime, driver].compactMap({ $0 }) where child.isRunning {
@@ -600,8 +665,12 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
                 while child.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.01) }
             }
         }
-        runtime = nil; driver = nil
+        // Retain any survivor, so neither automatic nor local restart can create a
+        // second execution layer after a failed kill or an uninterruptible worker.
+        if runtime?.isRunning != true { runtime = nil }
+        if driver?.isRunning != true { driver = nil }
         try? output?.close(); output = nil
+        return runtime == nil && driver == nil
     }
 
     // MARK: 接入
@@ -662,6 +731,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let recoveryObserver { DistributedNotificationCenter.default().removeObserver(recoveryObserver) }
         updates.stop()
         for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
         terminateChildren()

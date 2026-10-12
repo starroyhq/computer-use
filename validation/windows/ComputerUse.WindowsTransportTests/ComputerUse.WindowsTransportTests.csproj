@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostRuntime.cs" Link="HostRuntime.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/RuntimeProcessGroup.cs" Link="RuntimeProcessGroup.cs" />
   </ItemGroup>
 </Project>

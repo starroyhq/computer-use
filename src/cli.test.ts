@@ -113,6 +113,21 @@ async function pair(profile = 'default') {
 }
 
 describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browser workflow', () => {
+  it('does not treat recover as an action, pairing request, or custom-endpoint control command', async () => {
+    const missing = await cli(['recover']);
+    expect(missing.code).toBe(1);
+    expect(JSON.parse(missing.stderr).error.code).toBe('unauthorized');
+    expect(runtime.clients.clients.size).toBe(0);
+    const credential = await pair();
+    for (const args of [['recover'], ['recover', '--json', '{"action":{"type":"click"}}'], ['recover', 'force']]) {
+      const result = await cli(args);
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stderr).error.code).toBe('invalid_request');
+      expect(result.stdout + result.stderr).not.toContain(credential.token);
+    }
+    expect(runtime.actions.records.size).toBe(0);
+    expect(runtime.clients.clients.size).toBe(1);
+  });
   it('pairs all desktop apps by default and preserves explicit scoped and browser-only options', async () => {
     allowDesktopPairing = true;
     for (const [profile, args, expected] of [

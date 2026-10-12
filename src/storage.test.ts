@@ -114,6 +114,20 @@ describe('private persisted state', () => {
     for (const state of states.slice(2)) expect(restored.records.get(state)?.state).toBe(state);
     const persisted = (await readJson(join(directory, 'actions.json'))) as ActionRecord[];
     expect(persisted.filter(record => record.state === 'queued' || record.state === 'running')).toEqual([]);
+
+    // Repeated recovery must not make an interrupted dispatch eligible to run again.
+    const recoveredAgain = new ActionStore(directory, () => 2);
+    await recoveredAgain.load();
+    expect([...recoveredAgain.records.values()]).toEqual([...restored.records.values()]);
+    for (const state of ['queued', 'running'])
+      expect(recoveredAgain.records.get(state)).toMatchObject({
+        requestId: state,
+        clientId: 'client',
+        sessionId: 'session',
+        fingerprint: hash(state),
+        state: 'unknown',
+        error: { code: 'unknown_outcome' },
+      });
   });
 
   it('captures each action journal save and excludes action text and image content', async () => {
