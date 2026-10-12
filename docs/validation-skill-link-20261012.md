@@ -17,6 +17,10 @@
 
 `skill prompt`、`skill export`、`instructions` 和 `preflight` 均可在未配对时运行，不启动 Host。测试覆盖内容不含凭据、路径 JSON 转义、profile 一致性、文件拒绝覆盖、离线凭据未验证、撤销凭据拒绝，以及可连接但响应损坏的 Host 不被误报为正常。
 
+发布准备时，启用 `core.autocrlf=true` 的隔离 Git 检出确认 Skill 资源需要固定为 LF；新增 `.gitattributes` 规则后，生成一致性及两平台脚本逐字节抽取通过。首次发布 CI 的 Windows ARM64/x64 均在 `Set-Acl` 自动加载模块时失败，macOS 检查通过。原因是 PowerShell 7 经 Node 启动 Windows PowerShell 时继承了不兼容模块路径。安装脚本改为从当前 `$PSHOME` 显式加载系统安全模块；临时目录仍仅允许当前用户完全控制，未清空继承路径或改变系统执行策略来规避测试。
+
+修复后 Windows VM 的完整脚本测试为 14/14 通过；新增回归先确认不兼容模块路径触发自动加载失败，再验证实际嵌入脚本安装成功及私有目录 ACL。macOS/生成相关脚本测试 20/20 通过。发布准备补充日志位于 `.cache/skill-bootstrap-checks/release-ci-windows-final.log`。
+
 ## macOS 安装版实测
 
 在已解锁的 Apple Silicon 桌面更新 `/Applications/Computer Use.app`。系统辅助功能和屏幕录制权限此前已授予，本轮没有代替用户授权。用户在 App 内批准专用测试客户端后，使用同一 profile 完成：

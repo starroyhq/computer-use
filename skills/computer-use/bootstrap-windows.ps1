@@ -205,6 +205,9 @@ try {
     $security.SetAccessRuleProtection($true, $false)
     $security.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+    # An Agent launched from pwsh can pass PS7's module paths through Node to Windows PowerShell.
+    # Bind the security cmdlets to this engine's module instead of incompatible inherited paths.
+    Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
     Set-Acl -LiteralPath $work -AclObject $security
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $version = Get-LatestVersion

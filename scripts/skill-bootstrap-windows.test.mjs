@@ -16,7 +16,7 @@ assert.equal(script.split(entry).length, 2);
 const windows = process.platform === 'win32';
 const quote = value => `'${value.replaceAll("'", "''")}'`;
 
-function powershell(code) {
+function powershell(code, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       'powershell.exe',
@@ -30,6 +30,7 @@ function powershell(code) {
         ).toString('base64'),
       ],
       {
+        env,
         stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
@@ -122,6 +123,12 @@ async function fixture(t, options = {}) {
   const overrides = `
 $env:LOCALAPPDATA = ${quote(home)}
 function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
+    $acl = Get-Acl -LiteralPath $work
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or
+        $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].IsInherited -or
+        $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl' -or
+        $rules[0].InheritanceFlags -ne 'ContainerInherit, ObjectInherit') { throw 'Bootstrap temporary directory ACL is not private' }
     Assert-TrustedUri $Uri
     $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:${port}' + $Uri.PathAndQuery)
     $request.AllowAutoRedirect = $false
@@ -144,10 +151,11 @@ function Start-Process {
   const copy = script.replace(registry, `computer-use-fixture-${Date.now()}-${Math.random()}_is1`).replace(entry, overrides + entry);
   return {
     arch,
+    directory,
     packagePath,
     credentialPath: join(home, 'Computer Use', 'credentials', 'default.json'),
     requests,
-    run: () => powershell(copy),
+    run: env => powershell(copy, env),
     source,
     copy,
   };
@@ -179,6 +187,40 @@ test('Windows clean bootstrap uses native architecture and preserves an existing
   assert.equal(JSON.parse(second.stdout).installed, false);
   assert.equal(f.requests.length, requests);
   assert.equal(await readFile(f.credentialPath, 'utf8'), credential);
+});
+
+test('Windows bootstrap uses its engine security module despite inherited incompatible module paths', { skip: !windows }, async t => {
+  const f = await fixture(t);
+  const moduleRoot = join(f.directory, 'PowerShell 7 modules');
+  const moduleDirectory = join(moduleRoot, 'Microsoft.PowerShell.Security');
+  await mkdir(moduleDirectory, { recursive: true });
+  // The inherited module is discoverable but cannot load in this engine, as with PS7 assemblies.
+  await writeFile(
+    join(moduleDirectory, 'Microsoft.PowerShell.Security.psd1'),
+    `@{
+RootModule = 'incompatible.psm1'
+ModuleVersion = '7.0.0'
+PowerShellVersion = '5.1'
+FunctionsToExport = @('Set-Acl')
+}`,
+  );
+  await writeFile(join(moduleDirectory, 'incompatible.psm1'), "throw 'Incompatible fixture module must never execute'\n");
+  const inherited = await powershell('$env:PSModulePath');
+  assert.equal(inherited.code, 0, inherited.stderr);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PSMODULEPATH'));
+  env.PSModulePath = `${moduleRoot};${inherited.stdout.trim()}`;
+  const unqualified = await powershell(
+    `$ErrorActionPreference = 'Stop'
+try { Set-Acl -LiteralPath ${quote(join(f.directory, 'missing'))} -AclObject ([Security.AccessControl.DirectorySecurity]::new()); exit 3 }
+catch { [Console]::Error.WriteLine($_.FullyQualifiedErrorId); exit 1 }`,
+    env,
+  );
+  assert.equal(unqualified.code, 1);
+  assert.match(unqualified.stderr, /CouldNotAutoloadMatchingModule/);
+  const result = await f.run(env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).installed, true);
+  assert.ok(f.requests.length > 0);
 });
 
 test('existing Windows v0.6.1 with a quoted CLI hint needs no network or process execution', { skip: !windows }, async t => {
