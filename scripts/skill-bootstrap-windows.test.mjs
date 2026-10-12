@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -179,7 +179,8 @@ test('Windows clean bootstrap uses native architecture and preserves an existing
   assert.equal(first.code, 0, first.stderr);
   const output = JSON.parse(first.stdout);
   assert.equal(output.platform, `windows-${f.arch}`);
-  assert.equal(output.packageRoot, f.packagePath);
+  // Windows runners can expose TEMP through an 8.3 user alias while discovery returns its long name.
+  assert.equal(await realpath(output.packageRoot), await realpath(f.packagePath));
   assert.equal(output.installed, true);
   const requests = f.requests.length;
   const second = await f.run();

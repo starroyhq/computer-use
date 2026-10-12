@@ -21,6 +21,8 @@
 
 新增回归将模块路径限制为包含不兼容 Security、Utility、Management 模块的目录，先确认安全及哈希命令自动加载失败，再验证实际嵌入脚本的首装、离线复用、哈希拒绝和调用方路径恢复。私有目录 ACL 仍由实际系统命令核对。macOS/生成相关脚本测试 20/20 通过；最终 Windows 完整脚本测试 14/14 通过，日志为 `.cache/skill-bootstrap-checks/release-ci-modules-final.log`。
 
+后续 CI 的模块兼容回归通过；安装目录断言暴露 runner 使用 `RUNNER~1` 短路径而 PowerShell 返回完整目录名的差异。测试改为用 `realpath` 比较实际安装目录，继续核对目录身份，不要求两种等价路径的原始字符串一致。
+
 ## macOS 安装版实测
 
 在已解锁的 Apple Silicon 桌面更新 `/Applications/Computer Use.app`。系统辅助功能和屏幕录制权限此前已授予，本轮没有代替用户授权。用户在 App 内批准专用测试客户端后，使用同一 profile 完成：
