@@ -1,163 +1,188 @@
-# Computer Use
+<p align="center">
+  <img src="assets/app-icon.png" width="104" alt="Computer Use 图标" />
+</p>
 
-简体中文 | [English](README.en.md)
+<h1 align="center">Computer Use</h1>
 
-让现有 AI Agent 通过 MCP 或 CLI 观察和操作已授权的应用窗口。基于 [Cua Driver](https://github.com/trycua/cua) 和 [Playwright](https://github.com/microsoft/playwright)，提供 macOS 菜单栏 App 和 Windows 托盘程序，由你选择的 Agent 负责理解任务和规划操作。
+<p align="center">
+  <strong>让你的 Agent，直接观察和操作电脑。</strong><br />
+  macOS 与 Windows 原生宿主 · MCP / CLI 接入 · 默认后台执行
+</p>
 
-**开发预览。** v0.7.0 提供 macOS ARM64、Windows ARM64 和 x64 的 ZIP 包，以及 macOS DMG 和 Windows 安装程序，见[安装正式版](#安装正式版)。也可按下文从源码构建。已验证范围见下表。
+<p align="center">
+  <a href="https://github.com/starroyhq/computer-use/releases/latest"><img src="https://img.shields.io/github/v/release/starroyhq/computer-use?style=flat-square&amp;color=555" alt="最新版本" /></a>
+  <a href="https://github.com/starroyhq/computer-use/actions/workflows/ci.yml"><img src="https://github.com/starroyhq/computer-use/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="#平台与验证"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square" alt="macOS 和 Windows" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-555?style=flat-square" alt="MIT 许可证" /></a>
+</p>
 
-## 主要功能
+<p align="center">
+  <a href="#安装正式版">下载安装</a> ·
+  <a href="#接入-agent-与首次观察">三步接入</a> ·
+  <a href="#文档导航">使用文档</a> ·
+  <a href="README.en.md">English</a>
+</p>
 
-- **桌面操作**：窗口截图、辅助功能元素、点击、输入、快捷键、滚动和直线拖拽；支持程度取决于平台、应用和动作。
-- **Agent 接入**：stdio MCP、可选本机 HTTP MCP，以及可独立使用的 CLI。
-- **后台按需启动**：v0.7.0 的 macOS / Windows 完整包可由同包 CLI / stdio MCP 启动后台服务；暂停和紧停跨退出、重开、登录和更新保留，仅本地按钮恢复。
-- **App ↔ Skill**：在“接入”页复制安装提示词，交给自己的 Agent 安装 Skill 并完成连接；单个 Skill 也能发现或校验安装官方 App，无需克隆仓库或全局 Node。
-- **配对授权**：首次配对默认一次授权所有桌面应用，后续新增应用、窗口及重启无需重复批准；授权包含前台操作，默认仍在后台执行。支持撤销客户端、暂停和紧急停止，也可显式限制应用范围。
-- **动作记录**：每次操作使用新快照，通过请求 ID 查询结果；不自动重放结果不确定的动作。
-- **独立浏览器**：通过 Playwright 操作单独的 headless Chromium，不继承日常浏览器的登录状态。
-- **设置与更新**：设置窗口分为通用、权限与状态（Windows 为“状态”）、客户端、接入、更新、关于六页，界面跟随系统语言显示简体中文或英文；每天从 GitHub 检查一次正式版，下载后校验 SHA-256 与发布元数据。
+Computer Use 把桌面能力交给你已经在用的 Agent：**Agent 理解任务、规划步骤，Computer Use 在本机执行已授权的操作。** 安装 App，复制一段提示词，就可以让 Agent 按说明安装 Skill 并连接；无需克隆仓库或安装全局 Node。
 
-Cua Driver 提供底层桌面截图、辅助功能与输入能力，Playwright 提供浏览器操作，MCP 通信使用官方 TypeScript SDK。本项目实现宿主、授权、会话与快照管理、动作去重和结果记录、CLI/MCP 接入、后端适配与打包。上游许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+<p align="center">
+  <img src="docs/assets/macos-connect.png" width="720" alt="macOS 接入页：复制安装提示词，粘贴给 Agent；手动配置收在高级接入中" />
+</p>
+<p align="center"><sub>macOS 接入页 · 复制提示词，把后续接入步骤交给 Agent</sub></p>
 
-## 平台状态
+<details>
+<summary>查看 Windows 界面</summary>
 
-| 平台 | 构建与接入 | 验证范围 |
-|---|---|---|
-| macOS Apple Silicon | macOS 14+ 构建目标；菜单栏 App、本机 CLI / MCP | 当前标识的本地安装包完成全应用配对、跨应用/新窗口后台输入及暂停、紧停、重启、撤销验收；早期 Codex 实测另见历史记录 |
-| Windows 11 ARM64 | 托盘安装版与便携包；本机 CLI / MCP，Mac 可经 SSH 连接 | 本地安装包在一台虚拟机完成两个 Fixture、三个窗口的 7 轮后台输入及授权控制验收；早期 66 个输入用例和 Mac Codex 实测另见历史记录 |
-| Windows 11 x64 | 独立 x64 构建目标 | 旧开发包在 ARM64 系统的 x64 模拟环境通过组件校验；原生 x64 桌面未验收 |
-| macOS Intel / Linux | 暂无本项目宿主交付 | 未验证 |
+<p align="center">
+  <img src="docs/assets/windows-connect-zh.png" width="800" alt="Windows 接入页，包含复制安装提示词、高级接入与紧急停止入口" />
+</p>
 
-应用标识现为 `com.starroy.computeruse`。上述本地安装包验收完成于 2026-10-10，不等同于逐个验收正式发布产物或任意第三方应用。Windows 桌面兼容目标为 Windows 10 1809（build 17763）及之后版本，但 Windows 10 和原生 x64 桌面尚未实测。测试方法、历史结果及未覆盖项见 [验证记录](docs/validation-results.md)。
+Windows 原生界面，截图使用 UI 测试演示数据。[截图来源](docs/assets/README.md)
 
-v0.7.0 发布前的本地构建另完成了接入界面、macOS 并发冷启动，以及两端暂停跨退出/覆盖安装、紧停跨退出的限定验收，见 [2026-10-12 接入验收](docs/validation-skill-link-20261012.md)。全新系统从下载到首次观察、其他 Agent 的真实 Skill 安装等仍未覆盖。
+</details>
 
 ## 安装正式版
 
-从 [v0.7.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.7.0) 下载对应平台的安装包：
+**当前为开发预览版。** 下载 v0.7.0 安装包，或前往 [Releases](https://github.com/starroyhq/computer-use/releases/latest) 查看最新版本、便携 ZIP 与校验文件。
 
-- **macOS（Apple Silicon）**：`computer-use-0.7.0-macos-arm64.dmg`，打开后把 Computer Use 拖到“应用程序”，再从“应用程序”打开。也可下载 `computer-use-0.7.0-macos-arm64.zip` 并将解压后的 App 移入“应用程序”。正式发布作业分别对 App 与 DMG 使用 Developer ID 签名、Apple 公证和装订，通过校验后才发布。
-- **Windows**：`computer-use-0.7.0-windows-arm64-setup.exe` 或 `computer-use-0.7.0-windows-x64-setup.exe`，按系统架构选择。安装向导按当前用户安装，不需要管理员权限，默认位置为 `%LOCALAPPDATA%\Programs\Computer Use`；装好后从开始菜单打开，在系统“设置 → 应用”中卸载。便携版可下载对应的 `computer-use-0.7.0-windows-<arm64|x64>.zip`，完整解压后运行 `ComputerUse.WindowsHost.exe`，见 [Windows 指南](docs/WINDOWS.md)。
+| 系统 | 下载 | 安装方式 |
+| --- | --- | --- |
+| **macOS · Apple Silicon** | [下载 DMG](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-macos-arm64.dmg) | macOS 14+；拖入“应用程序”后打开 |
+| **Windows · x64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-x64-setup.exe) | 当前用户安装，无需管理员权限 |
+| **Windows · ARM64** | [下载安装程序](https://github.com/starroyhq/computer-use/releases/download/v0.7.0/computer-use-0.7.0-windows-arm64-setup.exe) | Windows on ARM 设备使用 |
 
-每个 ZIP、DMG 和安装程序都附有 `.sha256` 校验文件，每个平台另有 JSON 发布元数据。Windows 安装程序与便携包均未签名，可能受到 SmartScreen 或 Smart App Control 的签名、信誉与系统策略限制；图标和按需启动不会解除这些限制，macOS Developer ID 也不适用于 Windows。相关系统提示、原生 x64 安装及从真实发布下载到完成安装版升级的完整流程仍待验证。
+macOS 正式包已使用 Developer ID 签名并经过 Apple 公证。Windows 包目前未签名，可能被 SmartScreen、Smart App Control 或系统策略拦截，按需启动不会绕过这些限制。Windows 兼容目标为 **Windows 10 1809+**，实测范围见[平台与验证](#平台与验证)。
 
-安装后的系统权限步骤与下文相同。从 v0.6.0 起，新配对默认授权所有桌面应用，已有受限客户端保持原范围；要扩大范围，需撤销后重新配对一次。ZIP 继续用于 macOS 一键更新和 Windows 便携版；安装与桌面测试的具体范围见 [验证记录](docs/validation-results.md)。
+## 接入 Agent 与首次观察
 
-## 快速开始：从源码构建
+### 1. 打开 App，完成系统授权
 
-v0.7.0 新增双向接入入口；旧 v0.6.1 包使用 Skill 中的兼容流程。在 App“接入”页点击“复制安装提示词”，粘贴给你使用的 Agent，由它获取并安装完整 Skill、检查 App 并验证连接。默认使用 `default` profile，profile 选择、手动配对、MCP 配置和 HTTP 开关放在默认收起的“高级接入”。仅持有 Skill 时，Agent 按其中说明发现或安装 App；系统权限和首次配对仍由你在本机批准。后续读取已安装 App 的 `instructions` 获取当前指南。详见[双向接入说明](docs/USAGE.md#app--skill-双向接入--bidirectional-onboarding)。
+macOS 从菜单栏打开设置，在“权限与状态”中授予 Computer Use **辅助功能**和**屏幕录制**权限，按提示退出并重新打开。Windows 从开始菜单启动，托盘中可打开设置；宿主应运行在当前用户的交互桌面。
 
-先安装 Git、Node 24+ 和 pnpm 10，然后获取源码：
+### 2. 复制提示词，交给你的 Agent
+
+进入 **设置 → 接入 → 复制安装提示词**，粘贴到你使用的 Agent。Agent 根据提示词获取完整 Skill、检查本机 App 并配置连接；你无需手动选择 Skill 目录。首次配对仍需你在 App 内批准。
+
+默认使用 `default` profile；已有配对会被保留。**新配对默认一次授权所有桌面应用**，之后切换应用、新建窗口、重启宿主都不需要重复批准。旧受限配对不会自动扩权。profile 选择和手动 MCP 配置在“高级接入”中。
+
+### 3. 先完成一次真实观察
+
+打开一个测试窗口，例如空白的 TextEdit 或记事本文档，让 Agent 执行：
+
+> 使用 computer-use 检查连接，列出已授权窗口，打开测试窗口的会话，获取截图并描述看到的内容，然后关闭会话。此次不要点击或输入。
+
+确认拿到真实窗口截图后，再尝试输入和点击。Agent 的接入能力取决于它对 Skill、MCP 或 CLI 的支持；目前已有 Codex 接入记录，其他 Agent 的实际 Skill 安装仍待验证。
+
+<details>
+<summary>手动接入：CLI、MCP，以及只有 SKILL.md 的情况</summary>
+
+**macOS CLI**：在“通用”页选择“安装到 ~/.local/bin…”，并确保该目录在终端的 `PATH` 中；也可直接调用 App 内的 `Contents/Resources/bin/computer-use`。**Windows CLI** 的调用方式见 [Windows 指南](docs/WINDOWS.md)。
+
+以下命令用于尚未配对的 `default` profile；已有 profile 先检查状态，不要删除凭据或重复配对：
+
+```sh
+computer-use preflight --profile default
+computer-use pair --profile default --name 'My Agent'
+# 在 App 内批准配对后：
+computer-use doctor --profile default
+computer-use targets --profile default
+computer-use config codex --profile default
+```
+
+将 `config codex` 输出的 TOML 加入 Codex 的 `~/.codex/config.toml` 并重新加载 MCP；其他 MCP 客户端使用 `config stdio --profile default` 获取通用 JSON。配置包含绝对路径和 profile，不含凭据，项目不会自动修改 Agent 配置。详见 [Codex 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
+
+**只有 Skill 也可以开始**：将完整 [SKILL.md](skills/computer-use/SKILL.md) 交给 Agent，按其中流程发现已有 App，或校验并安装官方发布包，再完成本机授权与观察验证。Skill 自包含，不依赖旁边的脚本或全局 Node；兼容 v0.6.1 的旧命令。已安装 App 的 `instructions` 提供当前版本指南。详见[双向接入说明](docs/USAGE.md#app--skill-双向接入--bidirectional-onboarding)。
+
+</details>
+
+## 可以做什么
+
+| 能力 | 使用方式 |
+| --- | --- |
+| **观察桌面** | 列出窗口、获取截图和辅助功能元素，让 Agent 根据真实界面操作 |
+| **操作应用** | 点击、输入、快捷键、滚动与直线拖拽，具体支持取决于平台和控件 |
+| **后台执行** | 默认后台模式；完整安装包可在首次 CLI / stdio MCP 实际调用时按需启动服务 |
+| **连接现有 Agent** | 使用 Skill、stdio MCP 或独立 CLI；可选本机 HTTP MCP |
+| **独立浏览器** | 通过 Playwright 操作独立的 headless Chromium，需单独授权，不继承日常浏览器登录状态 |
+| **核对操作结果** | 使用快照和请求 ID 追踪动作；结果不确定时先查询、再观察，不自动重放 |
+
+日常状态、已配对客户端和更新都在原生 App 中管理。正式版默认每天检查一次更新，安装前校验 SHA-256 与发布元数据；macOS 支持验证签名后原位更新，Windows 安装版通过安装向导更新。见[更新说明](docs/USAGE.md#检查更新--updates)。
+
+## 控制权留在本机
+
+| 控制 | 效果 |
+| --- | --- |
+| **首次配对批准** | 授权指定客户端；默认覆盖所有桌面应用，也可显式限定范围 |
+| **暂停** | 阻止新动作，待你在 App 内恢复 |
+| **撤销客户端** | 在“客户端”页取消该客户端授权 |
+| **紧急停止** | 停止执行服务，必须由你在 App 内重新启动 |
+
+**暂停与紧停跨退出、重新打开、登录和更新保留。** Agent 调用和后台启动不能清除停止状态。
+
+配对授权包含前台操作权限，但执行默认仍为后台，**不会自动切换前台模式**。后台能力依赖应用与控件，不能保证完全不影响焦点。源码运行、自定义 socket 和远程 HTTP 不自动启动宿主。
+
+HTTP 默认关闭，启用后仅监听本机回环地址；跨机器连接使用手动 SSH 隧道。默认动作日志不保存截图、输入、URL 或窗口标题；CLI 截图会保存在本机。发给云端 Agent 的截图与结果仍由你选择的模型服务处理。更多[权限与操作边界](docs/USAGE.md)。
+
+## 平台与验证
+
+| 平台 | 当前状态 |
+| --- | --- |
+| **macOS Apple Silicon** | 提供原生 App；本地构建已验证跨应用、跨窗口调用及授权控制 |
+| **Windows ARM64** | 提供安装版与便携包；在 Windows 11 ARM64 虚拟机完成限定桌面验收 |
+| **Windows x64** | 提供独立构建；原生 x64 桌面尚未验收 |
+| **macOS Intel / Linux** | 暂无宿主交付 |
+
+Windows 10 尚未实测。现有桌面记录针对本地构建与限定测试应用，不代表逐个验证了正式发布产物或任意第三方应用；全新系统首装、其他 Agent 的实际 Skill 安装仍未完整验收。详见[验证结果](docs/validation-results.md)和 [v0.7.0 接入验收](docs/validation-skill-link-20261012.md)。
+
+## 开发
+
+普通使用直接安装上面的 App。需要修改项目时，准备 **Git、Node 24+、pnpm 10**，再获取源码：
 
 ```sh
 git clone https://github.com/starroyhq/computer-use.git
 cd computer-use
 pnpm install --frozen-lockfile
+pnpm check
 ```
 
-### macOS
+<details>
+<summary>从源码构建 macOS / Windows 宿主</summary>
 
-另需 Apple Silicon Mac 和 Xcode/Swift 工具链。在仓库根目录运行：
+**macOS** 另需 Apple Silicon、macOS 14+ 和 Xcode / Swift 工具链：
 
 ```sh
+pnpm native:test
 pnpm package:app
 open 'artifacts/Computer Use.app'
 ```
 
-在 App 中请求“辅助功能”和“屏幕录制”权限，授权给 Computer Use 后完全退出并重新打开。源码默认构建使用 ad-hoc 开发签名，未经公证；从 v0.3.0 起，正式发布的 macOS 包使用 Developer ID 签名并经过 Apple 公证。重新签名或更换应用标识后可能需要重新授权。运行中不要覆盖 App。
+源码默认使用 ad-hoc 开发签名，不等同于正式签名、公证包。签名或应用标识变化可能需要重新授予系统权限；运行中不要覆盖 App。
 
-从菜单栏图标打开“设置…”，在“通用”页选择“安装到 ~/.local/bin…”，然后在当前终端验证入口：
-
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-command -v computer-use
-computer-use --help
-```
-
-这条 `export` 只影响当前终端；新终端需要相同的 PATH 设置。也可直接调用 `artifacts/Computer Use.app/Contents/Resources/bin/computer-use`。
-
-为 Agent 配对，首次批准后即可访问所有桌面应用：
-
-```sh
-computer-use pair --profile codex --name 'Codex'
-```
-
-在 App 中批准“所有应用”后，打开 TextEdit 并新建一个空白测试文档，检查连接并生成配置：
-
-```sh
-computer-use doctor --profile codex
-computer-use targets --profile codex
-computer-use config codex --profile codex
-```
-
-`targets` 应包含已打开的测试窗口。未安装 Chromium 时，`doctor` 的浏览器项可以显示不可用；桌面接入应检查桌面后端。接着按下节导入配置。
-
-全应用授权持续有效，不按窗口或会话重复审批。旧配对保留原有应用范围；要改为全应用，在“客户端”页撤销旧授权，删除该 profile 的本地凭据后重新配对一次。受限测试可加 `--app com.apple.TextEdit`；独立浏览器需另加 `--all-apps --browser`。完整选项见[使用说明](docs/USAGE.md#配对范围--pairing-scope)。
-
-### Windows 11
-
-另需 .NET 10 SDK。在 Windows 仓库根目录的 PowerShell 中运行（ARM64 将 `x64` 改为 `arm64`，产物目录改为 `ARM64`）：
+**Windows** 另需 .NET 10 SDK，在 PowerShell 中运行：
 
 ```powershell
 node scripts/package-windows.mjs --arch x64
 & '.\artifacts\Computer Use Windows x64\ComputerUse.WindowsHost.exe'
 ```
 
-宿主应在当前交互登录桌面运行。便携包包含 Node、驱动和 .NET 运行时；构建所需 SDK 与最终运行所需组件不同。
+ARM64 将参数改为 `--arch arm64`，产物目录改为 `Computer Use Windows ARM64`。完整包内置运行时，用户无需安装构建用 SDK。
 
-按 [Windows 指南](docs/WINDOWS.md)完成一次全应用配对，再选择本机 Agent 的 stdio MCP，或 Mac 经 SSH 隧道连接 Windows HTTP MCP。默认不需要填写应用路径；显式用 `--app` 限定范围时，Windows 使用完整可执行文件路径，macOS 使用 Bundle ID。
+浏览器集成测试需要匹配的 Chromium，可执行 `pnpm exec playwright install chromium` 安装；缺少时跳过的测试不能计作通过。完整流程见[构建与打包](scripts/README.md)和 [CI 说明](docs/CI.md)。
 
-Windows 自 v0.6.1、macOS 自 v0.7.0 起，同一完整包的 CLI / stdio MCP 使用默认 IPC 时，会在首次实际 RPC 前按需启动宿主并等待就绪；MCP 初始化和工具列表不启动宿主。v0.7.0 两端的暂停与紧停在退出、重新打开、登录和更新后均保留，只能在 App 内点击“恢复／重启服务”解除；重新打开不会恢复服务。源码运行、自定义 `--socket` 和远程 HTTP 不自动启动。macOS 缺少系统权限时返回 `permissions_required`，需用户本机授权。详见[按需启动说明](docs/USAGE.md#后台按需启动--background-on-demand-startup)及 [Windows 指南](docs/WINDOWS.md#按需启动与暂停保护)。
+</details>
 
-## 接入 Agent 与首次观察
+## 文档导航
 
-将 `config codex` 输出的 TOML 片段添加到 Codex 用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`。配置含绝对启动路径和 profile，不含凭据；项目不会自动修改 Agent 配置。详见 [Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
-
-重新加载客户端的 MCP 配置后，可以先给 Agent 一个只读任务：
-
-> 使用 computer-use 检查连接，列出已授权窗口，打开测试窗口的会话，获取截图并描述看到的内容，然后关闭会话。此次不要点击或输入。
-
-正常结果应包括真实窗口截图及描述。先确认这一过程，再在一次性测试文档中尝试输入和点击。其他 Agent 可对已配对 profile 运行 `computer-use config stdio --profile codex` 获取通用 JSON 配置；其他客户端的真实模型接入尚待验证。
-
-需要手动调用 CLI、安装独立浏览器或理解动作参数时，见 [使用说明](docs/USAGE.md) 和配套 [CLI Skill](skills/computer-use/SKILL.md)。
-
-## 设置与更新
-
-菜单栏图标（Windows 为托盘图标）显示服务状态，菜单只保留设置、暂停/恢复、紧急停止、重新启动、检查更新和退出。配对审批仍以弹窗出现；已配对客户端、授权范围和撤销在设置窗口的“客户端”页，本机 HTTP MCP 开关与 stdio 配置在“接入 → 高级接入”。“登录时启动”默认关闭，macOS 使用系统登录项，Windows 写入当前用户的启动项。
-
-v0.6.1 增加暖白与深炭色的光标 App 图标，覆盖 macOS App，以及 Windows EXE、托盘、窗口和安装器；macOS 菜单栏使用白色光标主体。图标不改变配对或系统权限。
-
-自动检查默认开启，每天最多一次，只读取本仓库 GitHub 上最新的正式版（不含草稿和预发布，也不降级），不上传使用数据；可在“更新”页关闭，或对某个版本选择“跳过”。检查优先使用 GitHub API；未认证的 API 每个 IP 每小时只能调用 60 次，用完或连不上时改读 github.com 的发布页，结果相同。下载的安装包必须与发布里的 SHA-256 校验文件和元数据一致，经 API 读取时还要与 GitHub 记录的摘要一致：
-
-- **macOS**：Developer ID 签名的正式版可一键安装。App 解压新版本后，确认 Bundle ID、版本、签名团队与当前 App 一致并通过 Gatekeeper 检查，经你确认后停止服务、在原位置替换并重新打开，系统权限和已配对客户端保持不变。App 被系统隔离运行（例如下载后未移动就直接打开）或所在文件夹不可写时，改为在访达中显示校验过的新版本，由你手动替换。源码构建的开发版本只能手动检查。
-- **Windows**：便携版（包括 v0.5.0 及更早版本）只下载并校验 ZIP，然后在资源管理器中显示；退出托盘程序后解压，用新文件夹替换当前文件夹（保持同一路径）。从 v0.6.0 起，安装版支持下载并校验新版本的安装程序，点“运行安装程序”后按向导完成；安装程序先让托盘程序停止服务并退出，升级沿用原安装位置，已配对的客户端和设置保留。从真实发布下载到完成安装版升级的完整流程仍待验证。
-
-两个宿主都通过内置 CLI 完成检查和下载，也可以直接运行 `computer-use update check`，见 [使用说明](docs/USAGE.md#检查更新--updates)。
-
-## 权限与限制
-
-- Agent 必须持有已配对客户端的凭据；默认全应用授权覆盖当前及后续桌面应用和窗口，不会自动扩充旧配对的范围，也不代替 macOS 系统权限。配对批准即授予前台操作（可能切换焦点、移动鼠标和模拟键盘），之后不再逐次询问；只有显式指定 `mode: "foreground"` 才使用前台，不自动从后台切换。后台能力依赖实际控件，不保证完全不影响焦点。
-- 不确定动作先查询 `action_status` 并观察，不直接重放。`executed` 不代表任务成功，仍需核对实际界面或输出文件。
-- HTTP 默认关闭，只监听 `127.0.0.1:47631`。跨机器接入通过手动 SSH 隧道，不直接开放 MCP 到局域网或公网。
-- 默认动作日志不保存截图、输入、URL 和窗口标题；CLI 截图会留在本机，需要自行清理。发给云端 Agent 的截图与结果由所选模型服务处理。
-- 所有获准使用独立浏览器的客户端共享浏览器空间；本地授权不隔离同一系统用户的恶意进程。
-- Windows 提权窗口、UAC 安全桌面、画布和终端长文本不在已验证范围内。平台动作差异及更多限制见 [使用说明](docs/USAGE.md)。
-
-## 开发与文档
-
-```sh
-pnpm check
-pnpm native:test # 仅 macOS
-```
-
-浏览器集成测试需要匹配的 Chromium；缺少时会跳过相应测试，不能计作通过。可用 `pnpm exec playwright install chromium` 安装开发测试所需组件。
-
-- [使用说明 / Usage](docs/USAGE.md)：CLI、动作语义、浏览器与排错
-- [Windows 接入](docs/WINDOWS.md) / [Windows guide](docs/WINDOWS.en.md)
-- [架构](docs/ARCHITECTURE.md)、[构建与打包](scripts/README.md)
-- [GitHub CI 与开发产物](docs/CI.md)：跨平台检查、下载、校验和验收边界
-- [验证方法](docs/VALIDATION.md)、[验证结果](docs/validation-results.md)、[路线图](docs/ROADMAP.md)
+| 文档 | 内容 |
+| --- | --- |
+| [使用说明](docs/USAGE.md) | CLI、Skill 接入、授权范围、浏览器、动作语义与排错 |
+| [Windows 指南](docs/WINDOWS.md) | 安装、本机 MCP、Mac 经 SSH 接入与暂停保护 |
+| [CLI Skill](skills/computer-use/SKILL.md) | 可交给 Agent 的完整安装与操作指南 |
+| [架构](docs/ARCHITECTURE.md) | 宿主、授权、会话、快照与后端适配 |
+| [构建与打包](scripts/README.md) · [CI](docs/CI.md) | 本地构建、跨平台检查、签名与发布 |
+| [验证方法](docs/VALIDATION.md) · [验证结果](docs/validation-results.md) | 测试步骤、已覆盖行为和未验证项 |
+| [路线图](docs/ROADMAP.md) | 项目方向与后续计划 |
 
 ## 许可与致谢
 
-原创源码和文档采用 [MIT](LICENSE)，版权署名为 Starroy，见 [NOTICE](NOTICE)。感谢 Cua、Playwright、MCP SDK 及其他上游项目；依赖保留各自许可证，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+原创源码和文档采用 [MIT](LICENSE)，版权署名 Starroy，见 [NOTICE](NOTICE)。桌面能力基于 [Cua Driver](https://github.com/trycua/cua)，独立浏览器使用 [Playwright](https://github.com/microsoft/playwright)，MCP 使用官方 TypeScript SDK。本项目实现原生宿主、授权、会话与快照管理、动作记录、CLI / MCP 接入及打包。依赖许可见[第三方声明](THIRD_PARTY_NOTICES.md)。

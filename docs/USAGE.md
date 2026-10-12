@@ -2,9 +2,9 @@
 
 [中文首页](../README.md) · [English home](../README.en.md) · [Windows 中文](WINDOWS.md) · [Windows English](WINDOWS.en.md)
 
-先按首页完成构建、启动和配对。以下示例使用已配对的 `codex` profile；替换返回的 ID，不要直接执行占位符。Windows 在便携包目录中将 `computer-use` 换为 `& .\bin\node.exe .\runtime\cli.js`。
+先按首页安装 App，在“接入”页复制提示词交给 Agent，再完成本机授权与配对；普通使用无需源码构建。App 默认 profile 为 `default`。本页 CLI 示例使用已配对的 `codex` profile；运行时统一替换为你实际使用的 profile，并将占位 ID 替换为命令返回的值。Windows 在便携包目录中将 `computer-use` 换为 `& .\bin\node.exe .\runtime\cli.js`。
 
-Build, start and pair as described in the README first. Examples use an existing `codex` profile. Replace placeholder IDs with returned values. On Windows, run from the portable package directory and replace `computer-use` with `& .\bin\node.exe .\runtime\cli.js`.
+Install the App, copy the setup prompt from Connect to your Agent, and complete local permissions and pairing as described in the README. No source build is needed for normal use. The App defaults to the `default` profile; CLI examples on this page use an existing `codex` profile. Consistently substitute your actual profile and replace placeholder IDs with returned values. On Windows, run from the portable package directory and replace `computer-use` with `& .\bin\node.exe .\runtime\cli.js`.
 
 ## App ↔ Skill 双向接入 / Bidirectional onboarding
 
