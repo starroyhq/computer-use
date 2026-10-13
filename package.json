@@ -30,15 +30,15 @@
     "probe": "node dist/probe.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.1.0",
-    "@modelcontextprotocol/node": "2.1.0",
-    "@modelcontextprotocol/server": "2.1.0",
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
     "@trycua/cua-driver": "0.28.2",
     "playwright": "1.63.0",
     "zod": "4"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "24",
     "typescript": "5",
     "vitest": "3"
