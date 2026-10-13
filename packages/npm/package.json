@@ -1,6 +1,6 @@
 {
   "name": "@starroy/computer-use",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Install and connect to the native Computer Use app for macOS and Windows",
   "license": "MIT",
   "type": "module",

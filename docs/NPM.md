@@ -57,7 +57,7 @@ node scripts/package-npm.mjs
 # 可选：node scripts/package-npm.mjs --out /path/to/output
 ```
 
-脚本输出一行 JSON，包含实际归档路径、版本、SHA-256 和文件列表。默认产物是 `artifacts/npm/starroy-computer-use-0.7.1.tgz`，版本由 `packages/npm/package.json` 决定。构建不要求安装根项目依赖，也不依赖 TypeScript 编译。
+脚本输出一行 JSON，包含实际归档路径、版本、SHA-256 和文件列表。默认产物是 `artifacts/npm/starroy-computer-use-0.7.2.tgz`，版本由 `packages/npm/package.json` 决定。构建不要求安装根项目依赖，也不依赖 TypeScript 编译。
 
 归档仅允许以下文件：
 
@@ -78,8 +78,8 @@ resources/bootstrap-windows.ps1
 可对实际 tgz 做最后一次离线检查：
 
 ```sh
-npm exec --offline --ignore-scripts --yes --package ./artifacts/npm/starroy-computer-use-0.7.1.tgz -- computer-use --help
-npm publish ./artifacts/npm/starroy-computer-use-0.7.1.tgz --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org
+npm exec --offline --ignore-scripts --yes --package ./artifacts/npm/starroy-computer-use-0.7.2.tgz -- computer-use --help
+npm publish ./artifacts/npm/starroy-computer-use-0.7.2.tgz --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org
 ```
 
 ## 发布与账号配置
