@@ -8,7 +8,6 @@ on:
       - scripts/package-npm*
       - scripts/skill-bootstrap*
       - skills/computer-use/**
-      - package.json
       - LICENSE
       - NOTICE
       - THIRD_PARTY_NOTICES.md
@@ -22,7 +21,6 @@ on:
       - scripts/package-npm*
       - scripts/skill-bootstrap*
       - skills/computer-use/**
-      - package.json
       - LICENSE
       - NOTICE
       - THIRD_PARTY_NOTICES.md
@@ -124,11 +122,23 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `filename=${result.filename}\nsha256=${result.sha256}\n`);
           await appendFile(process.env.GITHUB_STEP_SUMMARY, `Package: ${result.name}@${result.version}\n\nSHA-256: ${result.sha256}\n\nFiles:\n${result.files.map(file => '- ' + file).join('\n')}\n`);
           NODE
+      # The launcher is versioned independently of the App, so many pushes (README, Skill text, workflow edits) leave the
+      # published version unchanged. npm rejects a dry-run over an existing version, which turned main red. A version that
+      # already exists must match this tarball exactly; only a new version needs the dry-run.
+      - name: Check whether this version is already published with identical content
+        id: registry
+        env:
+          NPM_ARCHIVE: ${{ steps.pack.outputs.filename }}
+        run: node .github/scripts/npm-release.mjs check "./artifacts/npm/$NPM_ARCHIVE"
       - name: Dry-run the tarball publication
+        if: steps.registry.outputs.exists == 'false'
         shell: bash
         env:
           NPM_ARCHIVE: ${{ steps.pack.outputs.filename }}
         run: npm publish "./artifacts/npm/$NPM_ARCHIVE" --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org
+      - name: Record an already published version
+        if: steps.registry.outputs.exists == 'true'
+        run: echo 'This npm version is already published with matching package contents. The publication dry-run was skipped.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: npm-launcher-${{ github.sha }}
