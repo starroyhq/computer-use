@@ -6,7 +6,17 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, errors } from 'playwright';
 import type { Browser, BrowserContext, ElementHandle, JSHandle, Page } from 'playwright';
 import { CuError } from '../contracts.js';
-import type { Action, Backend, BackendObservation, Doctor, Element as CuElement, Grant, Mode, Target } from '../contracts.js';
+import type {
+  Action,
+  Backend,
+  BackendObservation,
+  Doctor,
+  Element as CuElement,
+  Grant,
+  Mode,
+  ObserveOptions,
+  Target,
+} from '../contracts.js';
 
 const SELECTOR = 'button,input:not([type=hidden]),a[href],select,textarea,[role],[contenteditable=true]';
 type Monitor = { revision: number; observer: MutationObserver; document: Document };
@@ -164,7 +174,7 @@ export class BrowserBackend implements Backend {
     return { id, kind: 'browser', appId: 'browser', title: await page.title(), url: page.url() };
   }
 
-  async observe(target: Target): Promise<BackendObservation> {
+  async observe(target: Target, options?: ObserveOptions): Promise<BackendObservation> {
     const page = this.pages.get(target.id);
     if (!page || page.isClosed()) throw new CuError('not_found', 'Controlled browser page no longer exists.');
     const previous = this.snapshots.get(page);
@@ -208,15 +218,23 @@ export class BrowserBackend implements Backend {
         });
       }
       const viewport = page.viewportSize()!;
-      const png = await page.screenshot({ type: 'png', fullPage: false, scale: 'css', caret: 'initial', timeout: 5_000 });
+      // 只取元素时不截图，元素也不带位置：位置是视口像素，没有截图就没有可对照的图像。
+      const png =
+        options?.pixels === false
+          ? undefined
+          : await page.screenshot({ type: 'png', fullPage: false, scale: 'css', caret: 'initial', timeout: 5_000 });
       const observation: BackendObservation = {
         target: await this.target(target.id, page),
         bounds: { x: 0, y: 0, ...viewport },
-        imageWidth: viewport.width,
-        imageHeight: viewport.height,
-        elements,
+        elements: png ? elements : elements.map(({ bounds: _, ...rest }) => rest),
         elementsComplete: false,
-        screenshot: { mimeType: 'image/png', data: png.toString('base64') },
+        ...(png
+          ? {
+              imageWidth: viewport.width,
+              imageHeight: viewport.height,
+              screenshot: { mimeType: 'image/png' as const, data: png.toString('base64') },
+            }
+          : {}),
       };
       this.observations.set(observation, state);
       if (!(await this.validate(observation))) throw new CuError('stale_snapshot', 'Page changed while observing; observe again.');
@@ -235,8 +253,8 @@ export class BrowserBackend implements Backend {
     if (
       state.url !== state.page.url() ||
       state.epoch !== this.epochs.get(state.page) ||
-      viewport?.width !== observation.imageWidth ||
-      viewport?.height !== observation.imageHeight
+      viewport?.width !== observation.bounds.width ||
+      viewport?.height !== observation.bounds.height
     )
       return false;
     try {
@@ -317,6 +335,33 @@ export class BrowserBackend implements Backend {
           } else await page.keyboard.insertText(action.text);
           break;
         }
+        case 'setValue': {
+          const element = state.elements.get(action.elementId);
+          if (!element) throw new CuError('stale_snapshot', 'Unknown snapshot element.');
+          const kind = await element.handle.evaluate(node => {
+            if (node instanceof HTMLSelectElement) return node.disabled ? 'other' : 'select';
+            if (node instanceof HTMLInputElement)
+              return ['text', 'search', 'email', 'url', 'tel', 'password'].includes(node.type) && !node.disabled && !node.readOnly
+                ? 'text'
+                : 'other';
+            if (node instanceof HTMLTextAreaElement) return !node.disabled && !node.readOnly ? 'text' : 'other';
+            return node instanceof HTMLElement && node.isContentEditable ? 'text' : 'other';
+          });
+          if (kind === 'text') await element.handle.fill(action.value);
+          else if (kind === 'select') {
+            // 与桌面一致：按可见文字或值匹配，忽略大小写和首尾空白；找不到时没有任何改动。
+            const index = await element.handle.evaluate((node, wanted) => {
+              if (!(node instanceof HTMLSelectElement)) return -1;
+              const same = (text: string) => text.trim().toLowerCase() === wanted.trim().toLowerCase();
+              return Array.from(node.options).findIndex(option => !option.disabled && (same(option.label) || same(option.value)));
+            }, action.value);
+            if (index < 0) throw new CuError('not_found', 'No enabled option matches the requested value.');
+            await element.handle.selectOption({ index });
+          } else throw new CuError('invalid_request', 'The snapshot element is not an editable text field or a list.');
+          break;
+        }
+        case 'menu':
+          throw new CuError('invalid_request', 'Browser pages have no application menu.');
         case 'key':
           await page.keyboard.press(action.keys.map(normalizeKey).join('+'));
           break;

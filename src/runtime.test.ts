@@ -1175,6 +1175,235 @@ describe('Runtime authorization and execution', () => {
     expect(foreign.elements!.map(element => element.id).some(value => Object.values(ids).includes(value))).toBe(false);
   });
 
+  it('validates setValue and menu actions, maps the element id for the backend and trims menu names', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const first = await call<Published>(token, 'observe', { sessionId });
+    const id = first.elements![0]!.id;
+    const run = (snapshotId: string, action: unknown) =>
+      call<{ state: string }>(token, 'act', { sessionId, snapshotId, requestId: randomUUID(), action, timeoutMs: 1000 });
+    for (const action of [
+      { type: 'setValue', elementId: id },
+      { type: 'setValue', value: 'x' },
+      { type: 'setValue', elementId: id, value: 'x', extra: true },
+      { type: 'menu' },
+      { type: 'menu', path: [] },
+      { type: 'menu', path: ['File', '   '] },
+      { type: 'menu', path: Array.from({ length: 17 }, () => 'x') },
+      { type: 'menu', path: ['x'.repeat(201)] },
+      { type: 'menu', path: ['File'], elementId: id },
+    ])
+      await expect(run(first.snapshotId, action)).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(run(first.snapshotId, { type: 'setValue', elementId: 'e999', value: 'x' })).rejects.toMatchObject({
+      code: 'stale_snapshot',
+    });
+    expect(backend.act).not.toHaveBeenCalled();
+    // 拒绝发生在动作入队前：快照没有被消耗。
+    expect(await run(first.snapshotId, { type: 'setValue', elementId: id, value: '新的值' })).toMatchObject({ state: 'executed' });
+    expect(vi.mocked(backend.act).mock.calls.at(-1)?.[1]).toEqual({ type: 'setValue', elementId: 'button-1', value: '新的值' });
+    // 菜单路径各段首尾空白被去掉；两类动作都不需要截图，在只取元素的快照上同样可用。
+    const slim = await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+    expect(await run(slim.snapshotId, { type: 'menu', path: [' File ', 'Save'] })).toMatchObject({ state: 'executed' });
+    expect(vi.mocked(backend.act).mock.calls.at(-1)?.[1]).toEqual({ type: 'menu', path: ['File', 'Save'] });
+    const again = await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+    expect(await run(again.snapshotId, { type: 'setValue', elementId: again.elements![0]!.id, value: '' })).toMatchObject({
+      state: 'executed',
+    });
+  });
+
+  describe('elements-only observations', () => {
+    const lastObserveOptions = () => vi.mocked(backend.observe).mock.calls.at(-1)?.[1];
+    // 与真实后端一致：要求不带像素时不给截图、像素尺寸和元素位置。
+    function honorPixels() {
+      vi.mocked(backend.observe).mockImplementation(async (requested, options) => {
+        clock += 50;
+        const withPixels = observationOf(requested, [
+          { id: 'button-1', label: 'Save', role: 'button', bounds: { x: 1, y: 2, width: 30, height: 20 } },
+        ]);
+        if (options?.pixels !== false) return withPixels;
+        const { screenshot: _, imageWidth: __, imageHeight: ___, ...rest } = withPixels;
+        return { ...rest, elements: [{ id: 'button-1', label: 'Save', role: 'button' }] };
+      });
+    }
+    const act = (token: string, sessionId: string, snapshotId: string, action: unknown, extra: Record<string, unknown> = {}) =>
+      call<{ state: string; observation?: Published }>(token, 'act', {
+        sessionId,
+        snapshotId,
+        requestId: randomUUID(),
+        action,
+        timeoutMs: 1000,
+        ...extra,
+      });
+
+    it('skips the screenshot, pixel geometry and element bounds, and keeps element actions, typing and keys usable', async () => {
+      honorPixels();
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const full = await call<Published>(token, 'observe', { sessionId });
+      expect(lastObserveOptions()).toBeUndefined();
+      expect(full).toMatchObject({
+        imageWidth: 400,
+        imageHeight: 200,
+        screenshot: expect.anything(),
+        elements: [{ bounds: expect.anything() }],
+      });
+      const slim = await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+      expect(lastObserveOptions()).toEqual({ pixels: false });
+      expect(slim).not.toHaveProperty('screenshot');
+      expect(slim).not.toHaveProperty('imageWidth');
+      expect(slim).not.toHaveProperty('imageHeight');
+      expect(slim.elements).toEqual([{ id: expect.any(String), role: 'button', label: 'Save' }]);
+      const id = slim.elements![0]!.id;
+      // 没有像素的快照拒绝坐标、拖拽和滚动：派发前失败，快照不被消耗。
+      for (const action of [
+        { type: 'click', point: { x: 1, y: 1 } },
+        {
+          type: 'drag',
+          path: [
+            { x: 1, y: 1 },
+            { x: 2, y: 2 },
+          ],
+          durationMs: 200,
+        },
+        { type: 'scroll', direction: 'down', amount: 1, unit: 'line' },
+        { type: 'scroll', direction: 'down', amount: 1, unit: 'line', point: { x: 1, y: 1 } },
+      ])
+        await expect(act(token, sessionId, slim.snapshotId, action)).rejects.toMatchObject({
+          code: 'invalid_request',
+          message: expect.stringContaining('elementsOnly'),
+        });
+      expect(backend.act).not.toHaveBeenCalled();
+      // 元素点击、输入和按键照常可用。
+      for (const [index, action] of [
+        { type: 'click', elementId: id },
+        { type: 'type', text: 'x', elementId: id },
+        { type: 'type', text: 'x' },
+        { type: 'key', keys: ['tab'] },
+      ].entries()) {
+        const snapshot = index === 0 ? slim : await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+        const target = action.type === 'key' || !('elementId' in action) ? action : { ...action, elementId: snapshot.elements![0]!.id };
+        expect(await act(token, sessionId, snapshot.snapshotId, target)).toMatchObject({ state: 'executed' });
+      }
+      expect(backend.act).toHaveBeenCalledTimes(4);
+      // 完整观察不受影响：坐标动作照常。
+      const again = await call<Published>(token, 'observe', { sessionId });
+      expect(await act(token, sessionId, again.snapshotId, { type: 'click', point: { x: 399, y: 199 } })).toMatchObject({
+        state: 'executed',
+      });
+    });
+
+    it('does not expose pixels from a backend that ignores the request', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const slim = await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+      expect(slim).not.toHaveProperty('screenshot');
+      expect(slim).not.toHaveProperty('imageWidth');
+      expect(slim.elements![0]).not.toHaveProperty('bounds');
+      await expect(act(token, sessionId, slim.snapshotId, { type: 'click', point: { x: 1, y: 1 } })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    });
+
+    it('rejects contradictory options before observing or acting', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      for (const conflict of [{ screenshot: true }, { elements: false }])
+        await expect(call(token, 'observe', { sessionId, elementsOnly: true, ...conflict })).rejects.toMatchObject({
+          code: 'invalid_request',
+        });
+      // screenshot: false 与 elementsOnly 并不冲突。
+      await expect(call(token, 'observe', { sessionId, elementsOnly: true, screenshot: false })).resolves.toBeDefined();
+      const first = await call<Published>(token, 'observe', { sessionId });
+      vi.mocked(backend.observe).mockClear();
+      for (const conflict of [{ screenshot: true }, { elements: false }])
+        await expect(
+          act(token, sessionId, first.snapshotId, { type: 'key', keys: ['tab'] }, { observe: { elementsOnly: true, ...conflict } }),
+        ).rejects.toMatchObject({ code: 'invalid_request' });
+      // 冲突在派发前就被拒绝：没有动作发出，快照也没被消耗。
+      expect(backend.act).not.toHaveBeenCalled();
+      expect(vi.mocked(backend.observe)).not.toHaveBeenCalled();
+      expect(await act(token, sessionId, first.snapshotId, { type: 'key', keys: ['tab'] })).toMatchObject({ state: 'executed' });
+    });
+
+    it('attaches an elements-only observation to an act result and returns changes against the acted snapshot', async () => {
+      honorPixels();
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const first = await call<Published>(token, 'observe', { sessionId, elementsOnly: true });
+      vi.mocked(backend.observe).mockClear();
+      const result = await act(
+        token,
+        sessionId,
+        first.snapshotId,
+        { type: 'key', keys: ['tab'] },
+        { observe: { elementsOnly: true, changes: true } },
+      );
+      expect(result.observation).toMatchObject({ changes: { since: first.snapshotId, unchanged: 1, removed: [] }, elements: [] });
+      expect(result.observation).not.toHaveProperty('screenshot');
+      expect(result.observation).not.toHaveProperty('imageWidth');
+      expect(lastObserveOptions()).toEqual({ pixels: false });
+      // 附带的是没有像素的快照，同样拒绝坐标。
+      await expect(act(token, sessionId, result.observation!.snapshotId, { type: 'click', point: { x: 1, y: 1 } })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    });
+
+    it('polls verification without screenshots unless the attached observation needs one', async () => {
+      honorPixels();
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const verify = { type: 'element', label: 'Save', present: true };
+      const run = async (observe?: Record<string, unknown>) => {
+        const snapshot = await call<Published>(token, 'observe', { sessionId });
+        vi.mocked(backend.observe).mockClear();
+        const result = await act(
+          token,
+          sessionId,
+          snapshot.snapshotId,
+          { type: 'key', keys: ['tab'] },
+          { verify, ...(observe ? { observe } : {}) },
+        );
+        return { result, options: vi.mocked(backend.observe).mock.calls.map(([, options]) => options) };
+      };
+      // 没有附带观察：轮询用不着图像。
+      const bare = await run();
+      expect(bare.result.state).toBe('verified');
+      expect(bare.options).toEqual([{ pixels: false }]);
+      // 附带只要元素的观察：轮询同样不抓图，满足条件的那次直接发布。
+      const slim = await run({ elementsOnly: true });
+      expect(slim.options).toEqual([{ pixels: false }]);
+      expect(slim.result.observation).not.toHaveProperty('imageWidth');
+      // 附带带截图的观察（包括 screenshot: false，快照仍须能用于坐标）：满足条件的那次观察要带像素。
+      for (const observe of [{}, { screenshot: false }]) {
+        const pixels = await run(observe);
+        expect(pixels.options).toEqual([undefined]);
+        expect(pixels.result.observation).toMatchObject({ imageWidth: 400, imageHeight: 200 });
+      }
+    });
+
+    it('waits with or without screenshots on request and keeps the default observation complete', async () => {
+      honorPixels();
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const condition = { type: 'element', label: 'Save', present: true };
+      vi.mocked(backend.observe).mockClear();
+      const full = await call<{ state: string; observation: Published }>(token, 'wait', { sessionId, condition });
+      expect(lastObserveOptions()).toBeUndefined();
+      expect(full.observation).toMatchObject({ imageWidth: 400, screenshot: expect.anything() });
+      const slim = await call<{ state: string; observation: Published }>(token, 'wait', { sessionId, condition, elementsOnly: true });
+      expect(slim.state).toBe('verified');
+      expect(lastObserveOptions()).toEqual({ pixels: false });
+      expect(slim.observation).not.toHaveProperty('screenshot');
+      expect(slim.observation).not.toHaveProperty('imageWidth');
+      expect(slim.observation.elements).toEqual([{ id: expect.any(String), role: 'button', label: 'Save' }]);
+    });
+
+    it('advertises elements-only observations in capabilities', async () => {
+      const { token } = await pair();
+      expect(await call(token, 'capabilities')).toMatchObject({ observation: { elementsOnly: true } });
+    });
+  });
+
   it('attaches the next observation to act results, reuses a verification observation, and omits it after an unknown outcome', async () => {
     const { token } = await pair(),
       { sessionId } = await session(token);

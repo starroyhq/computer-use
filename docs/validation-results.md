@@ -363,3 +363,45 @@ Windows 包仍未签名。本轮没有测试互联网下载文件的 SmartScreen
 改动前 `act` 加附带观察的 8.3 秒中，两次 `list_apps` 占 4.7 秒；改动后剩下的大头是驱动自己的动作耗时（`type_text` 约 2.6 秒、`click` 约 2.8 秒）。Fixture 点击和输入后由独立文件确认效果无误。
 
 没有改变也没有证明的部分：Safari 上记录过的“先空等约 5 秒再给截图”只出现在 Safari，对 Fixture 静置 12、40、100 秒后首次合并取树和截图仍只要 1.1–1.7 秒，所以这条结论不能推广到所有窗口。
+
+## 只取元素的观察（2026-10-13）
+`observe`、`wait` 和 `act` 的 `observe` 新增 `elementsOnly: true`：不抓取截图，快照只用于元素点击、输入和按键。没有截图的快照不带 `imageWidth` / `imageHeight`，元素没有 `bounds`；坐标点击、拖拽和滚动在派发前被运行时拒绝（`invalid_request`）。它不能与 `screenshot: true` 或 `elements: false` 同用，冲突在动作派发前就报错。`act` 的 `verify` 在没有附带观察、或附带的观察是 `elementsOnly` 时，轮询也不再抓截图；带截图的附带观察仍复用满足条件的那次观察，不多抓一次。原有 `screenshot: false` 的含义不变：只省略返回内容，快照仍可用于坐标。
+
+驱动事实（0.28.2，本机，一次性 Fixture）：`get_window_state` 带 `include_screenshot: false` 时不返回图像，也不返回窗口几何（`windowBounds` 为空），因此运行时另用 `list_windows`（约 30–60 毫秒）取窗口边界，先于取树，窗口在两者之间移动时动作前的校验会判为过期。同一界面状态下，仅树与树加截图返回的 76 个元素逐项一致（角色、层级、标签、值、状态、位置、可用动作），都带元素 token，`elementsComplete` 同为 false。
+
+计时方法同上一节（每次调用前停 3 秒；用于对比的“改动前”数字见上一节）：
+
+| 步骤 | 树加截图 | `elementsOnly` |
+|---|---|---|
+| `observe` | 0.93–1.12 秒 | 0.30 秒（树 0.20–0.24 秒） |
+| `wait`（条件已满足） | 1.10 秒 | 0.28 秒 |
+| `act` 输入加附带观察 | 3.9 秒 | 3.0 秒 |
+| `act` 点击加附带观察 | 4.0 秒 | 3.2 秒 |
+
+`verify` 轮询：无附带观察时轮询用只取树的 `getWindowState`（0.36 秒）；附带 `elementsOnly` 同样只取树；附带完整观察时轮询带截图（1.07 秒），并直接发布那次观察。三种情况动作后的状态都是 `verified`。在只取元素的快照上点击带 `elementId` 的文本框：该文本框不支持 AXPress，macOS 上要用元素位置，记录为 `failed` / `invalid_request`，没有任何点击发出；`type` 带 `elementId` 输入同一文本框则成功。
+
+Fixture 的窗口很小，取树和取图都很快，节省来自去掉抓取本身。Safari 上记录过合并请求先空等约 5 秒，对 Fixture 静置 100 秒内都没有复现，所以那种窗口上能省多少不在本节实测范围内。
+
+未覆盖：Windows 驱动源码里 `include_screenshot: false` 语义相同，但 Windows 上只有单元测试，没有在虚拟机里实际运行；浏览器后端的只取元素路径仅由单元测试和 Chromium 集成测试覆盖。
+
+## 设置值与菜单动作（2026-10-13）
+新增两个后台可用的动作：`setValue` 用 `elementId` 整体替换元素的值，`menu` 用菜单名路径调用应用菜单项。两者都走驱动的辅助功能接口（`set_value`、`invoke_menu`），没有投递方式参数，不移动焦点。Fixture 新增了弹出按钮、滑块和带嵌套项、禁用项的 “Fixture” 菜单，状态写入同一个证据文件（`choice`、`level`、`count`），作为独立证据。
+
+计时和方法同上两节：工作区编译出的 `Runtime` 与 `CuaBackend` 经运行中 App 的驱动套接字，只操作一次性 Fixture，临时数据目录和凭据；每个结果都与证据文件对照。另在直接调用驱动的实验里，每次菜单调用后用 `lsappinfo` 检查前台应用：始终是用户正在用的应用，没有变化。
+
+| 动作 | 结果 | 独立证据 |
+|---|---|---|
+| `menu` Fixture › Record | `executed` / `unconfirmed`，0.7 秒 | `count` 4 → 5 |
+| `menu` Fixture › More › Record Twice | 同上，0.95 秒 | `count` 5 → 7 |
+| `menu` 路径不存在 | `failed` / `not_found`，驱动拒绝码 `menu_path_unavailable` | `count` 不变；随后的动作照常执行，运行时没有停机 |
+| `menu` 被禁用的菜单项 | 同上 | `count` 不变 |
+| `menu` Apple 菜单（含前后空白、大小写不同的写法） | `failed` / `permission_denied`，派发前被拒绝（0.1–0.3 秒，驱动只收到归属和窗口校验，没有 `invoke_menu`） | 无变化 |
+| `setValue` 滑块 `6` | `executed` / `unconfirmed`（驱动读不回），2.7 秒 | `level` 0 → 6 |
+| `setValue` 文本框 | `verified` / `confirmed`（驱动读回），`verify` 条件按整个值满足 | 再设一次得到的是新值，不是追加；随后经菜单 Record 写入的 `text` 是 `第二次` |
+| `setValue` 弹出按钮 | `failed` / `invalid_request`，派发前被拒绝（同样没有 `set_value` 调用） | 无变化 |
+
+驱动事实（0.28.2）：`invoke_menu` 对缺失、重名、禁用的路径返回 `isError`、错误码 `menu_path_unavailable` 和结构化的 `status: "refused"`，没有 `action` 元数据；成功时结构化结果的 `effect` 是 `unverifiable`。路径各段只忽略首尾空白，区分大小写；只给一个顶层菜单名也返回成功，但没有产生命令（计数不变）。`set_value` 对原生 `NSPopUpButton` 返回 `AXPopUpButton … has no AX children … no fallback available`，`isError` 为真但没有错误码；运行时把没有错误码的失败按“结果不确定”处理并停机，所以弹出按钮在派发前就被拒绝，而不是等驱动报错。对不可写的按钮，`set_value` 同样报“已发出（未确认）”而不报错，因此“已发出”不等于生效，要读回核对；直接调用驱动给滑块写 `99` 时，控件把值夹到上限 10。
+
+Apple 菜单保护依据快照里的原始菜单栏：第一个菜单栏项就是系统 Apple 菜单（观察本来就不列它），路径第一段与它的标签相同就拒绝；快照里没有菜单栏时也拒绝，因为无法识别它。
+
+未覆盖：Safari 网页 `<select>` 上的 `set_value`（驱动说明里有专门的弹出按钮模式，错误信息提到针对 Safari 的回退）未测，也没有放开；Windows 的 `set_value` 与 `invoke_menu` 只有单元测试，没有在虚拟机里运行；浏览器后端的 `setValue` 由 Chromium 集成测试覆盖。

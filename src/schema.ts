@@ -35,6 +35,10 @@ export const actionSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('navigate'), url: z.url().max(4096) }).strict(),
+  // 整体替换元素的值（文本框、滑块、步进器等），不是在光标处插入。
+  z.object({ type: z.literal('setValue'), elementId: id, value: z.string().max(100_000) }).strict(),
+  // 按菜单名路径调用应用菜单项，如 ["File", "Export", "PDF"]；每段与菜单上显示的名称完全一致。
+  z.object({ type: z.literal('menu'), path: z.array(z.string().trim().min(1).max(200)).min(1).max(16) }).strict(),
 ]);
 export const conditionSchema = z.discriminatedUnion('type', [
   z
@@ -59,9 +63,12 @@ export const conditionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('title'), includes: z.string().min(1).max(1000) }).strict(),
 ]);
 // 观察结果里要包含哪些部分。省略截图或元素只影响返回内容，快照照常可用于后续动作。
+// elementsOnly 不同：根本不抓取截图，更快，但快照只能用于元素动作、输入和按键。
+// screenshot 缺省时按 elementsOnly 取值（默认 true），这样才能识别它与 elementsOnly 的显式冲突。
 const observeParts = {
-  screenshot: z.boolean().default(true),
+  screenshot: z.boolean().optional(),
   elements: z.boolean().default(true),
+  elementsOnly: z.boolean().default(false),
 };
 export const schemas = {
   capabilities: z.object({}).strict(),
@@ -86,7 +93,14 @@ export const schemas = {
         .optional(),
     })
     .strict(),
-  wait: z.object({ sessionId: id, condition: conditionSchema, timeoutMs: z.number().int().min(100).max(30_000).default(10_000) }).strict(),
+  wait: z
+    .object({
+      sessionId: id,
+      condition: conditionSchema,
+      timeoutMs: z.number().int().min(100).max(30_000).default(10_000),
+      elementsOnly: z.boolean().default(false),
+    })
+    .strict(),
   action_status: z.object({ requestId: z.uuid() }).strict(),
   cancel: z.object({ requestId: z.uuid() }).strict(),
 };
@@ -120,9 +134,9 @@ export const descriptions: Record<Method, string> = {
     'Bind a session to an authorized target. Background is the default; foreground is allowed for clients whose pairing included it and may move focus, pointer and keyboard. Exclusive sessions prevent other clients from changing the UI.',
   session_close: 'Release the session, its execution lease and screenshots.',
   observe:
-    'Return a fresh screenshot and semantic elements (role, label, bounds, and value/enabled/selected when readable; password contents are never returned). Coordinates refer to this image; use its snapshotId for the next action. An element keeps its id within the session while its role, label and bounds stay the same. screenshot: false or elements: false omits that part without affecting the snapshot. since: a snapshotId whose elements you already have returns only added or changed elements plus changes.removed; without a changes field the element list is complete.',
-  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Pass observe to receive the next observation in this result (not after an unknown outcome); observe.changes returns only elements changed since the acted snapshot. Execution alone does not imply task success.',
-  wait: 'Wait for an explicit observable condition, with a bounded timeout. Element conditions match label, value or valueIncludes, optionally role, enabled and selected. No fixed sleep or implicit task planning.',
+    'Return a fresh screenshot and semantic elements (role, label, bounds, and value/enabled/selected when readable; password contents are never returned). Coordinates refer to this image; use its snapshotId for the next action. An element keeps its id within the session while its role, label and bounds stay the same. screenshot: false or elements: false omits that part without affecting the snapshot. elementsOnly: true does not capture a screenshot at all, which is faster: the snapshot then supports element actions, typing and keys, but not coordinates, drag or scroll, and elements carry no bounds. Do not combine it with screenshot: true or elements: false. since: a snapshotId whose elements you already have returns only added or changed elements plus changes.removed; without a changes field the element list is complete.',
+  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Pass observe to receive the next observation in this result (not after an unknown outcome); observe.changes returns only elements changed since the acted snapshot, and observe.elementsOnly skips the screenshot as in observe. Without a screenshot-bearing observe, verify polls without capturing screenshots. Besides pointer and keyboard actions, setValue replaces the whole value of a text field, slider or similar element, and menu invokes an application menu item by its path of names, both without moving focus. Execution alone does not imply task success.',
+  wait: 'Wait for an explicit observable condition, with a bounded timeout. Element conditions match label, value or valueIncludes, optionally role, enabled and selected. elementsOnly: true polls and returns without capturing screenshots (faster; the returned snapshot supports element actions, typing and keys only). No fixed sleep or implicit task planning.',
   action_status: 'Read the status of a previous request owned by this client, including uncertain outcomes after disconnects.',
   cancel: 'Cancel a queued or active request. Active cancellation may require a runtime restart to guarantee input has stopped.',
 };

@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   CuError,
   errorResult,
+  hasPixels,
   type Backend,
   type BackendObservation,
   type Bounds,
@@ -31,12 +32,22 @@ type Session = {
   view?: ElementView;
 };
 // elementIds：公开元素 id → 后端元素 id。后端 id 不返回给客户端。
-type Snapshot = { id: string; sessionId: string; createdAt: number; observation: BackendObservation; elementIds: Map<string, string> };
+// pixels：这份快照是否带截图。只取元素的快照（elementsOnly）不能用于坐标动作。
+type Snapshot = {
+  id: string;
+  sessionId: string;
+  createdAt: number;
+  observation: BackendObservation;
+  elementIds: Map<string, string>;
+  pixels: boolean;
+};
 // key 是元素身份（角色、标签、深度、取整后的位置），state 是其值与状态的摘要。
 type ViewEntry = { key: string; state: string; id: string };
 // shown：这次发布是否把元素返回给了客户端。只有客户端见过的元素表才能作为增量的基准。
 type ElementView = { snapshotId: string; shown: boolean; entries: ViewEntry[] };
-type PublishOptions = { screenshot: boolean; elements: boolean; since?: string | undefined };
+type PublishOptions = { screenshot: boolean; elements: boolean; elementsOnly?: boolean; since?: string | undefined };
+// observe 与 act.observe 的原始参数；screenshot 缺省时由 elementsOnly 决定。
+type ObserveRequest = { screenshot?: boolean | undefined; elements: boolean; elementsOnly: boolean; since?: string | undefined };
 type PublicElement = {
   id: string;
   role: string;
@@ -85,9 +96,25 @@ function truncate(text: string, limit: number): string {
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit);
 }
 
+// 把 observe 与 act.observe 的参数换算成发布选项。elementsOnly 不抓取截图，不能再要求返回截图或省略元素。
+function publishOptions(request: ObserveRequest): PublishOptions {
+  if (request.elementsOnly && (request.screenshot === true || !request.elements))
+    throw new CuError(
+      'invalid_request',
+      'elementsOnly returns elements without a screenshot; do not combine it with screenshot: true or elements: false.',
+    );
+  return {
+    screenshot: request.screenshot ?? !request.elementsOnly,
+    elements: request.elements,
+    ...(request.elementsOnly ? { elementsOnly: true } : {}),
+    ...(request.since !== undefined ? { since: request.since } : {}),
+  };
+}
+
 // 返回给客户端的元素：位置取整；只在与默认不同时给出 enabled/selected；与非空标签重复的值不再重复。
 // 空值照常给出：它说明文本框是空的，而没有 value 只说明后端读不到。
-function publicElement(element: Element): Omit<PublicElement, 'id'> {
+// 没有截图的快照里像素位置没有意义，不给出位置。
+function publicElement(element: Element, pixels: boolean): Omit<PublicElement, 'id'> {
   const published: Omit<PublicElement, 'id'> = { role: element.role, label: element.label };
   const { value } = element;
   if (value !== undefined && (value === '' || value !== element.label)) {
@@ -100,7 +127,7 @@ function publicElement(element: Element): Omit<PublicElement, 'id'> {
     published.min = element.min;
     published.max = element.max;
   }
-  if (element.bounds) {
+  if (pixels && element.bounds) {
     const { x, y, width, height } = element.bounds;
     published.bounds = { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
   }
@@ -441,8 +468,13 @@ export class Runtime implements RpcService {
     this.sessions.set(session.id, session);
     return { sessionId: session.id, target, mode: session.mode, exclusive: session.exclusive, expiresAt: session.expiresAt };
   }
+  // 只取元素时才传选项：后端默认带截图，完整观察的调用方式保持不变。
+  private observeBackend(session: Session, elementsOnly: boolean): Promise<BackendObservation> {
+    const backend = this.backend(session.target.kind);
+    return elementsOnly ? backend.observe(session.target, { pixels: false }) : backend.observe(session.target);
+  }
   private async observe(session: Session, options: PublishOptions = FULL, milliseconds = OBSERVE_MS): Promise<Record<string, unknown>> {
-    const observation = await bounded(this.backend(session.target.kind).observe(session.target), milliseconds);
+    const observation = await bounded(this.observeBackend(session, options.elementsOnly === true), milliseconds);
     try {
       return this.publishObservation(session, observation, options);
     } catch (error) {
@@ -457,7 +489,16 @@ export class Runtime implements RpcService {
     this.getSession(client, session.id);
     // Keep one snapshot per session to bound memory and make stale references explicit.
     for (const [id, snap] of this.snapshots) if (snap.sessionId === session.id) this.snapshots.delete(id);
-    const snapshot: Snapshot = { id: randomUUID(), sessionId: session.id, createdAt: this.now(), observation, elementIds: new Map() };
+    // 后端没按要求给出截图时同样视为没有像素，而不是把残缺的几何交给客户端。
+    const pixels = options.elementsOnly !== true && hasPixels(observation);
+    const snapshot: Snapshot = {
+      id: randomUUID(),
+      sessionId: session.id,
+      createdAt: this.now(),
+      observation,
+      elementIds: new Map(),
+      pixels,
+    };
     // 与上一次发布的元素表按身份逐个匹配：身份相同的元素沿用 id；值或状态不同则算作变化。
     // 同一身份出现多次时按出现顺序配对。
     const previous = session.view;
@@ -471,7 +512,7 @@ export class Runtime implements RpcService {
     const elements: PublicElement[] = [];
     const changed: PublicElement[] = [];
     for (const element of observation.elements) {
-      const published = publicElement(element);
+      const published = publicElement(element, pixels);
       const key = JSON.stringify([element.role, element.label, element.depth ?? null, published.bounds ?? null]);
       const state = hash(
         JSON.stringify([
@@ -492,9 +533,14 @@ export class Runtime implements RpcService {
     }
     session.view = { snapshotId: snapshot.id, shown: options.elements, entries };
     this.snapshots.set(snapshot.id, snapshot);
-    const { backendState: _, screenshot, elements: __, ...geometry } = observation;
+    const { backendState: _, screenshot, elements: __, imageWidth, imageHeight, ...geometry } = observation;
     const result: Record<string, unknown> = { snapshotId: snapshot.id, capturedAt: snapshot.createdAt, ...geometry };
-    if (options.screenshot) result.screenshot = screenshot;
+    // 没有截图的快照既没有图像，也没有像素尺寸；客户端据此知道不能用坐标。
+    if (pixels) {
+      result.imageWidth = imageWidth;
+      result.imageHeight = imageHeight;
+      if (options.screenshot) result.screenshot = screenshot;
+    }
     if (options.elements) {
       const unchanged = elements.length - changed.length;
       // 没有任何元素沿用时（例如页面整体跳转），增量不会比完整列表小，直接给完整列表。
@@ -521,16 +567,20 @@ export class Runtime implements RpcService {
       (condition.selected === undefined || element.selected === condition.selected);
     return observation.elements.some(matches) === condition.present;
   }
-  private async waitFor(session: Session, condition: Condition, timeout: number, signal?: AbortSignal): Promise<BackendObservation> {
+  // pixels 为 false 时每次轮询只取元素，不抓截图；条件只看元素和标题，用不到图像。
+  // 满足条件的那次观察会原样交给调用方，所以后续要用到像素的调用方必须让轮询带截图。
+  private async waitFor(
+    session: Session,
+    condition: Condition,
+    timeout: number,
+    signal?: AbortSignal,
+    pixels = true,
+  ): Promise<BackendObservation> {
     const deadline = this.now() + timeout;
     do {
       if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
       try {
-        const observed = await bounded(
-          this.backend(session.target.kind).observe(session.target),
-          Math.max(1, deadline - this.now()),
-          signal,
-        );
+        const observed = await bounded(this.observeBackend(session, !pixels), Math.max(1, deadline - this.now()), signal);
         if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
         if (this.satisfies(observed, condition)) return observed;
       } catch (error) {
@@ -559,6 +609,11 @@ export class Runtime implements RpcService {
       await this.work.get(p.requestId)?.admitted;
       return this.publicRecord(existing);
     }
+    // 附带观察的参数在派发前校验：动作发出之后才发现参数冲突就晚了。
+    const followUp: PublishOptions | undefined = p.observe && {
+      ...publishOptions(p.observe),
+      ...(p.observe.changes ? { since: p.snapshotId } : {}),
+    };
     this.checkRunning();
     const session = this.getSession(client, p.sessionId);
     this.checkLease(session);
@@ -568,7 +623,13 @@ export class Runtime implements RpcService {
       throw new CuError('stale_snapshot', 'Observe this target again before acting.');
     const action = p.action;
     const points = action.type === 'drag' ? action.path : 'point' in action && action.point ? [action.point] : [];
-    if (points.some(point => point.x >= snapshot.observation.imageWidth || point.y >= snapshot.observation.imageHeight))
+    if (!snapshot.pixels && (action.type === 'scroll' || points.length > 0))
+      throw new CuError(
+        'invalid_request',
+        'This snapshot has no screenshot (observed with elementsOnly); observe again without elementsOnly before using coordinates, drag or scroll.',
+      );
+    const observed = snapshot.observation;
+    if (hasPixels(observed) && points.some(point => point.x >= observed.imageWidth || point.y >= observed.imageHeight))
       throw new CuError('invalid_request', 'Coordinates are outside the observed image.');
     const backendElementId = 'elementId' in action && action.elementId ? snapshot.elementIds.get(action.elementId) : undefined;
     if ('elementId' in action && action.elementId && backendElementId === undefined)
@@ -659,7 +720,14 @@ export class Runtime implements RpcService {
         if (execution) record.effect = execution.effect;
         if (p.verify) {
           try {
-            verified = await this.waitFor(session, p.verify, Math.max(1, deadline - this.now()), controller.signal);
+            // 满足条件的那次观察会作为附带观察直接发布；没有附带观察、或附带的只要元素时，轮询用不着截图。
+            verified = await this.waitFor(
+              session,
+              p.verify,
+              Math.max(1, deadline - this.now()),
+              controller.signal,
+              followUp !== undefined && followUp.elementsOnly !== true,
+            );
             record.state = 'verified';
             delete record.error;
           } catch (error) {
@@ -690,8 +758,7 @@ export class Runtime implements RpcService {
       }
       const result = this.publicRecord(record);
       // 结果不确定时不附带观察：Agent 必须先查询状态、有意识地检查目标，而不是顺着新截图继续操作。
-      if (p.observe && record.state !== 'unknown')
-        Object.assign(result, await this.observeAfter(session, p.snapshotId, p.observe, verified, startedAt));
+      if (followUp && record.state !== 'unknown') Object.assign(result, await this.observeAfter(session, followUp, verified, startedAt));
       return result;
     });
     this.queue = work.promise.catch(() => {});
@@ -700,16 +767,10 @@ export class Runtime implements RpcService {
   // 在动作的队列位置内观察，后面排队的动作不会插到动作与观察之间。观察失败不改变动作记录。
   private async observeAfter(
     session: Session,
-    actedSnapshotId: string,
-    options: { screenshot: boolean; elements: boolean; changes: boolean },
+    publish: PublishOptions,
     verified: BackendObservation | undefined,
     startedAt: number,
   ): Promise<{ observation: unknown } | { observationError: { code: string; message: string } }> {
-    const publish: PublishOptions = {
-      screenshot: options.screenshot,
-      elements: options.elements,
-      ...(options.changes ? { since: actedSnapshotId } : {}),
-    };
     try {
       if (this.stopped) throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
       // 验证条件刚刚满足的那次观察就是动作后的最新状态，直接发布，不再重复抓取。
@@ -758,6 +819,8 @@ export class Runtime implements RpcService {
             elementIds: 'stable within a session while role, label and bounds are unchanged',
             valueLimit: VALUE_LIMIT,
             omit: ['screenshot', 'elements'],
+            // 不抓取截图的快照：只能用于元素动作、输入和按键，元素没有位置。
+            elementsOnly: true,
             changesSince: true,
             observeAfterAct: true,
           },
@@ -785,7 +848,8 @@ export class Runtime implements RpcService {
         return { closed: true };
       }
       case 'observe': {
-        const { sessionId, ...options } = schemas.observe.parse(parsed.data);
+        const { sessionId, ...request } = schemas.observe.parse(parsed.data);
+        const options = publishOptions(request);
         return this.observe(this.getSession(client, sessionId), options);
       }
       case 'act':
@@ -793,8 +857,9 @@ export class Runtime implements RpcService {
       case 'wait': {
         const p = schemas.wait.parse(parsed.data);
         const session = this.getSession(client, p.sessionId);
-        const observed = await this.waitFor(session, p.condition, p.timeoutMs);
-        return { state: 'verified', observation: this.publishObservation(session, observed) };
+        const observed = await this.waitFor(session, p.condition, p.timeoutMs, undefined, !p.elementsOnly);
+        const options: PublishOptions = p.elementsOnly ? { screenshot: false, elements: true, elementsOnly: true } : FULL;
+        return { state: 'verified', observation: this.publishObservation(session, observed, options) };
       }
       case 'action_status':
       case 'cancel': {

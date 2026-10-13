@@ -27,13 +27,24 @@ export type Screenshot = { mimeType: 'image/png' | 'image/jpeg'; data: string };
 export type BackendObservation = {
   target: Target;
   bounds: Bounds;
-  imageWidth: number;
-  imageHeight: number;
+  /** 截图的像素尺寸。只取元素的观察没有截图，也就没有它们。 */
+  imageWidth?: number;
+  imageHeight?: number;
   elements: Element[];
   elementsComplete?: boolean;
-  screenshot: Screenshot;
+  /** 只取元素的观察（ObserveOptions.pixels 为 false）不带截图：元素没有像素位置，坐标动作不可用。 */
+  screenshot?: Screenshot;
   // Opaque backend state is never returned to clients.
   backendState?: unknown;
+};
+/** 带截图的观察：像素尺寸、截图三者同在。 */
+export type PixelObservation = BackendObservation & { imageWidth: number; imageHeight: number; screenshot: Screenshot };
+export function hasPixels(observation: BackendObservation): observation is PixelObservation {
+  return observation.screenshot !== undefined && observation.imageWidth !== undefined && observation.imageHeight !== undefined;
+}
+export type ObserveOptions = {
+  /** 为 false 时只取元素，不抓取截图：更快，但这份快照不能用于坐标动作。默认 true。 */
+  pixels?: boolean;
 };
 export type Point = { x: number; y: number };
 export type Action = z.infer<typeof actionSchema>;
@@ -58,7 +69,7 @@ export interface Backend {
   readonly interruptionContained?: boolean;
   doctor(): Promise<Doctor>;
   targets(grant: Grant): Promise<Target[]>;
-  observe(target: Target): Promise<BackendObservation>;
+  observe(target: Target, options?: ObserveOptions): Promise<BackendObservation>;
   validate(observation: BackendObservation): Promise<boolean>;
   act(
     observation: BackendObservation,

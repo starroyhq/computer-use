@@ -1087,6 +1087,331 @@ describe('Cua socket adapter', () => {
     expect(client.callTool).not.toHaveBeenCalled();
   });
 
+  describe('value and menu actions', () => {
+    const signal = () => new AbortController().signal;
+    const frame = { x: 43, y: 0, w: 40, h: 20 };
+    // 菜单栏第一项是系统 Apple 菜单，其后是应用自己的菜单。
+    function withMenuBar(state: WindowStateOutput, systemLabel = 'Apple') {
+      state.elements!.push(
+        { elementIndex: 6n, role: 'AXMenuBar', depth: 0, elementToken: 's1:6' },
+        { elementIndex: 7n, role: 'AXMenuBarItem', depth: 1, elementToken: 's1:7', label: systemLabel, parentIndex: 6n },
+        { elementIndex: 8n, role: 'AXMenuBarItem', depth: 1, elementToken: 's1:8', label: 'File', parentIndex: 6n, frame },
+      );
+    }
+    const sent = (client: ReturnType<typeof fixture>['client']) =>
+      client.callTool.mock.calls.map(([tool, json]) => [tool, JSON.parse(json)] as const);
+
+    it('replaces an element value through set_value without a delivery mode, in either session mode', async () => {
+      const { client, backend } = fixture();
+      for (const mode of ['background', 'foreground'] as const) {
+        client.callTool.mockClear();
+        client.callTool.mockResolvedValueOnce({ ...success(), action: { effect: 0, route: 0 } });
+        const observation = await backend.observe(target);
+        await expect(
+          backend.act(observation, { type: 'setValue', elementId: 's1:1', value: '新的值 🙂' }, mode, signal()),
+        ).resolves.toEqual({
+          effect: 'confirmed',
+        });
+        expect(sent(client)).toEqual([
+          ['set_value', { pid: 42, window_id: 19, session: expect.any(String), element_token: 's1:1', value: '新的值 🙂' }],
+        ]);
+      }
+      // 驱动无法读回值时只是发出，不是确认。
+      client.callTool.mockResolvedValueOnce({ ...success(), action: { effect: 2, route: 0 } });
+      await expect(
+        backend.act(await backend.observe(target), { type: 'setValue', elementId: 's1:1', value: '7' }, 'background', signal()),
+      ).resolves.toEqual({ effect: 'unconfirmed' });
+    });
+
+    it('does not set a value on an element outside the observation, and keeps conservative handling of uncoded failures', async () => {
+      const { client, backend } = fixture();
+      const observation = await backend.observe(target);
+      await expect(
+        backend.act(observation, { type: 'setValue', elementId: 's1:99', value: 'x' }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'stale_snapshot' });
+      expect(client.callTool).not.toHaveBeenCalled();
+      client.callTool.mockResolvedValueOnce({ ...success(), isError: true });
+      await expect(
+        backend.act(observation, { type: 'setValue', elementId: 's1:1', value: 'x' }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'unknown_outcome' });
+    });
+
+    it('refuses pop-up buttons on macOS before dispatch because the driver fails them without an error code', async () => {
+      const { client, backend, state } = fixture();
+      state.elements![0]!.role = 'AXPopUpButton';
+      const observation = await backend.observe(target);
+      await expect(
+        backend.act(observation, { type: 'setValue', elementId: 's1:1', value: 'Medium' }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'invalid_request', message: expect.stringContaining('click it to open') });
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(await backend.validate(observation)).toBe(true);
+    });
+
+    it('invokes an application menu path through invoke_menu without a delivery mode', async () => {
+      const { client, backend, state } = fixture();
+      withMenuBar(state);
+      for (const mode of ['background', 'foreground'] as const) {
+        client.callTool.mockClear();
+        const observation = await backend.observe(target);
+        await expect(backend.act(observation, { type: 'menu', path: ['File', 'Export', 'PDF…'] }, mode, signal())).resolves.toEqual({
+          effect: 'confirmed',
+        });
+        expect(sent(client)).toEqual([
+          ['invoke_menu', { pid: 42, window_id: 19, session: expect.any(String), path: ['File', 'Export', 'PDF…'] }],
+        ]);
+      }
+    });
+
+    it('never invokes the system Apple menu, whatever its label, case or padding', async () => {
+      const { client, backend, state } = fixture();
+      withMenuBar(state, '苹果');
+      const observation = await backend.observe(target);
+      for (const first of ['苹果', ' 苹果 ']) {
+        await expect(backend.act(observation, { type: 'menu', path: [first, 'Shut Down…'] }, 'foreground', signal())).rejects.toMatchObject(
+          { code: 'permission_denied' },
+        );
+      }
+      expect(client.callTool).not.toHaveBeenCalled();
+      // 拒绝发生在派发前，快照仍然可用；应用自己的菜单照常。
+      await expect(backend.act(observation, { type: 'menu', path: ['File', 'Close'] }, 'background', signal())).resolves.toBeDefined();
+      // 大小写不同也一并拒绝。
+      const { client: other, backend: second, state: otherState } = fixture();
+      withMenuBar(otherState, 'Apple');
+      await expect(
+        second.act(await second.observe(target), { type: 'menu', path: ['APPLE', 'Restart…'] }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'permission_denied' });
+      expect(other.callTool).not.toHaveBeenCalled();
+    });
+
+    it('requires a menu bar in the snapshot on macOS so the system menu can be identified', async () => {
+      const { client, backend } = fixture();
+      await expect(
+        backend.act(await backend.observe(target), { type: 'menu', path: ['File', 'Save'] }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'invalid_request', message: expect.stringContaining('menu bar') });
+      expect(client.callTool).not.toHaveBeenCalled();
+    });
+
+    it('reports an unavailable menu path as a definite refusal and keeps the backend usable', async () => {
+      const { client, backend, state } = fixture();
+      withMenuBar(state);
+      client.callTool.mockResolvedValueOnce({
+        ...success(),
+        isError: true,
+        errorCode: 'menu_path_unavailable',
+        structuredJson: JSON.stringify({
+          status: 'refused',
+          refusal: { code: 'menu_path_unavailable', message: 'segment 1 was not found' },
+        }),
+      });
+      const dispatched = vi.fn();
+      await expect(
+        backend.act(await backend.observe(target), { type: 'menu', path: ['File', 'Nope'] }, 'background', signal(), dispatched),
+      ).rejects.toMatchObject({ code: 'not_found', message: expect.stringContaining('nothing was sent') });
+      // 驱动文案可能含界面内容，不转述给客户端。
+      await expect(
+        backend.act(await backend.observe(target), { type: 'menu', path: ['File', 'Nope'] }, 'background', signal()),
+      ).resolves.toBeDefined();
+    });
+
+    it('works on elements-only snapshots and on Windows without the Apple menu rule', async () => {
+      const { client, backend, state } = fixture();
+      withMenuBar(state);
+      client.getWindowState.mockImplementation(async input =>
+        input.includeScreenshot === false ? { ...state, images: [], windowBounds: undefined } : state,
+      );
+      const slim = await backend.observe(target, { pixels: false });
+      await backend.act(slim, { type: 'setValue', elementId: 's1:1', value: 'v' }, 'background', signal());
+      await backend.act(await backend.observe(target, { pixels: false }), { type: 'menu', path: ['File', 'Save'] }, 'background', signal());
+      expect(sent(client).map(([tool]) => tool)).toEqual(['set_value', 'invoke_menu']);
+      const windows = fixture();
+      const backendWin = new CuaBackend(
+        'C:\\Computer Use\\cua-driver.exe',
+        async () => windows.client,
+        'win32',
+        async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+      );
+      const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+      windows.client.listApps.mockResolvedValue({ apps: [{ pid: 42, name: 'Fixture', running: true, active: false }] });
+      // Windows 没有 Apple 菜单，也不要求菜单栏元素出现在快照里；弹出按钮的限制只属于 macOS。
+      windows.state.elements![0]!.role = 'AXPopUpButton';
+      await backendWin.act(await backendWin.observe(windowsTarget), { type: 'menu', path: ['Apple', 'About'] }, 'foreground', signal());
+      await backendWin.act(
+        await backendWin.observe(windowsTarget),
+        { type: 'setValue', elementId: 's1:1', value: 'Medium' },
+        'foreground',
+        signal(),
+      );
+      expect(sent(windows.client).map(([tool, args]) => [tool, 'delivery_mode' in args])).toEqual([
+        ['invoke_menu', false],
+        ['set_value', false],
+      ]);
+    });
+  });
+
+  describe('elements-only observation', () => {
+    // 驱动在只取树的路径上不返回图像和窗口几何。
+    function treeOnly(role = 'button', actions?: string[]) {
+      const value = fixture();
+      Object.assign(value.state.elements![0]!, { role, ...(actions ? { actions } : {}) });
+      value.client.getWindowState.mockImplementation(async input =>
+        input.includeScreenshot === false
+          ? { ...value.state, images: [], windowBounds: undefined, screenshotWidth: undefined, screenshotHeight: undefined }
+          : value.state,
+      );
+      return value;
+    }
+    const signal = () => new AbortController().signal;
+
+    it('asks the driver for the tree only, takes geometry from the window list and returns no pixels', async () => {
+      const { client, backend } = treeOnly();
+      const observation = await backend.observe(target, { pixels: false });
+      // 不重试：没有图像是这条路径的正常结果。
+      expect(client.getWindowState).toHaveBeenCalledTimes(1);
+      expect(client.getWindowState.mock.calls[0]![0]).toMatchObject({
+        pid: 42,
+        windowId: 19n,
+        includeAccessibilityTree: true,
+        includeScreenshot: false,
+      });
+      expect(observation).toMatchObject({
+        target,
+        bounds,
+        elementsComplete: false,
+        elements: [{ id: 's1:1', role: 'button', label: 'Save' }],
+      });
+      for (const field of ['screenshot', 'imageWidth', 'imageHeight']) expect(observation).not.toHaveProperty(field);
+      expect(observation.elements[0]).not.toHaveProperty('bounds');
+      expect(await backend.validate(observation)).toBe(true);
+      // 同一份快照照旧需要窗口几何不变。
+      client.listWindows.mockResolvedValueOnce({
+        windows: [
+          { windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds: { ...bounds, x: bounds.x + 1 }, isOnScreen: true },
+        ],
+      });
+      expect(await backend.validate(observation)).toBe(false);
+    });
+
+    it('reads the geometry before the tree so a window that moves in between is treated as stale', async () => {
+      const { client, backend } = treeOnly();
+      const order: string[] = [];
+      client.listWindows.mockImplementationOnce(async () => {
+        order.push('geometry');
+        return { windows: [{ windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds, isOnScreen: true }] };
+      });
+      client.getWindowState.mockImplementationOnce(async () => {
+        order.push('tree');
+        return { ...fixture().state, images: [], windowBounds: undefined };
+      });
+      await backend.observe(target, { pixels: false });
+      expect(order).toEqual(['geometry', 'tree']);
+    });
+
+    it('does not warm the pointer path, so element actions follow without a capture', async () => {
+      const { client, backend } = treeOnly();
+      const observation = await backend.observe(target, { pixels: false });
+      await expect(backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', signal())).resolves.toEqual({
+        effect: 'confirmed',
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(client.callTool.mock.calls[0]![0]).toBe('click');
+      expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ element_token: 's1:1', delivery_mode: 'background' });
+      // 元素动作之外没有再抓一次图像。
+      expect(client.getWindowState).toHaveBeenCalledTimes(1);
+      const next = await backend.observe(target, { pixels: false });
+      await backend.act(next, { type: 'type', text: '中文', elementId: 's1:1' }, 'background', signal());
+      const again = await backend.observe(target, { pixels: false });
+      await backend.act(again, { type: 'key', keys: ['cmd', 's'] }, 'foreground', signal());
+      expect(client.callTool.mock.calls.map(([tool]) => tool)).toEqual(['click', 'type_text', 'hotkey']);
+    });
+
+    it('refuses coordinates, scrolling and dragging before any driver call and keeps the snapshot usable', async () => {
+      const { client, backend } = treeOnly();
+      const observation = await backend.observe(target, { pixels: false });
+      for (const [action, mode] of [
+        [{ type: 'click', point: { x: 25, y: 50 } }, 'background'],
+        [{ type: 'scroll', direction: 'down', amount: 1, unit: 'line' }, 'background'],
+        [{ type: 'scroll', direction: 'down', amount: 1, unit: 'line', point: { x: 25, y: 50 } }, 'background'],
+        [
+          {
+            type: 'drag',
+            path: [
+              { x: 1, y: 1 },
+              { x: 5, y: 5 },
+            ],
+            durationMs: 200,
+          },
+          'foreground',
+        ],
+      ] as const)
+        await expect(backend.act(observation, action, mode, signal())).rejects.toMatchObject({
+          code: 'invalid_request',
+          message: expect.stringContaining('elementsOnly'),
+        });
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(client.getWindowState).toHaveBeenCalledTimes(1);
+      expect(await backend.validate(observation)).toBe(true);
+    });
+
+    it('refuses to click a text control that needs its pixel position, and still allows typing into it', async () => {
+      const { client, backend } = treeOnly('AXTextField', ['AXShowMenu', 'AXConfirm']);
+      const observation = await backend.observe(target, { pixels: false });
+      await expect(backend.act(observation, { type: 'click', elementId: 's1:1' }, 'background', signal())).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: expect.stringContaining('type into it'),
+      });
+      expect(client.callTool).not.toHaveBeenCalled();
+      await expect(backend.act(observation, { type: 'type', text: 'x', elementId: 's1:1' }, 'background', signal())).resolves.toBeDefined();
+    });
+
+    it('rejects a missing window and a result for another window', async () => {
+      const { client, backend } = treeOnly();
+      client.listWindows.mockResolvedValueOnce({ windows: [] });
+      await expect(backend.observe(target, { pixels: false })).rejects.toMatchObject({ code: 'not_found' });
+      expect(client.getWindowState).not.toHaveBeenCalled();
+      client.getWindowState.mockResolvedValueOnce({ ...fixture().state, images: [], windowId: 20n });
+      await expect(backend.observe(target, { pixels: false })).rejects.toMatchObject({ code: 'stale_snapshot' });
+      // 归属校验与完整观察一致。
+      await expect(backend.observe({ ...target, appId: 'wrong.app' }, { pixels: false })).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('applies the same menu filtering and protected-value rules as a full observation', async () => {
+      const { state, backend } = treeOnly();
+      state.elements = [
+        { elementIndex: 1n, role: 'AXMenuBar', depth: 0, elementToken: 's1:1', label: 'Menu bar' },
+        { elementIndex: 2n, role: 'AXMenuBarItem', depth: 1, elementToken: 's1:2', label: 'Apple', parentIndex: 1n },
+        {
+          elementIndex: 3n,
+          role: 'AXMenuBarItem',
+          depth: 1,
+          elementToken: 's1:3',
+          label: 'File',
+          parentIndex: 1n,
+          frame: { x: 43, y: 0, w: 40, h: 20 },
+        },
+        { elementIndex: 4n, role: 'AXTextField', depth: 0, elementToken: 's1:4', label: 'Secret', value: '\uf79a\uf79a\uf79a' },
+      ];
+      const observation = await backend.observe(target, { pixels: false });
+      expect(observation.elements.map(element => element.label)).toEqual(['Menu bar', 'File', 'Secret']);
+      expect(observation.elements.at(-1)).not.toHaveProperty('value');
+      expect(observation.elementsComplete).toBe(false);
+    });
+
+    it('works the same way on Windows', async () => {
+      const { client } = treeOnly();
+      const backend = new CuaBackend(
+        'C:\\Computer Use\\cua-driver.exe',
+        async () => client,
+        'win32',
+        async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+      );
+      const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+      const observation = await backend.observe(windowsTarget, { pixels: false });
+      expect(client.getWindowState.mock.calls[0]![0]).toMatchObject({ includeScreenshot: false });
+      expect(observation.elements).toHaveLength(1);
+      expect(observation).not.toHaveProperty('screenshot');
+    });
+  });
+
   describe('running application listing', () => {
     const tree = (apps: unknown[]): ToolResult => ({ ...success(), structuredJson: JSON.stringify({ apps, windows: [] }) });
     const running = [

@@ -5,15 +5,19 @@ import { dirname, join } from 'node:path';
 import type { CuaDriverLike, ToolResult, WindowElement, WindowStateOutput } from '@trycua/cua-driver';
 import {
   CuError,
+  hasPixels,
   type Action,
   type Backend,
   type BackendExecution,
   type BackendObservation,
   type Bounds,
   type Doctor,
+  type Element,
   type ErrorCode,
   type Grant,
   type Mode,
+  type ObserveOptions,
+  type PixelObservation,
   type Point,
   type Target,
 } from '../contracts.js';
@@ -86,6 +90,8 @@ function failure(code: unknown, mutation = false): CuError {
     px_capture_unavailable: 'stale_snapshot',
     px_frame_mismatch: 'stale_snapshot',
     px_window_not_found: 'stale_snapshot',
+    // invoke_menu 在派发前的明确拒绝（结构化结果 status: refused）：路径缺失、重名或菜单项不可用。
+    menu_path_unavailable: 'not_found',
   };
   const hints: Record<string, string> = {
     same_pid_keyboard_ambiguity:
@@ -93,6 +99,8 @@ function failure(code: unknown, mutation = false): CuError {
     off_space_or_ax_unresolved: ' The window is on another Space or its accessibility surface is unresolved.',
     minimized_or_hidden_window: ' The window is minimized or hidden; use an element action.',
     px_capture_unavailable: ' No provable pixel frame was available; observe again before a coordinate action.',
+    menu_path_unavailable:
+      ' The menu path was not found, is ambiguous or is disabled, or the window has no accessible menu; nothing was sent. Use the exact names shown in the menus.',
   };
   const mapped = typeof code === 'string' ? known[code] : undefined;
   const driverCode = typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : undefined;
@@ -169,6 +177,18 @@ function withoutHiddenMenus(elements: WindowElement[]): WindowElement[] {
   return elements.filter(element => !excluded.has(element.elementIndex));
 }
 
+// 每个菜单栏的第一项是系统级 Apple 菜单（见上）：它不在观察里，调用菜单也不得绕过去。
+function systemMenuLabels(elements: WindowElement[]): string[] | undefined {
+  const bars = elements.filter(element => element.role === 'AXMenuBar');
+  if (bars.length === 0) return undefined;
+  return bars.flatMap(bar => {
+    const first = elements
+      .filter(element => element.role === 'AXMenuBarItem' && element.parentIndex === bar.elementIndex)
+      .reduce<WindowElement | undefined>((min, element) => (!min || element.elementIndex < min.elementIndex ? element : min), undefined);
+    return first ? [(first.label ?? '').trim().toLowerCase()] : [];
+  });
+}
+
 // 密码类字段的值不进入观察结果，也不参与条件判断，避免 verify/wait 被用来逐次试探内容。
 // 按角色识别；系统常用只含掩码字符的值代替真实内容，这类值同样丢弃，连长度也不透露。
 // 实测 macOS 驱动把安全文本框报告为 AXTextField，值是等长的 U+F79A（系统私用区的掩码字符）。
@@ -184,11 +204,40 @@ function readable(element: WindowElement): { label: string; value?: string } {
   return { label: value !== undefined && label === value ? '' : label };
 }
 
+// 把驱动的元素换成观察里的元素。有截图时带上窗口局部的像素位置，没有截图就不带：位置没有可对照的图像。
+function observedElements(elements: WindowElement[], pixels?: { window: Bounds; width: number; height: number }): Element[] {
+  return elements
+    .filter(element => element.elementToken)
+    .map(element => ({ element, ...readable(element) }))
+    .map(({ element, label, value }) => ({
+      id: element.elementToken!,
+      role: element.role,
+      label,
+      ...(value !== undefined ? { value } : {}),
+      ...(element.enabled !== undefined ? { enabled: element.enabled } : {}),
+      ...(element.selected !== undefined ? { selected: element.selected } : {}),
+      ...(Number.isFinite(element.min) && Number.isFinite(element.max) ? { min: element.min, max: element.max } : {}),
+      depth: element.depth,
+      // AX frames are global logical screen points. Actions and public element
+      // bounds use window-local pixels of this particular (possibly scaled) image.
+      ...(pixels && element.frame
+        ? {
+            bounds: {
+              x: ((element.frame.x - pixels.window.x) * pixels.width) / pixels.window.width,
+              y: ((element.frame.y - pixels.window.y) * pixels.height) / pixels.window.height,
+              width: (element.frame.w * pixels.width) / pixels.window.width,
+              height: (element.frame.h * pixels.height) / pixels.window.height,
+            },
+          }
+        : {}),
+    }));
+}
+
 // Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
 // （开启、关闭两种设置下均实测反向），派发前需交换方向。
 const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
 
-function point(point: Point, observation: BackendObservation): Point {
+function point(point: Point, observation: PixelObservation): Point {
   if (
     !Number.isFinite(point.x) ||
     !Number.isFinite(point.y) ||
@@ -494,8 +543,40 @@ export class CuaBackend implements Backend {
     );
   }
 
-  async observe(target: Target): Promise<BackendObservation> {
+  // 只取元素：不抓取窗口图像，也就没有合并请求时偶发的约 5 秒首帧等待。
+  // 驱动在这条路径上不返回窗口几何，另用 listWindows 取（约 40 毫秒）。
+  private async observeElements(target: Target): Promise<BackendObservation> {
+    const { pid, windowId } = exactTarget(target);
+    // 先取几何再走树：窗口在两者之间移动时，动作前的 validate 会因几何不符判为过期，不会放行前后不一致的快照。
+    const { windows } = await this.read(client => client.listWindows({ pid, onScreenOnly: false }, readOptions()));
+    const window = windows.find(item => item.windowId === windowId && (item.pid === undefined || item.pid === pid));
+    if (!window) throw new CuError('not_found', 'Desktop window no longer exists.');
+    let session = this.session;
+    const state = await this.read(client => {
+      session = this.session;
+      return client.getWindowState(
+        { pid, windowId, session, includeAccessibilityTree: true, includeScreenshot: false },
+        { signal: AbortSignal.timeout(15_000) },
+      );
+    });
+    if (state.pid !== pid || state.windowId !== windowId)
+      throw new CuError('stale_snapshot', 'Desktop observation did not match the requested window.');
+    const elements = this.platform === 'darwin' ? withoutHiddenMenus(state.elements ?? []) : (state.elements ?? []);
+    const observation: BackendObservation = {
+      target: { ...target, title: state.windowTitle ?? target.title },
+      bounds: window.bounds,
+      // 过滤后的树不能再用于证明元素不存在。
+      elementsComplete: state.elementsComplete === true && elements.length === (state.elements ?? []).length,
+      elements: observedElements(elements),
+    };
+    this.states.set(observation, { snapshot: state, session, consumed: false });
+    this.latest.set(this.captureKey(target), observation);
+    return observation;
+  }
+
+  async observe(target: Target, options?: ObserveOptions): Promise<BackendObservation> {
     if (!(await this.owner(target))) throw new CuError('not_found', 'Desktop target is no longer owned by the authorized application.');
+    if (options?.pixels === false) return this.observeElements(target);
     let session = this.session;
     const capture = () =>
       this.read(client => {
@@ -524,31 +605,11 @@ export class CuaBackend implements Backend {
       // 过滤后的树不能再用于证明元素不存在。
       elementsComplete: state.elementsComplete === true && elements.length === (state.elements ?? []).length,
       screenshot: { mimeType: image.mimeType as 'image/png' | 'image/jpeg', data: image.dataBase64 },
-      elements: elements
-        .filter(element => element.elementToken)
-        .map(element => ({ element, ...readable(element) }))
-        .map(({ element, label, value }) => ({
-          id: element.elementToken!,
-          role: element.role,
-          label,
-          ...(value !== undefined ? { value } : {}),
-          ...(element.enabled !== undefined ? { enabled: element.enabled } : {}),
-          ...(element.selected !== undefined ? { selected: element.selected } : {}),
-          ...(Number.isFinite(element.min) && Number.isFinite(element.max) ? { min: element.min, max: element.max } : {}),
-          depth: element.depth,
-          // AX frames are global logical screen points. Actions and public element
-          // bounds use window-local pixels of this particular (possibly scaled) image.
-          ...(element.frame
-            ? {
-                bounds: {
-                  x: ((element.frame.x - state.windowBounds!.x) * state.screenshotWidth!) / state.windowBounds!.width,
-                  y: ((element.frame.y - state.windowBounds!.y) * state.screenshotHeight!) / state.windowBounds!.height,
-                  width: (element.frame.w * state.screenshotWidth!) / state.windowBounds!.width,
-                  height: (element.frame.h * state.screenshotHeight!) / state.windowBounds!.height,
-                },
-              }
-            : {}),
-        })),
+      elements: observedElements(elements, {
+        window: state.windowBounds,
+        width: state.screenshotWidth,
+        height: state.screenshotHeight,
+      }),
     };
     this.states.set(observation, { snapshot: state, session, consumed: false });
     this.latest.set(this.captureKey(target), observation);
@@ -603,6 +664,15 @@ export class CuaBackend implements Backend {
         throw new CuError('stale_snapshot', 'Element does not belong to this observation.');
       return id;
     };
+    // 只取元素的快照没有截图：坐标、拖拽和滚动（默认落在图像中心）都没有可对照的像素。
+    const pixelObservation = (): PixelObservation => {
+      if (!hasPixels(observation))
+        throw new CuError(
+          'invalid_request',
+          'This snapshot has no screenshot; observe again without elementsOnly before using coordinates, drag or scroll.',
+        );
+      return observation;
+    };
     let tool: string;
     let textClickPoint = false;
     switch (action.type) {
@@ -614,7 +684,7 @@ export class CuaBackend implements Backend {
         if (action.elementId && (action.count ?? 1) !== 1)
           throw new CuError('invalid_request', 'Repeated clicks require a screenshot point.');
         tool = 'click';
-        Object.assign(args, action.elementId ? { element_token: element(action.elementId) } : point(action.point!, observation), {
+        Object.assign(args, action.elementId ? { element_token: element(action.elementId) } : point(action.point!, pixelObservation()), {
           button: action.button ?? 'left',
           count: action.count ?? 1,
         });
@@ -630,6 +700,11 @@ export class CuaBackend implements Backend {
             native.actions !== undefined &&
             !native.actions.includes('AXPress')
           ) {
+            if (!hasPixels(observation))
+              throw new CuError(
+                'invalid_request',
+                'Clicking a text control needs a snapshot with a screenshot; observe again without elementsOnly, or type into it with its elementId.',
+              );
             const bounds = observation.elements.find(item => item.id === action.elementId)?.bounds;
             if (
               native.enabled === false ||
@@ -668,24 +743,27 @@ export class CuaBackend implements Backend {
         tool = 'hotkey';
         args.keys = action.keys;
         break;
-      case 'scroll':
+      case 'scroll': {
         if (!Number.isInteger(action.amount) || action.amount < 1 || action.amount > 50)
           throw new CuError('invalid_request', 'Scroll amount must be 1 to 50.');
+        const pixels = pixelObservation();
         tool = 'scroll';
-        Object.assign(args, point(action.point ?? { x: observation.imageWidth / 2, y: observation.imageHeight / 2 }, observation), {
+        Object.assign(args, point(action.point ?? { x: pixels.imageWidth / 2, y: pixels.imageHeight / 2 }, pixels), {
           direction: this.platform === 'darwin' ? reversed[action.direction] : action.direction,
           by: action.unit,
           amount: action.amount,
         });
         break;
+      }
       case 'drag': {
         if (action.path.length !== 2) throw new CuError('invalid_request', 'This desktop driver supports straight two-point drags only.');
         if (!Number.isInteger(action.durationMs) || action.durationMs < 0 || action.durationMs > 10_000)
           throw new CuError('invalid_request', 'Drag duration must be 0 to 10000 milliseconds.');
         if (mode === 'background' && this.platform === 'darwin')
           throw new CuError('background_unavailable', 'Cua Driver 0.28.2 cannot deliver background drags on macOS.');
-        const from = point(action.path[0]!, observation);
-        const to = point(action.path[1]!, observation);
+        const pixels = pixelObservation();
+        const from = point(action.path[0]!, pixels);
+        const to = point(action.path[1]!, pixels);
         tool = 'drag';
         Object.assign(args, {
           from_x: from.x,
@@ -696,6 +774,34 @@ export class CuaBackend implements Backend {
           button: action.button ?? 'left',
           modifier: action.modifiers ?? [],
         });
+        break;
+      }
+      case 'setValue': {
+        const token = element(action.elementId);
+        // set_value 对 AXPopUpButton 靠子选项工作；驱动 0.28.2 在原生弹出按钮没有 AX 子项时返回无错误码的失败，
+        // 无法证明输入没有发出，会被记为结果不确定并停机，所以派发前就拒绝这一类元素。
+        if (this.platform === 'darwin' && state.snapshot.elements?.find(item => item.elementToken === token)?.role === 'AXPopUpButton')
+          throw new CuError(
+            'invalid_request',
+            'Pop-up buttons cannot be set directly; click it to open the list, observe, then click the option.',
+          );
+        tool = 'set_value';
+        // set_value 与 invoke_menu 都走辅助功能接口，没有投递方式参数，也不会移动焦点。
+        delete args.delivery_mode;
+        args.element_token = token;
+        args.value = action.value;
+        break;
+      }
+      case 'menu': {
+        if (this.platform === 'darwin') {
+          const system = systemMenuLabels(state.snapshot.elements ?? []);
+          if (!system) throw new CuError('invalid_request', 'This snapshot has no application menu bar; observe the window again.');
+          if (system.includes(action.path[0]!.trim().toLowerCase()))
+            throw new CuError('permission_denied', 'The system (Apple) menu is not available to agents.');
+        }
+        tool = 'invoke_menu';
+        delete args.delivery_mode;
+        args.path = action.path;
         break;
       }
       case 'navigate':

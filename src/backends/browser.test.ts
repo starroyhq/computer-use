@@ -107,6 +107,24 @@ describe('isolated Chromium backend', () => {
     }
   });
 
+  it('observes elements without a screenshot or element bounds and still acts on them', async () => {
+    const full = await backend.observe(target);
+    expect(full.screenshot).toBeDefined();
+    expect(full.imageWidth).toBe(full.bounds.width);
+    expect(full.elements.every(item => item.bounds !== undefined)).toBe(true);
+    const slim = await backend.observe(target, { pixels: false });
+    for (const field of ['screenshot', 'imageWidth', 'imageHeight'] as const) expect(slim[field]).toBeUndefined();
+    expect(slim.bounds).toEqual(full.bounds);
+    expect(slim.elements.map(item => item.label)).toEqual(full.elements.map(item => item.label));
+    expect(slim.elements.some(item => item.bounds !== undefined)).toBe(false);
+    // 没有截图的快照照常通过校验，元素动作和输入可用。
+    expect(await backend.validate(slim)).toBe(true);
+    await act(slim, { type: 'type', text: '新的', elementId: element(slim, 'Name') });
+    const next = await backend.observe(target, { pixels: false });
+    await act(next, { type: 'click', elementId: element(next, 'Save') });
+    expect((await backend.observe(target, { pixels: false })).target.title).toBe('Saved 新的已有');
+  });
+
   it('wait retries transient stale snapshots while a loading page settles', async () => {
     const runtime = new Runtime({ dataDir: join(directory, 'runtime'), backends: [backend], emit: () => {} });
     await runtime.start();
@@ -171,6 +189,37 @@ describe('isolated Chromium backend', () => {
     const updated = await backend.observe(target);
     // 与上面的中文输入用例一致：聚焦后光标位于开头。
     expect(updated.elements.find(item => item.label === 'Nickname')).toMatchObject({ value: '已改初始' });
+  });
+
+  it('replaces text and chooses list options with setValue, and refuses everything else without changing the page', async () => {
+    await act(await backend.observe(target), { type: 'navigate', url: `${url}/form` });
+    const read = async (label: string) => (await backend.observe(target)).elements.find(item => item.label === label)!;
+    const set = async (label: string, value: string) => {
+      const observation = await backend.observe(target);
+      await act(observation, { type: 'setValue', elementId: element(observation, label), value });
+    };
+    // 整体替换，而不是在光标处插入。
+    await set('Nickname', '全新');
+    expect(await read('Nickname')).toMatchObject({ value: '全新' });
+    await set('Notes', '甲\n乙');
+    expect(await read('Notes')).toMatchObject({ value: '甲\n乙' });
+    await set('Nickname', '');
+    expect(await read('Nickname')).toMatchObject({ value: '' });
+    // 列表按可见文字或值匹配，忽略大小写和首尾空白。
+    expect(await read('Size')).toMatchObject({ value: 'Large' });
+    await set('Size', ' small ');
+    expect(await read('Size')).toMatchObject({ value: 'Small' });
+    // 找不到选项、不是文本框或列表、桌面菜单：都没有任何改动。
+    const observation = await backend.observe(target);
+    for (const [label, value, code] of [
+      ['Size', 'Huge', 'not_found'],
+      ['Subscribe', 'on', 'invalid_request'],
+      ['Locked', 'x', 'invalid_request'],
+    ] as const)
+      await expect(act(observation, { type: 'setValue', elementId: element(observation, label), value })).rejects.toMatchObject({ code });
+    await expect(act(observation, { type: 'menu', path: ['File', 'Save'] })).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(await backend.validate(observation)).toBe(true);
+    expect(await read('Size')).toMatchObject({ value: 'Small' });
   });
 
   it('rejects old references after DOM replacement and navigation', async () => {
