@@ -11,6 +11,11 @@ export const actionSchema = z.discriminatedUnion('type', [
       point: point.optional(),
       button: z.enum(['left', 'right']).optional(),
       count: z.number().int().min(1).max(2).optional(),
+      // 按住的修饰键（cmd 是 macOS 的 Command，option 与 alt 等价；Windows 没有 cmd）。桌面上只能在前台会话里发出。
+      modifiers: z
+        .array(z.enum(['cmd', 'shift', 'option', 'alt', 'ctrl']))
+        .max(4)
+        .optional(),
     })
     .strict()
     .refine(v => Boolean(v.elementId) !== Boolean(v.point), 'Choose exactly one click target'),
@@ -135,7 +140,7 @@ export const descriptions: Record<Method, string> = {
   session_close: 'Release the session, its execution lease and screenshots.',
   observe:
     'Return a fresh screenshot and semantic elements (role, label, bounds, and value/enabled/selected when readable; password contents are never returned). Coordinates refer to this image; use its snapshotId for the next action. An element keeps its id within the session while its role, label and bounds stay the same. screenshot: false or elements: false omits that part without affecting the snapshot. elementsOnly: true does not capture a screenshot at all, which is faster: the snapshot then supports element actions, typing and keys, but not coordinates, drag or scroll, and elements carry no bounds. Do not combine it with screenshot: true or elements: false. since: a snapshotId whose elements you already have returns only added or changed elements plus changes.removed; without a changes field the element list is complete.',
-  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Pass observe to receive the next observation in this result (not after an unknown outcome); observe.changes returns only elements changed since the acted snapshot, and observe.elementsOnly skips the screenshot as in observe. Without a screenshot-bearing observe, verify polls without capturing screenshots. Besides pointer and keyboard actions, setValue replaces the whole value of a text field, slider or similar element, and menu invokes an application menu item by its path of names, both without moving focus. Execution alone does not imply task success.',
+  act: 'Execute one bounded action using a recent snapshot. requestId is a UUID for deduplication; query status instead of repeating an uncertain operation. timeoutMs bounds dispatch and verification together; input already dispatched gets up to 5 more seconds to finish. An action still queued after 15 seconds is cancelled without dispatch. Pass observe to receive the next observation in this result (not after an unknown outcome); observe.changes returns only elements changed since the acted snapshot, and observe.elementsOnly skips the screenshot as in observe. Without a screenshot-bearing observe, verify polls without capturing screenshots. Besides pointer and keyboard actions (a click may hold modifiers, which on the desktop needs a foreground session), setValue replaces the whole value of a text field, slider or similar element, and menu invokes an application menu item by its path of names, both without moving focus. Execution alone does not imply task success.',
   wait: 'Wait for an explicit observable condition, with a bounded timeout. Element conditions match label, value or valueIncludes, optionally role, enabled and selected. elementsOnly: true polls and returns without capturing screenshots (faster; the returned snapshot supports element actions, typing and keys only). No fixed sleep or implicit task planning.',
   action_status: 'Read the status of a previous request owned by this client, including uncertain outcomes after disconnects.',
   cancel: 'Cancel a queued or active request. Active cancellation may require a runtime restart to guarantee input has stopped.',

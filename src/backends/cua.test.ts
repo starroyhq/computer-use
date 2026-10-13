@@ -141,19 +141,27 @@ describe('Cua socket adapter', () => {
         { pid: 101, name: 'Stopped', running: false, active: false, bundleId: 'stopped.app' },
       ],
     });
-    client.listWindows.mockImplementation(async ({ pid }) => ({
-      windows: [
-        { windowId: 19n, pid, appName: 'App', title: 'Window', bounds, isOnScreen: true },
-        { windowId: 20n, pid: 777, appName: 'Wrong owner', title: 'Window', bounds, isOnScreen: true },
-      ],
-    }));
+    // 授权全部应用时一次取全部窗口，再按应用分组：没有 pid 的窗口、属于列表之外进程的窗口、
+    // 没有身份或已退出的应用的窗口，都不成为目标。
+    const window = (windowId: bigint, pid: number | undefined) => ({
+      windowId,
+      ...(pid === undefined ? {} : { pid }),
+      appName: 'App',
+      title: 'Window',
+      bounds,
+      isOnScreen: true,
+    });
+    client.listWindows.mockResolvedValue({
+      windows: [window(19n, 42), window(19n, 99), window(21n, undefined), window(20n, 777), window(22n, 100), window(23n, 101)],
+    });
     expect(await backend.targets({ appIds: [], browser: false })).toEqual([]);
     expect(client.listApps).not.toHaveBeenCalled();
     expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([
       { ...target, title: 'Window' },
       { ...target, id: 'desktop:99:19', appId: 'other.app', pid: 99, title: 'Window' },
     ]);
-    expect(client.listWindows).toHaveBeenCalledTimes(2);
+    expect(client.listWindows).toHaveBeenCalledTimes(1);
+    expect(client.listWindows.mock.calls[0]![0]).toEqual({ onScreenOnly: false });
     expect(client.callTool).not.toHaveBeenCalled();
     expect(await backend.observe(target)).toMatchObject({ target });
     await expect(backend.observe({ ...target, appId: 'wrong.app' })).rejects.toMatchObject({ code: 'not_found' });
@@ -1087,6 +1095,134 @@ describe('Cua socket adapter', () => {
     expect(client.callTool).not.toHaveBeenCalled();
   });
 
+  describe('clicks with modifier keys', () => {
+    const signal = () => new AbortController().signal;
+    // 元素窗口局部像素中心为 (140, 70)，与文本框点击用例的几何一致。
+    function inside(value = fixture()) {
+      Object.assign(value.state.elements![0]!, { frame: { x: 30, y: 40, w: 100, h: 30 } });
+      return value;
+    }
+    const args = (client: ReturnType<typeof fixture>['client']) => JSON.parse(client.callTool.mock.calls.at(-1)![1]);
+
+    it('holds the modifiers for a pixel click in a foreground session and names them the way the driver does', async () => {
+      const { client, backend } = inside();
+      await backend.act(
+        await backend.observe(target),
+        { type: 'click', point: { x: 25, y: 50 }, button: 'right', count: 2, modifiers: ['cmd', 'shift', 'option', 'ctrl'] },
+        'foreground',
+        signal(),
+      );
+      expect(client.callTool.mock.calls.at(-1)![0]).toBe('click');
+      expect(args(client)).toMatchObject({
+        x: 25,
+        y: 50,
+        button: 'right',
+        count: 2,
+        delivery_mode: 'foreground',
+        modifier: ['cmd', 'shift', 'option', 'ctrl'],
+      });
+      expect(args(client)).not.toHaveProperty('element_token');
+      // 没有修饰键时仍不带这个参数。
+      await backend.act(await backend.observe(target), { type: 'click', point: { x: 25, y: 50 } }, 'foreground', signal());
+      expect(args(client)).not.toHaveProperty('modifier');
+    });
+
+    it('refuses modifier clicks in a background session before any driver call and keeps the snapshot', async () => {
+      const { client, backend } = inside();
+      const observation = await backend.observe(target);
+      for (const click of [
+        { type: 'click', point: { x: 25, y: 50 }, modifiers: ['shift'] },
+        { type: 'click', elementId: 's1:1', modifiers: ['cmd'] },
+      ] as const)
+        await expect(backend.act(observation, click, 'background', signal())).rejects.toMatchObject({
+          code: 'background_unavailable',
+          message: expect.stringContaining('foreground session'),
+        });
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(await backend.validate(observation)).toBe(true);
+    });
+
+    it('clicks the centre of an element with modifiers through the pixel route', async () => {
+      const { client, backend } = inside();
+      await backend.act(await backend.observe(target), { type: 'click', elementId: 's1:1', modifiers: ['cmd'] }, 'foreground', signal());
+      expect(args(client)).toMatchObject({ x: 140, y: 70, delivery_mode: 'foreground', modifier: ['cmd'] });
+      expect(args(client)).not.toHaveProperty('element_token');
+    });
+
+    it('refuses an element that has no usable pixel position, or no screenshot, before dispatch', async () => {
+      const covered = fixture(); // 默认元素位置落在窗口外
+      const observation = await covered.backend.observe(target);
+      await expect(
+        covered.backend.act(observation, { type: 'click', elementId: 's1:1', modifiers: ['shift'] }, 'foreground', signal()),
+      ).rejects.toMatchObject({ code: 'background_unavailable' });
+      const disabled = inside();
+      disabled.state.elements![0]!.enabled = false;
+      await expect(
+        disabled.backend.act(
+          await disabled.backend.observe(target),
+          { type: 'click', elementId: 's1:1', modifiers: ['shift'] },
+          'foreground',
+          signal(),
+        ),
+      ).rejects.toMatchObject({ code: 'background_unavailable' });
+      const slim = inside();
+      slim.client.getWindowState.mockImplementation(async input =>
+        input.includeScreenshot === false ? { ...slim.state, images: [], windowBounds: undefined } : slim.state,
+      );
+      await expect(
+        slim.backend.act(
+          await slim.backend.observe(target, { pixels: false }),
+          { type: 'click', elementId: 's1:1', modifiers: ['shift'] },
+          'foreground',
+          signal(),
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_request', message: expect.stringContaining('screenshot') });
+      for (const value of [covered, disabled, slim]) expect(value.client.callTool).not.toHaveBeenCalled();
+    });
+
+    it('does not dispatch when the window geometry changes during the pointer warm-up', async () => {
+      vi.useFakeTimers();
+      try {
+        const { client, backend } = inside();
+        const observation = await backend.observe(target);
+        await vi.advanceTimersByTimeAsync(1_000);
+        client.getWindowState.mockResolvedValueOnce({ ...fixture().state, screenshotWidth: 1200 });
+        await expect(
+          backend.act(observation, { type: 'click', elementId: 's1:1', modifiers: ['cmd'] }, 'foreground', signal()),
+        ).rejects.toMatchObject({ code: 'stale_snapshot' });
+        expect(client.callTool).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses the pixel route in foreground on Windows, maps option to alt and has no cmd', async () => {
+      const { client, state } = inside();
+      const backend = new CuaBackend(
+        'C:\\Computer Use\\cua-driver.exe',
+        async () => client,
+        'win32',
+        async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+      );
+      const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+      state.elements![0]!.role = 'Button';
+      await backend.act(
+        await backend.observe(windowsTarget),
+        { type: 'click', elementId: 's1:1', modifiers: ['ctrl', 'option'] },
+        'foreground',
+        signal(),
+      );
+      expect(args(client)).toMatchObject({ x: 140, y: 70, delivery_mode: 'foreground', modifier: ['ctrl', 'alt'] });
+      expect(args(client)).not.toHaveProperty('element_token');
+      await expect(
+        backend.act(await backend.observe(windowsTarget), { type: 'click', elementId: 's1:1', modifiers: ['cmd'] }, 'foreground', signal()),
+      ).rejects.toMatchObject({ code: 'invalid_request', message: expect.stringContaining('ctrl') });
+      // 没有修饰键时 Windows 元素点击照旧走后台语义路径。
+      await backend.act(await backend.observe(windowsTarget), { type: 'click', elementId: 's1:1' }, 'foreground', signal());
+      expect(args(client)).toMatchObject({ element_token: 's1:1', delivery_mode: 'background' });
+    });
+  });
+
   describe('value and menu actions', () => {
     const signal = () => new AbortController().signal;
     const frame = { x: 43, y: 0, w: 40, h: 20 };
@@ -1410,6 +1546,47 @@ describe('Cua socket adapter', () => {
       expect(observation.elements).toHaveLength(1);
       expect(observation).not.toHaveProperty('screenshot');
     });
+  });
+
+  it('says why a window is off screen when listing targets, and does not carry that into observations', async () => {
+    const { client, backend, state } = fixture();
+    state.windowTitle = 'Live title';
+    const window = (windowId: bigint, extra: Record<string, unknown>) => ({
+      windowId,
+      pid: 42,
+      appName: 'Fixture',
+      title: `Window ${windowId}`,
+      bounds,
+      isOnScreen: false,
+      ...extra,
+    });
+    client.listWindows.mockResolvedValue({
+      windows: [
+        { ...window(19n, {}), isOnScreen: true, onCurrentSpace: true },
+        window(20n, { minimized: true, onCurrentSpace: false }),
+        window(21n, { onCurrentSpace: false }),
+        window(22n, { onCurrentSpace: true }),
+        window(23n, {}),
+      ],
+    });
+    const listed = await backend.targets({ appIds: ['test.fixture'], browser: false });
+    expect(listed.map(item => [item.windowId, item.offScreen])).toEqual([
+      [19, undefined],
+      [20, 'minimized'],
+      [21, 'other-space'],
+      [22, 'not-visible'],
+      [23, 'not-visible'],
+    ]);
+    expect(listed[0]).not.toHaveProperty('offScreen');
+    // 列出时的状态此后可能不成立：观察里的目标不带它，仍取实时标题。
+    client.listWindows.mockResolvedValue({
+      windows: [{ windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds, isOnScreen: true }],
+    });
+    for (const options of [undefined, { pixels: false }]) {
+      const observation = await backend.observe({ ...listed[1]!, windowId: 19, id: 'desktop:42:19' }, options);
+      expect(observation.target).not.toHaveProperty('offScreen');
+      expect(observation.target).toMatchObject({ pid: 42, windowId: 19, title: 'Live title' });
+    }
   });
 
   describe('running application listing', () => {

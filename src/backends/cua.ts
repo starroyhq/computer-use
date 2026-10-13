@@ -138,6 +138,12 @@ function exactTarget(target: Target): { pid: number; windowId: bigint } {
   return { pid: target.pid!, windowId: BigInt(target.windowId!) };
 }
 
+// 观察里的目标取实时标题；列出目标时记下的 offScreen 此后可能已不成立，不带进观察。
+function observedTarget(target: Target, title: string | undefined): Target {
+  const { offScreen: _, ...current } = target;
+  return { ...current, title: title ?? target.title };
+}
+
 function sameBounds(a: Bounds, b: Bounds): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
@@ -505,16 +511,31 @@ export class CuaBackend implements Backend {
       if (!cached) this.rememberApps(apps);
       const nativePaths =
         this.platform === 'win32' ? await this.processPaths(apps.filter(app => app.running).map(app => app.pid)) : undefined;
+      // 授权全部应用时没有什么要在枚举前过滤：一次取全部窗口再按应用分组。逐个应用调用 list_windows 每次约 45 毫秒，
+      // 20 个应用累计约 1 秒（实测 144 个窗口 0.93–1.07 秒）。显式应用清单仍逐个应用枚举，不读清单之外的窗口。
+      const everyWindow =
+        this.platform === 'darwin' && grant.allApps === true
+          ? (await client.listWindows({ onScreenOnly: false }, readOptions())).windows
+          : undefined;
       const targets: Target[] = [];
       for (const app of apps) {
         const appId = this.platform === 'win32' ? windowsAppId(nativePaths?.get(app.pid)) : app.bundleId;
         if (this.platform === 'win32' && app.launchPath && windowsAppId(app.launchPath) !== appId) continue;
         if (!app.running || !appId || (grant.allApps !== true && !grant.appIds.includes(appId))) continue;
-        const { windows } = await client.listWindows({ pid: app.pid, onScreenOnly: false }, readOptions());
+        const windows = everyWindow
+          ? everyWindow.filter(item => item.pid === app.pid)
+          : (await client.listWindows({ pid: app.pid, onScreenOnly: false }, readOptions())).windows;
         for (const window of windows) {
           if (window.pid !== undefined && window.pid !== app.pid) continue;
           const windowId = Number(window.windowId);
           if (!Number.isSafeInteger(windowId) || windowId <= 0) continue;
+          const offScreen = window.isOnScreen
+            ? undefined
+            : window.minimized
+              ? 'minimized'
+              : window.onCurrentSpace === false
+                ? 'other-space'
+                : 'not-visible';
           targets.push({
             id: `desktop:${app.pid}:${window.windowId}`,
             kind: 'desktop',
@@ -522,6 +543,7 @@ export class CuaBackend implements Backend {
             title: window.title,
             pid: app.pid,
             windowId,
+            ...(offScreen ? { offScreen } : {}),
           });
         }
       }
@@ -563,7 +585,7 @@ export class CuaBackend implements Backend {
       throw new CuError('stale_snapshot', 'Desktop observation did not match the requested window.');
     const elements = this.platform === 'darwin' ? withoutHiddenMenus(state.elements ?? []) : (state.elements ?? []);
     const observation: BackendObservation = {
-      target: { ...target, title: state.windowTitle ?? target.title },
+      target: observedTarget(target, state.windowTitle),
       bounds: window.bounds,
       // 过滤后的树不能再用于证明元素不存在。
       elementsComplete: state.elementsComplete === true && elements.length === (state.elements ?? []).length,
@@ -598,7 +620,7 @@ export class CuaBackend implements Backend {
     }
     const elements = this.platform === 'darwin' ? withoutHiddenMenus(state.elements ?? []) : (state.elements ?? []);
     const observation: BackendObservation = {
-      target: { ...target, title: state.windowTitle ?? target.title },
+      target: observedTarget(target, state.windowTitle),
       bounds: state.windowBounds,
       imageWidth: state.screenshotWidth,
       imageHeight: state.screenshotHeight,
@@ -676,20 +698,58 @@ export class CuaBackend implements Backend {
     let tool: string;
     let textClickPoint = false;
     switch (action.type) {
-      case 'click':
+      case 'click': {
         if (Boolean(action.elementId) === Boolean(action.point))
           throw new CuError('invalid_request', 'Click requires exactly one element or point.');
         if (action.count !== undefined && (!Number.isInteger(action.count) || action.count < 1 || action.count > 3))
           throw new CuError('invalid_request', 'Click count must be 1 to 3.');
         if (action.elementId && (action.count ?? 1) !== 1)
           throw new CuError('invalid_request', 'Repeated clicks require a screenshot point.');
+        const modifiers = action.modifiers ?? [];
+        if (modifiers.length > 0) {
+          // 驱动只在前台投递时才把修饰键交给系统（后台没有真实的修饰键状态可带），所以后台会话不发出这类点击。
+          if (mode !== 'foreground')
+            throw new CuError(
+              'background_unavailable',
+              'A click with modifier keys needs a foreground session: modifier keys cannot be held in the background.',
+            );
+          if (this.platform === 'win32' && modifiers.includes('cmd'))
+            throw new CuError('invalid_request', 'The cmd modifier does not exist on Windows; use ctrl.');
+        }
         tool = 'click';
+        // 元素换成它的中心像素：文本框没有 AXPress 时走像素路径；带修饰键的点击也只能走像素路径。
+        const pixelRoute = (missing: string, what: string): Point => {
+          if (!hasPixels(observation)) throw new CuError('invalid_request', missing);
+          const bounds = observation.elements.find(item => item.id === action.elementId)?.bounds;
+          if (
+            !bounds ||
+            ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) ||
+            bounds.width <= 0 ||
+            bounds.height <= 0 ||
+            bounds.x < 0 ||
+            bounds.y < 0 ||
+            bounds.x + bounds.width > observation.imageWidth ||
+            bounds.y + bounds.height > observation.imageHeight
+          )
+            throw new CuError('background_unavailable', `${what} has no enabled, fully visible click target in this snapshot.`);
+          return point({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, observation);
+        };
+        const native = action.elementId ? state.snapshot.elements?.find(item => item.elementToken === action.elementId) : undefined;
         Object.assign(args, action.elementId ? { element_token: element(action.elementId) } : point(action.point!, pixelObservation()), {
           button: action.button ?? 'left',
           count: action.count ?? 1,
         });
-        if (this.platform === 'darwin' && action.elementId && (action.button ?? 'left') === 'left') {
-          const native = state.snapshot.elements?.find(item => item.elementToken === action.elementId);
+        if (action.elementId && modifiers.length > 0) {
+          if (native?.enabled === false)
+            throw new CuError('background_unavailable', 'Element has no enabled, fully visible click target in this snapshot.');
+          const center = pixelRoute(
+            'Clicking an element with modifier keys needs a snapshot with a screenshot; observe again without elementsOnly.',
+            'Element',
+          );
+          delete args.element_token;
+          Object.assign(args, center);
+          textClickPoint = true;
+        } else if (this.platform === 'darwin' && action.elementId && (action.button ?? 'left') === 'left') {
           // Addressable text controls need not implement AXPress (AppKit's
           // NSTextField exposes AXConfirm/AXShowMenu instead). Choose the
           // driver's exact-window pixel route BEFORE dispatch, never retry an
@@ -700,34 +760,24 @@ export class CuaBackend implements Backend {
             native.actions !== undefined &&
             !native.actions.includes('AXPress')
           ) {
-            if (!hasPixels(observation))
-              throw new CuError(
-                'invalid_request',
-                'Clicking a text control needs a snapshot with a screenshot; observe again without elementsOnly, or type into it with its elementId.',
-              );
-            const bounds = observation.elements.find(item => item.id === action.elementId)?.bounds;
-            if (
-              native.enabled === false ||
-              !bounds ||
-              ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) ||
-              bounds.width <= 0 ||
-              bounds.height <= 0 ||
-              bounds.x < 0 ||
-              bounds.y < 0 ||
-              bounds.x + bounds.width > observation.imageWidth ||
-              bounds.y + bounds.height > observation.imageHeight
-            )
+            if (native.enabled === false)
               throw new CuError('background_unavailable', 'Text control has no enabled, fully visible click target in this snapshot.');
+            const center = pixelRoute(
+              'Clicking a text control needs a snapshot with a screenshot; observe again without elementsOnly, or type into it with its elementId.',
+              'Text control',
+            );
             delete args.element_token;
-            Object.assign(args, point({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, observation));
+            Object.assign(args, center);
             textClickPoint = true;
           }
         }
+        if (modifiers.length > 0) args.modifier = modifiers.map(name => (this.platform === 'win32' && name === 'option' ? 'alt' : name));
         // Cua's Windows foreground element path forces SendInput, which
         // intermittently failed on WPF controls. Its background path tries
         // UIA semantic patterns before coordinate delivery.
-        if (this.platform === 'win32' && action.elementId) args.delivery_mode = 'background';
+        if (this.platform === 'win32' && action.elementId && modifiers.length === 0) args.delivery_mode = 'background';
         break;
+      }
       case 'type':
         tool = 'type_text';
         args.text = action.text;

@@ -109,7 +109,7 @@ Add the TOML from `config codex` to Codex's `~/.codex/config.toml` and reload MC
 | Capability | How it works |
 | --- | --- |
 | **Observe the desktop** | List windows, capture screenshots and read accessibility elements so the Agent can act on the actual interface |
-| **Operate applications** | Click, type, send hotkeys, scroll and drag in a straight line; support depends on the platform and control |
+| **Operate applications** | Click (with modifier keys in a foreground session), type, set a value, invoke menu commands, send hotkeys, scroll and drag in a straight line; support depends on the platform and control |
 | **Run in the background** | Background mode is the default; complete packages can start the service on the first actual CLI / stdio MCP call |
 | **Connect your existing Agent** | Use a Skill, stdio MCP or the standalone CLI; local HTTP MCP is optional |
 | **Use a separate browser** | Control isolated headless Chromium through Playwright with a separate grant, without inheriting your everyday browser's login state |

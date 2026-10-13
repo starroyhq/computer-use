@@ -17,6 +17,7 @@ const fixture = `<!doctype html><html><head><title>Fixture</title></head><body>
 <button id="submit" onclick="document.title='Saved '+document.querySelector('#name').value">Save</button>
 <button onclick="document.querySelector('#submit').outerHTML='<button>Replacement</button>'">Replace</button>
 <button onclick="alert('Test');document.title='Dialog dismissed'">Dialog</button>
+<button onclick="document.title='Mods '+[event.shiftKey&&'shift',event.ctrlKey&&'ctrl',event.altKey&&'alt',event.metaKey&&'meta'].filter(Boolean).join('+')">Mods</button>
 <a href="/popup" target="_blank">Popup</a>
 <a href="/download" download="sample.txt">Download</a>
 <div role="slider" aria-label="Drag surface" style="width:300px;height:60px;background:#eee;touch-action:none" onpointerdown="this.setPointerCapture(event.pointerId)" onpointerup="document.title='Dragged '+Math.round(event.clientX)"></div>
@@ -189,6 +190,23 @@ describe('isolated Chromium backend', () => {
     const updated = await backend.observe(target);
     // 与上面的中文输入用例一致：聚焦后光标位于开头。
     expect(updated.elements.find(item => item.label === 'Nickname')).toMatchObject({ value: '已改初始' });
+  });
+
+  it('clicks with modifier keys held for element and point clicks, and releases them afterwards', async () => {
+    const observation = await backend.observe(target);
+    await act(observation, { type: 'click', elementId: element(observation, 'Mods'), modifiers: ['shift', 'cmd'] });
+    expect((await backend.observe(target)).target.title).toBe('Mods shift+meta');
+    // 点坐标同样带修饰键；修饰键点完即放开，随后的普通点击不再带着它们。
+    const next = await backend.observe(target);
+    const bounds = next.elements.find(item => item.label === 'Mods')!.bounds!;
+    const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    // 不用 ctrl：macOS 上的 Chromium 把 Ctrl 加点击当作右键，只触发 contextmenu。
+    await act(next, { type: 'click', point, modifiers: ['option', 'shift'] });
+    expect((await backend.observe(target)).target.title).toBe('Mods shift+alt');
+    const plain = await backend.observe(target);
+    await act(plain, { type: 'click', elementId: element(plain, 'Mods') });
+    // 浏览器会去掉标题末尾的空白。
+    expect((await backend.observe(target)).target.title).toBe('Mods');
   });
 
   it('replaces text and chooses list options with setValue, and refuses everything else without changing the page', async () => {

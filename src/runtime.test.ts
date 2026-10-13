@@ -1211,6 +1211,25 @@ describe('Runtime authorization and execution', () => {
     });
   });
 
+  it('accepts click modifiers by name and rejects unknown names or more than four', async () => {
+    const { token } = await pair(),
+      { sessionId } = await session(token);
+    const run = async (modifiers: unknown) => {
+      const snapshot = await call<Published>(token, 'observe', { sessionId });
+      return call<{ state: string }>(token, 'act', {
+        sessionId,
+        snapshotId: snapshot.snapshotId,
+        requestId: randomUUID(),
+        action: { type: 'click', point: { x: 10, y: 10 }, modifiers },
+        timeoutMs: 1000,
+      });
+    };
+    expect(await run(['shift', 'cmd', 'option', 'alt'])).toMatchObject({ state: 'executed' });
+    expect(vi.mocked(backend.act).mock.calls.at(-1)?.[1]).toMatchObject({ type: 'click', modifiers: ['shift', 'cmd', 'option', 'alt'] });
+    for (const bad of [['meta'], ['Shift'], ['shift', 'cmd', 'option', 'alt', 'ctrl'], 'shift'])
+      await expect(run(bad)).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
   describe('elements-only observations', () => {
     const lastObserveOptions = () => vi.mocked(backend.observe).mock.calls.at(-1)?.[1];
     // 与真实后端一致：要求不带像素时不给截图、像素尺寸和元素位置。

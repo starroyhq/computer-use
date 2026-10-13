@@ -312,9 +312,20 @@ export class BrowserBackend implements Backend {
           const element = action.elementId ? state.elements.get(action.elementId) : undefined;
           if (action.elementId && !element) throw new CuError('stale_snapshot', 'Unknown snapshot element.');
           const options = { button: action.button ?? 'left', clickCount: action.count ?? 1 };
-          if (element) await element.handle.click(options);
-          else if (action.point) await page.mouse.click(action.point.x, action.point.y, options);
-          else throw new CuError('invalid_request', 'Click requires an element or a point.');
+          const held: string[] = [];
+          try {
+            for (const rawKey of action.modifiers ?? []) {
+              const key = normalizeKey(rawKey);
+              check();
+              await page.keyboard.down(key);
+              held.push(key);
+            }
+            if (element) await element.handle.click(options);
+            else if (action.point) await page.mouse.click(action.point.x, action.point.y, options);
+            else throw new CuError('invalid_request', 'Click requires an element or a point.');
+          } finally {
+            if (!page.isClosed()) for (const key of held.reverse()) await page.keyboard.up(key).catch(() => {});
+          }
           break;
         }
         case 'type': {

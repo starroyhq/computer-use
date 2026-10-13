@@ -7,6 +7,8 @@ export type Target = {
   pid?: number;
   windowId?: number;
   url?: string;
+  /** 桌面窗口不在屏幕上时的原因（列出目标时的状态）：已最小化、在别的桌面（Space），或其他原因看不见（应用被隐藏、辅助窗口等）。在屏幕上则没有这个字段。 */
+  offScreen?: 'minimized' | 'other-space' | 'not-visible';
 };
 export type Bounds = { x: number; y: number; width: number; height: number };
 export type Element = {
