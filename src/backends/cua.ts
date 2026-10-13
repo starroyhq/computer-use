@@ -28,14 +28,42 @@ type AppList = Awaited<ReturnType<CuaConnection['listApps']>>['apps'];
 const VERSION = '0.28.2';
 // The SDK's implicit transport session expires after five minutes of inactivity.
 const CONNECTION_IDLE_MS = 4 * 60_000;
-// listApps 在这台机器上大约要 1.7 秒。一秒内的重复校验复用同一份结果。
+// 应用列表一秒内的重复校验复用同一份结果。回退到 list_apps 时它要 2 到 3.5 秒，不该连付两次。
 const APPS_CACHE_MS = 1000;
-// 一次有效截图会给驱动的坐标派发预热，但这次预热撑不过下一次大约 1.7 秒的 listApps。
+// 一次有效截图会给驱动的坐标派发预热，大约一秒后失效。
 const CAPTURE_FRESH_MS = 1000;
 const readOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const execFileAsync = promisify(execFile);
 const record = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+
+// macOS 上用 get_accessibility_tree 取运行中的应用，约 50 毫秒。list_apps 还要扫描全部已安装应用，
+// 这台机器上每次 2 到 3.5 秒，而归属校验在每次观察和每个动作前都要做。
+// 实测（驱动 0.28.2）两者的运行中应用，包括被隐藏的，pid 与 Bundle ID 完全一致。
+// 工具报错、返回结构不符或传输异常时返回 undefined，调用方回到 list_apps，只是更慢。
+async function runningApps(client: CuaConnection): Promise<AppList | undefined> {
+  try {
+    const result = await client.callTool('get_accessibility_tree', '{}', readOptions());
+    if (result.isError || result.structuredJson === undefined) return undefined;
+    const apps = record(JSON.parse(result.structuredJson))?.apps;
+    if (!Array.isArray(apps)) return undefined;
+    const running: AppList = [];
+    for (const raw of apps) {
+      const app = record(raw);
+      if (!app || typeof app.pid !== 'number' || !Number.isSafeInteger(app.pid) || app.pid <= 0) return undefined;
+      running.push({
+        pid: app.pid,
+        name: typeof app.name === 'string' ? app.name : '',
+        running: true,
+        active: false,
+        ...(typeof app.bundle_id === 'string' && app.bundle_id !== '' ? { bundleId: app.bundle_id } : {}),
+      });
+    }
+    return running;
+  } catch {
+    return undefined;
+  }
+}
 
 function failure(code: unknown, mutation = false): CuError {
   const known: Record<string, ErrorCode> = {
@@ -395,10 +423,15 @@ export class CuaBackend implements Backend {
     this.appsCache = { at: Date.now(), apps };
   }
 
+  private async listRunning(client: CuaConnection): Promise<AppList> {
+    const running = this.platform === 'darwin' ? await runningApps(client) : undefined;
+    return running ?? (await client.listApps({}, readOptions())).apps;
+  }
+
   private async apps(): Promise<AppList> {
     const cached = this.cachedApps();
     if (cached) return cached;
-    const { apps } = await this.read(client => client.listApps({}, readOptions()));
+    const apps = await this.read(client => this.listRunning(client));
     this.rememberApps(apps);
     return apps;
   }
@@ -419,7 +452,7 @@ export class CuaBackend implements Backend {
     if (grant.allApps !== true && grant.appIds.length === 0) return [];
     const cached = this.cachedApps();
     return this.read(async client => {
-      const apps = cached ?? (await client.listApps({}, readOptions())).apps;
+      const apps = cached ?? (await this.listRunning(client));
       if (!cached) this.rememberApps(apps);
       const nativePaths =
         this.platform === 'win32' ? await this.processPaths(apps.filter(app => app.running).map(app => app.pid)) : undefined;
@@ -519,8 +552,8 @@ export class CuaBackend implements Backend {
     };
     this.states.set(observation, { snapshot: state, session, consumed: false });
     this.latest.set(this.captureKey(target), observation);
-    // 抓取本身要数秒。把应用列表的缓存时间挪到抓取结束，这样紧接着的动作不必再花 1.7 秒枚举进程，
-    // 也不会把刚刚完成的截图预热拖过期。列表内容仍是这次观察开始时核对过的那一份。
+    // 抓取本身可能要数秒。把应用列表的缓存时间挪到抓取结束，紧接着的动作不必再枚举进程；
+    // 回退到 list_apps 时那要 2 到 3.5 秒，会把刚完成的截图预热拖过期。列表内容仍是这次观察开始时核对过的那一份。
     if (this.platform === 'darwin') {
       if (this.appsCache) this.appsCache = { ...this.appsCache, at: Date.now() };
       this.freshCaptures.set(this.captureKey(target), Date.now());

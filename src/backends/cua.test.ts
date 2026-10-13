@@ -50,8 +50,24 @@ function fixture() {
     endSession: vi.fn<CuaConnection['endSession']>(async () => ({ session: 'fixture', active: false })),
     shutdown: vi.fn(async () => {}),
   } satisfies CuaConnection;
-  const connector = vi.fn(async () => client);
-  return { client, backend: new CuaBackend('/test/driver.sock', connector, 'darwin'), state, connector };
+  // macOS 的归属校验通过 get_accessibility_tree 取运行中的应用。这里由 listApps 的模拟结果换算，
+  // 因此调整应用列表的用例照常生效，而 callTool 的调用记录里只有动作本身。
+  const routed: CuaConnection = {
+    ...client,
+    callTool: async (name, argumentsJson, options) => {
+      if (name !== 'get_accessibility_tree') return client.callTool(name, argumentsJson, options);
+      const { apps } = await client.listApps({}, options);
+      return {
+        ...success(),
+        structuredJson: JSON.stringify({
+          apps: apps.filter(app => app.running).map(app => ({ pid: app.pid, name: app.name, bundle_id: app.bundleId })),
+          windows: [],
+        }),
+      };
+    },
+  };
+  const connector = vi.fn(async () => routed);
+  return { client, connection: routed, backend: new CuaBackend('/test/driver.sock', connector, 'darwin'), state, connector };
 }
 
 function textFixture(role = 'AXTextField') {
@@ -177,9 +193,10 @@ describe('Cua socket adapter', () => {
   it('replaces an idle SDK client before the implicit session expires', async () => {
     vi.useFakeTimers();
     try {
-      const { client, backend, connector } = fixture();
-      const replacement = fixture().client;
-      connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
+      const { client, backend, connector, connection } = fixture();
+      const second = fixture();
+      const replacement = second.client;
+      connector.mockResolvedValueOnce(connection).mockResolvedValueOnce(second.connection);
       await backend.targets({ appIds: ['test.fixture'], browser: false });
       await vi.advanceTimersByTimeAsync(4 * 60_000);
       await backend.targets({ appIds: ['test.fixture'], browser: false });
@@ -193,10 +210,12 @@ describe('Cua socket adapter', () => {
   });
 
   it('reconnects after a failed read without replaying input', async () => {
-    const { client, backend, connector } = fixture();
-    const replacement = fixture().client;
-    connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
-    client.listApps.mockRejectedValueOnce(new Error('stale SDK transport'));
+    const { client, backend, connector, connection } = fixture();
+    const second = fixture();
+    const replacement = second.client;
+    connector.mockResolvedValueOnce(connection).mockResolvedValueOnce(second.connection);
+    // 失效的客户端上，轻量列表（由 listApps 模拟换算）和回退的 list_apps 都会失败，读取才会换连接重试。
+    client.listApps.mockRejectedValue(new Error('stale SDK transport'));
     expect(await backend.targets({ appIds: ['test.fixture'], browser: false })).toEqual([target]);
     expect(connector).toHaveBeenCalledTimes(2);
     expect(replacement.listApps).toHaveBeenCalledTimes(1);
@@ -905,9 +924,10 @@ describe('Cua socket adapter', () => {
   });
 
   it('uses a new driver session after reconnecting because an ended session id rejects every later call', async () => {
-    const { client, backend, connector } = fixture();
-    const replacement = fixture().client;
-    connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
+    const { client, backend, connector, connection } = fixture();
+    const second = fixture();
+    const replacement = second.client;
+    connector.mockResolvedValueOnce(connection).mockResolvedValueOnce(second.connection);
     await backend.observe(target);
     const first = client.getWindowState.mock.calls[0]![0].session;
     client.getWindowState.mockRejectedValue(new Error(`session '${first}' has ended`));
@@ -925,9 +945,10 @@ describe('Cua socket adapter', () => {
   it('refuses to dispatch old-session element tokens after an idle connection rotation', async () => {
     vi.useFakeTimers();
     try {
-      const { client, backend, connector } = fixture();
-      const replacement = fixture().client;
-      connector.mockResolvedValueOnce(client).mockResolvedValueOnce(replacement);
+      const { client, backend, connector, connection } = fixture();
+      const second = fixture();
+      const replacement = second.client;
+      connector.mockResolvedValueOnce(connection).mockResolvedValueOnce(second.connection);
       const observation = await backend.observe(target);
       await vi.advanceTimersByTimeAsync(4 * 60_000);
       await expect(
@@ -1064,5 +1085,75 @@ describe('Cua socket adapter', () => {
       backend.act(observation, { type: 'key', keys: ['tab'] }, 'background', new AbortController().signal),
     ).rejects.toMatchObject({ code: 'stale_snapshot' });
     expect(client.callTool).not.toHaveBeenCalled();
+  });
+
+  describe('running application listing', () => {
+    const tree = (apps: unknown[]): ToolResult => ({ ...success(), structuredJson: JSON.stringify({ apps, windows: [] }) });
+    const running = [
+      { pid: 42, name: 'Fixture', bundle_id: 'test.fixture' },
+      { pid: 99, name: 'Other', bundle_id: 'other.app' },
+    ];
+    // 不经 fixture() 的换算：backend 直接面对驱动的 get_accessibility_tree。
+    function direct(result: () => Promise<ToolResult>) {
+      const { client } = fixture();
+      client.callTool.mockImplementation(async () => result());
+      return { client, backend: new CuaBackend('/test/driver.sock', async () => client, 'darwin') };
+    }
+
+    it('uses the lightweight listing for targets and ownership instead of the full list_apps scan', async () => {
+      const { client, backend } = direct(async () => tree(running));
+      expect(await backend.targets({ appIds: ['test.fixture'], browser: false })).toEqual([target]);
+      expect(await backend.observe(target)).toMatchObject({ target });
+      await expect(backend.observe({ ...target, appId: 'other.app' })).rejects.toMatchObject({ code: 'not_found' });
+      await expect(backend.observe({ ...target, pid: 7, id: 'desktop:7:19' })).rejects.toMatchObject({ code: 'not_found' });
+      expect(client.listApps).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalled();
+      for (const [name, args] of client.callTool.mock.calls) {
+        expect(name).toBe('get_accessibility_tree');
+        expect(args).toBe('{}');
+      }
+    });
+
+    it('ignores listed apps without a usable bundle identity when matching a target', async () => {
+      const { client, backend } = direct(async () =>
+        tree([
+          { pid: 42, name: 'Fixture' },
+          { pid: 42, name: 'Fixture', bundle_id: '' },
+        ]),
+      );
+      await expect(backend.observe(target)).rejects.toMatchObject({ code: 'not_found' });
+      expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([]);
+      expect(client.listApps).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a tool error', async () => ({ ...success(), isError: true, errorCode: 'internal_error' })],
+      ['no structured result', async () => success()],
+      ['unparseable JSON', async () => ({ ...success(), structuredJson: '{not json' })],
+      ['a result without an app array', async () => ({ ...success(), structuredJson: JSON.stringify({ apps: 'none' }) })],
+      ['an app with a non-numeric pid', async () => tree([{ pid: '42', bundle_id: 'test.fixture' }])],
+      ['an app with a non-positive pid', async () => tree([{ pid: 0, bundle_id: 'test.fixture' }])],
+      ['a transport failure', async () => Promise.reject(new Error('transport'))],
+    ])('falls back to the full list_apps when the lightweight listing returns %s', async (_name, result) => {
+      const { client, backend } = direct(result);
+      expect(await backend.targets({ appIds: ['test.fixture'], browser: false })).toEqual([target]);
+      expect(client.listApps).toHaveBeenCalledTimes(1);
+      // 回退不改变授权判断：完整列表里没有的应用仍被拒绝。
+      await expect(backend.observe({ ...target, appId: 'wrong.app' })).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('never uses the lightweight listing on Windows', async () => {
+      const { client } = fixture();
+      const backend = new CuaBackend(
+        'C:\\Computer Use\\cua-driver.exe',
+        async () => client,
+        'win32',
+        async () => new Map(),
+      );
+      client.listApps.mockResolvedValue({ apps: [] });
+      expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([]);
+      expect(client.listApps).toHaveBeenCalledTimes(1);
+      expect(client.callTool).not.toHaveBeenCalled();
+    });
   });
 });
