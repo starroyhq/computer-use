@@ -17,6 +17,14 @@ on:
         description: Original publishing run holding verified-release-assets (only for recovering a partial draft)
         required: false
         type: string
+      publish_runner:
+        description: Publication runner (macOS provides an alternative network path for recovery)
+        required: false
+        type: choice
+        default: ubuntu-24.04
+        options:
+          - ubuntu-24.04
+          - macos-15
 
 concurrency:
   group: official-release-publish
@@ -126,7 +134,7 @@ jobs:
     name: Verify packages and publish
     needs: [source, notarize_macos]
     if: always() && needs.source.result == 'success' && (needs.notarize_macos.result == 'success' || needs.notarize_macos.result == 'skipped')
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.publish_runner || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
       actions: read

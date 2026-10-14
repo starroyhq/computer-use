@@ -123,9 +123,18 @@ function cosStore() {
     },
     async put(Key, Body, CacheControl) {
       const report = progress('PUT', Key);
+      let lastProgressAt = 0;
       try {
         await client.putObject({ ...common, Key, Body, ContentLength: Body.length, CacheControl,
-          ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream' });
+          ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+          onProgress({ loaded, total }) {
+            const now = Date.now();
+            if (now - lastProgressAt >= 15_000 || loaded === total) {
+              report(`transferred ${loaded}/${total} bytes`);
+              lastProgressAt = now;
+            }
+          },
+        });
         report(`${Body.length} bytes`);
       } catch (error) {
         report(`failed (${failure(error)})`);
