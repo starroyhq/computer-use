@@ -7,6 +7,8 @@ description: Set up and use the local Computer Use App to operate authorized mac
 
 This file is a complete first-use guide. No repository clone, other Skill files, global Node, or MCP server is required. Installation uses the official [Computer Use releases](https://github.com/starroyhq/computer-use/releases/latest). The App supplies its own CLI runtime.
 
+The embedded installers use GitHub and the official [release mirror](https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/latest.json). Only a network failure, timeout, server error or explicit rate limit permits switching sources. Once a release is selected, its version, source commit, size and SHA-256 stay fixed; an incomplete alternate source cannot silently select an older release. Verification failures, invalid metadata, certificate errors and cancellation stop installation. Do not override these checks or substitute a third-party mirror. Official release and download services receive the corresponding network requests. An installed App remains discoverable without network access. The isolated browser's Chromium download is separate and is not mirrored here.
+
 <!-- computer-use-local-binding -->
 
 ## Start each conversation

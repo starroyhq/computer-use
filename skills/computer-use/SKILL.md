@@ -7,6 +7,8 @@ description: Set up and use the local Computer Use App to operate authorized mac
 
 This file is a complete first-use guide. No repository clone, other Skill files, global Node, or MCP server is required. Installation uses the official [Computer Use releases](https://github.com/starroyhq/computer-use/releases/latest). The App supplies its own CLI runtime.
 
+The embedded installers use GitHub and the official [release mirror](https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/latest.json). Only a network failure, timeout, server error or explicit rate limit permits switching sources. Once a release is selected, its version, source commit, size and SHA-256 stay fixed; an incomplete alternate source cannot silently select an older release. Verification failures, invalid metadata, certificate errors and cancellation stop installation. Do not override these checks or substitute a third-party mirror. Official release and download services receive the corresponding network requests. An installed App remains discoverable without network access. The isolated browser's Chromium download is separate and is not mirrored here.
+
 <!-- computer-use-local-binding -->
 
 ## Start each conversation
@@ -100,7 +102,7 @@ Run only on Apple Silicon macOS. Save this block as a temporary `.sh` file and i
 <!-- computer-use-bootstrap:macos -->
 ```bash
 #!/bin/bash
-# Standalone bootstrap v1. Discovery/installation only; never starts the Host.
+# Standalone bootstrap v2. Discovery/installation only; never starts the Host.
 set -euo pipefail
 umask 077
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -146,7 +148,26 @@ function run(a) {
         !m.installer || m.installer.name !== name || !/^[a-f0-9]{64}$/.test(m.installer.sha256) ||
         !Number.isSafeInteger(m.installer.bytes) || m.installer.bytes <= 0 || m.installer.bytes > 2147483648)
       throw Error('Release metadata does not match the installer.');
-    return m.installer.bytes + '\t' + m.installer.sha256;
+    return m.installer.bytes + '\t' + m.installer.sha256 + '\t' + m.commit;
+  }
+  if (a[0] === 'manifest' || a[0] === 'asset') {
+    var m = read(a[1]), names = Object.create(null);
+    if (m.schemaVersion !== 1 || m.repository !== 'starroyhq/computer-use' ||
+        !/^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/.test(m.version) ||
+        m.tag !== 'v' + m.version || !/^[a-f0-9]{40}$/.test(m.commit) ||
+        typeof m.publishedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(m.publishedAt) || !isFinite(Date.parse(m.publishedAt)) ||
+        !Array.isArray(m.assets) || !m.assets.length || m.assets.length > 128 || (a[2] && m.version !== a[2]))
+      throw Error('Invalid mirror release manifest.');
+    for (var i = 0; i < m.assets.length; i++) {
+      var f = m.assets[i];
+      if (!f || typeof f.name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(f.name) || names[f.name] ||
+          !Number.isSafeInteger(f.bytes) || f.bytes <= 0 || f.bytes > 2147483648 || !/^[a-f0-9]{64}$/.test(f.sha256))
+        throw Error('Invalid mirror release asset.');
+      names[f.name] = f;
+    }
+    if (a[0] === 'manifest') return m.version + '\t' + m.commit;
+    if (!names[a[3]]) throw Error('Mirror release is missing an asset.');
+    return names[a[3]].bytes + '\t' + names[a[3]].sha256;
   }
   if (a[0] === 'result') return JSON.stringify({platform:'macos-arm64', app:a[1],
     cli:a[1] + '/Contents/Resources/bin/computer-use', installed:a[2] === 'true'});
@@ -210,36 +231,116 @@ discover() {
   done
   printf '%s' "$found"
 }
+mirror_base='https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use'
+mirror=0
 trusted_url() {
   local url=$1 authority
   case "$url" in https://*) ;; *) return 1 ;; esac
-  case "$url" in *$'\r'*|*$'\n'*|*'\'*) return 1 ;; esac
+  case "$url" in *$'\r'*|*$'\n'*|*'\'*|*'#'*) return 1 ;; esac
   authority=${url#https://}; authority=${authority%%/*}
-  [[ "$authority" =~ ^(github\.com|api\.github\.com|[a-zA-Z0-9.-]+\.githubusercontent\.com)$ ]]
+  if [ "$authority" = computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com ]; then
+    [[ "$url" == "$mirror_base/"* ]]
+  else
+    [[ "$authority" =~ ^(github\.com|api\.github\.com|[a-zA-Z0-9.-]+\.githubusercontent\.com)$ ]]
+  fi
+}
+# Exit 75 means a transient network failure, never a trust/validation failure or cancellation.
+response() {
+  local url=$1 output=$2 limit=$3 timeout=$4 result=0
+  trusted_url "$url" || fail 'Download redirected to an untrusted address.'
+  /bin/rm -f "$output"
+  status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time "$timeout" \
+    --max-filesize "$limit" --user-agent 'computer-use-bootstrap/2' --dump-header "$work/headers" \
+    --output "$output" --write-out '%{http_code}' "$url") || result=$?
+  if [ "$result" != 0 ]; then
+    /bin/rm -f "$output"
+    case "$result" in
+      5|6|7|18|28|52|55|56|92) return 75 ;;
+      130|143) exit 130 ;;
+      *) fail 'Download failed a transport or local safety check; no alternate source was used.' ;;
+    esac
+  fi
+  [ -f "$output" ] && [ "$(/usr/bin/stat -f %z "$output")" -le "$limit" ] || fail 'Download exceeds the expected size.'
+  case "$status" in
+    408|429|5??) /bin/rm -f "$output"; return 75 ;;
+    403)
+      if /usr/bin/awk 'tolower($1)=="x-ratelimit-remaining:" && $2 ~ /^0\r?$/ {limited=1}
+          tolower($1)=="retry-after:" {limited=1} END {exit !limited}' "$work/headers"; then
+        /bin/rm -f "$output"; return 75
+      fi ;;
+  esac
 }
 # No curl -L: validate each redirect before making the next request.
 request() {
-  local url=$1 output=$2 limit=$3 timeout=$4 hop status location
+  local url=$1 output=$2 limit=$3 timeout=$4 hop location result source=github
+  if [[ "$url" == "$mirror_base/"* ]]; then source=mirror; fi
   for hop in 0 1 2 3 4 5; do
-    trusted_url "$url" || fail 'Download redirected to an untrusted address.'
-    status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time "$timeout" \
-      --max-filesize "$limit" --user-agent 'computer-use-bootstrap/1' --dump-header "$work/headers" \
-      --output "$output" --write-out '%{http_code}' "$url") || fail 'Download failed or timed out; check the connection and retry later.'
-    [ "$(/usr/bin/stat -f %z "$output")" -le "$limit" ] || fail 'Download exceeds the expected size.'
+    if { [ "$source" = github ] && [[ "$url" == "$mirror_base/"* ]]; } ||
+       { [ "$source" = mirror ] && [[ "$url" != "$mirror_base/"* ]]; }; then
+      fail 'Download redirected outside its original trusted source.'
+    fi
+    result=0; response "$url" "$output" "$limit" "$timeout" || result=$?
+    [ "$result" = 0 ] || return "$result"
     case "$status" in
       200) return ;;
       301|302|303|307|308)
         location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/headers")
         [ -n "$location" ] || fail 'Download redirect has no destination.'
-        # GitHub sends absolute asset redirects; root-relative redirects keep the same origin.
         if [[ "$location" == /* ]]; then
           local authority=${url#https://}; authority=${authority%%/*}
           url="https://$authority$location"
         else url=$location; fi ;;
-      *) fail "Download server returned HTTP $status; retry later without changing the trusted source." ;;
+      *) fail "Download server returned HTTP $status; no alternate source was used." ;;
     esac
   done
   fail 'Too many download redirects.'
+}
+github_latest() {
+  local result=0 location
+  response 'https://github.com/starroyhq/computer-use/releases/latest' "$work/latest" 1048576 30 || result=$?
+  [ "$result" = 0 ] || return "$result"
+  [[ "$status" =~ ^30[12378]$ ]] || fail "Latest release returned HTTP $status; no alternate source was used."
+  location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/headers")
+  [[ "$location" =~ ^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$ ]] || fail 'Latest release is not an official stable version.'
+  version=${BASH_REMATCH[1]}
+}
+verify_mirror_file() {
+  local name=$1 file=$2 fields expected_bytes expected_digest
+  fields=$(json asset "$work/mirror-manifest.json" "$version" "$name") || fail 'Invalid mirror release asset.'
+  IFS=$'\t' read -r expected_bytes expected_digest <<< "$fields"
+  [ "$(/usr/bin/stat -f %z "$file")" = "$expected_bytes" ] &&
+    [ "$(/usr/bin/shasum -a 256 "$file" | /usr/bin/awk '{print $1}')" = "$expected_digest" ] || fail 'Mirror manifest disagrees with the selected release size or SHA-256.'
+}
+activate_mirror() {
+  local fields ignored metadata_fields metadata_commit
+  request "$mirror_base/releases/v$version/manifest.json" "$work/mirror-manifest.json" 1048576 30 || fail 'The matching mirror release is unavailable; retry later.'
+  fields=$(json manifest "$work/mirror-manifest.json" "$version") || fail 'Invalid mirror release manifest.'
+  IFS=$'\t' read -r ignored mirror_commit <<< "$fields"
+  if [ -f "$work/mirror-latest.json" ]; then
+    /usr/bin/cmp -s "$work/mirror-latest.json" "$work/mirror-manifest.json" || fail 'Mirror index and version manifest disagree.'
+  fi
+  if [ -f "$work/metadata.json" ]; then
+    verify_mirror_file "$prefix.json" "$work/metadata.json"
+    metadata_fields=$(json metadata "$work/metadata.json" "$version" "$name") || fail 'Invalid release metadata.'
+    IFS=$'\t' read -r ignored ignored metadata_commit <<< "$metadata_fields"
+    [ "$metadata_commit" = "$mirror_commit" ] || fail 'Mirror release commit differs from the selected release.'
+  fi
+  if [ -f "$work/checksum" ]; then verify_mirror_file "$name.sha256" "$work/checksum"; fi
+  mirror=1
+}
+release_file() {
+  local asset=$1 output=$2 limit=$3 timeout=$4 result=0 fields expected_bytes ignored
+  if [ "$mirror" = 0 ]; then
+    request "https://github.com/starroyhq/computer-use/releases/download/v$version/$asset" "$output" "$limit" "$timeout" || result=$?
+    [ "$result" != 0 ] || return 0
+    [ "$result" = 75 ] || fail 'Download failed; no alternate source was used.'
+    activate_mirror
+  fi
+  fields=$(json asset "$work/mirror-manifest.json" "$version" "$asset") || fail 'Invalid mirror release asset.'
+  IFS=$'\t' read -r expected_bytes ignored <<< "$fields"
+  [ "$expected_bytes" -le "$limit" ] || fail 'Mirror asset exceeds the expected size.'
+  request "$mirror_base/releases/v$version/$asset" "$output" "$expected_bytes" "$timeout" || fail 'Mirror download failed or timed out; retry later.'
+  verify_mirror_file "$asset" "$output"
 }
 # Entry point. Existing installations are returned without network access or Host execution.
 app=$(discover "${1:-}")
@@ -253,24 +354,25 @@ done
 [ "$locked" = 1 ] || fail 'Another installation holds the lock. Wait for it, or review a stale lock after confirming no installer is running.'
 app=$(discover '')
 if [ -n "$app" ]; then json result "$app" false; exit 0; fi
-# /releases/latest is GitHub's stable-release redirect and avoids unauthenticated API rate limits.
-latest='https://github.com/starroyhq/computer-use/releases/latest'
-status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time 30 --max-filesize 1048576 \
-  --dump-header "$work/latest-headers" --output "$work/latest" --write-out '%{http_code}' "$latest") || fail 'Cannot resolve the latest stable release.'
-[[ "$status" =~ ^30[12378]$ ]] || fail "Latest release returned HTTP $status; retry later."
-location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/latest-headers")
-[[ "$location" =~ ^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$ ]] || fail 'Latest release is not an official stable version.'
-version=${BASH_REMATCH[1]}
+# Resolve a stable version once; changing transport never re-resolves latest.
+result=0; github_latest || result=$?
+if [ "$result" != 0 ]; then
+  [ "$result" = 75 ] || fail 'Cannot resolve the latest stable release.'
+  request "$mirror_base/latest.json" "$work/mirror-latest.json" 1048576 30 || fail 'Both release sources are unavailable; retry later.'
+  fields=$(json manifest "$work/mirror-latest.json" '') || fail 'Invalid mirror release manifest.'
+  IFS=$'\t' read -r version ignored <<< "$fields"
+fi
 prefix="computer-use-$version-macos-arm64"
 name="$prefix.dmg"
-base="https://github.com/starroyhq/computer-use/releases/download/v$version"
-request "$base/$prefix.json" "$work/metadata.json" 65536 30
+if [ -f "$work/mirror-latest.json" ]; then activate_mirror; fi
+release_file "$prefix.json" "$work/metadata.json" 65536 30
 metadata_fields=$(json metadata "$work/metadata.json" "$version" "$name") || fail 'Invalid release metadata.'
-IFS=$'\t' read -r bytes digest <<< "$metadata_fields"
+IFS=$'\t' read -r bytes digest commit <<< "$metadata_fields"
 [[ "${bytes:-}" =~ ^[0-9]+$ ]] && [[ "${digest:-}" =~ ^[a-f0-9]{64}$ ]] || fail 'Invalid release metadata.'
-request "$base/$name.sha256" "$work/checksum" 65536 30
+if [ "$mirror" = 1 ]; then [ "$commit" = "$mirror_commit" ] || fail 'Mirror release commit differs from metadata.'; fi
+release_file "$name.sha256" "$work/checksum" 65536 30
 [ "$(cat "$work/checksum")" = "$digest  $name" ] || fail 'Installer checksum and metadata disagree.'
-request "$base/$name" "$work/installer.dmg" "$bytes" 1200
+release_file "$name" "$work/installer.dmg" "$bytes" 1200
 [ "$(/usr/bin/stat -f %z "$work/installer.dmg")" = "$bytes" ] || fail 'Installer download is incomplete.'
 [ "$(/usr/bin/shasum -a 256 "$work/installer.dmg" | /usr/bin/awk '{print $1}')" = "$digest" ] || fail 'Installer SHA-256 verification failed.'
 /bin/mkdir "$work/mount"
@@ -302,13 +404,15 @@ Run in the signed-in user’s normal PowerShell on Windows 10 build 17763 or new
 <!-- computer-use-bootstrap:windows -->
 ```powershell
 param([string]$Hint = '', [switch]$DiscoverOnly)
-# Standalone bootstrap v1. Discovery/installation only; never starts the Host.
+# Standalone bootstrap v2. Discovery/installation only; never starts the Host.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ProgressPreference = 'SilentlyContinue'
 $work = $null
 $mutex = $null
 $locked = $false
+$mirrorBase = 'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use'
+$downloadState = @{ useMirror = $false; manifest = $null }
 $originalModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
 
 function Get-NativeArchitecture {
@@ -333,9 +437,9 @@ public static class ComputerUseBootstrapNativeV1 {
     } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($pointer) }
 }
 
-function Read-BoundedJson([string]$Path) {
+function Read-BoundedJson([string]$Path, [long]$MaximumBytes = 65536) {
     $file = Get-Item -LiteralPath $Path
-    if ($file.Length -gt 65536) { throw 'Package JSON exceeds the size limit.' }
+    if ($file.Length -gt $MaximumBytes) { throw 'Package JSON exceeds the size limit.' }
     return [IO.File]::ReadAllText($Path) | ConvertFrom-Json
 }
 
@@ -395,11 +499,23 @@ function Get-Installations([string]$PackageHint, [string]$Architecture) {
 }
 
 function Assert-TrustedUri([Uri]$Uri) {
+    $mirrorHost = 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com'
     if (-not $Uri.IsAbsoluteUri -or $Uri.Scheme -cne 'https' -or $Uri.UserInfo -or -not $Uri.IsDefaultPort -or
         $Uri.Fragment -or ($Uri.Host -cne 'github.com' -and $Uri.Host -cne 'api.github.com' -and
-        -not $Uri.Host.EndsWith('.githubusercontent.com', [StringComparison]::Ordinal))) {
+        $Uri.Host -cne $mirrorHost -and -not $Uri.Host.EndsWith('.githubusercontent.com', [StringComparison]::Ordinal)) -or
+        ($Uri.Host -ceq $mirrorHost -and -not $Uri.AbsolutePath.StartsWith('/computer-use/', [StringComparison]::Ordinal))) {
         throw 'Download redirected to an untrusted address.'
     }
+}
+
+function Throw-TransientDownload([string]$Message) {
+    $failure = [Exception]::new($Message)
+    $failure.Data['ComputerUseTransientNetwork'] = $true
+    throw $failure
+}
+
+function Test-TransientDownload($Failure) {
+    return $Failure.Exception.Data['ComputerUseTransientNetwork'] -eq $true
 }
 
 function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
@@ -408,58 +524,94 @@ function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
     $request.AllowAutoRedirect = $false
     $request.Timeout = $TimeoutMilliseconds
     $request.ReadWriteTimeout = $TimeoutMilliseconds
-    $request.UserAgent = 'computer-use-bootstrap/1'
+    $request.UserAgent = 'computer-use-bootstrap/2'
     try { return $request.GetResponse() }
     catch [Net.WebException] {
-        if ($_.Exception.Response) { $_.Exception.Response.Dispose() }
-        throw 'Release download failed or was blocked. Check network/system policy and retry without changing the trusted source.'
+        if ($_.Exception.Response) { return $_.Exception.Response }
+        if (@('NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'ConnectionClosed',
+            'Timeout', 'ReceiveFailure', 'SendFailure', 'KeepAliveFailure', 'PipelineFailure') -contains [string]$_.Exception.Status) {
+            Throw-TransientDownload 'Release download failed or timed out.'
+        }
+        # TLS/trust failures and cancellation must not silently change the download source.
+        throw 'Release download failed a transport security check or was canceled.'
+    }
+}
+
+function Assert-ResponseStatus($Response) {
+    $status = [int]$Response.StatusCode
+    if ($status -eq 408 -or $status -eq 429 -or ($status -ge 500 -and $status -le 599) -or
+        ($status -eq 403 -and ($Response.Headers['X-RateLimit-Remaining'] -ceq '0' -or $Response.Headers['Retry-After']))) {
+        Throw-TransientDownload "Download server temporarily unavailable (HTTP $status)."
     }
 }
 
 function Get-OfficialFile([Uri]$Uri, [string]$Output, [long]$MaximumBytes, [int]$Seconds) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    for ($hop = 0; $hop -le 5; $hop++) {
-        $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
-        if ($remaining -le 0) { throw 'Download timed out.' }
-        $response = Open-Response $Uri $remaining
-        try {
-            $status = [int]$response.StatusCode
-            if (@(301, 302, 303, 307, 308) -contains $status) {
-                $location = $response.Headers['Location']
-                if (-not $location) { throw 'Download redirect has no destination.' }
-                $Uri = [Uri]::new($Uri, $location)
-                continue
+    $mirrorRequest = $Uri.Host -ceq 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com'
+    $complete = $false
+    try {
+        for ($hop = 0; $hop -le 5; $hop++) {
+            $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0) { Throw-TransientDownload 'Download timed out.' }
+            if (($Uri.Host -ceq 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com') -ne $mirrorRequest) {
+                throw 'Download redirected outside its original trusted source.'
             }
-            if ($status -ne 200) { throw "Download server returned HTTP $status." }
-            if ($response.ContentLength -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
-            $downloadStream = $response.GetResponseStream()
-            $file = $null
+            $response = Open-Response $Uri $remaining
             try {
-                $file = [IO.File]::Open($Output, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                $buffer = New-Object byte[] 65536
-                [long]$total = 0
-                while ($true) {
-                    $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
-                    if ($remaining -le 0) { throw 'Download timed out.' }
-                    $downloadStream.ReadTimeout = $remaining
-                    $count = $downloadStream.Read($buffer, 0, $buffer.Length)
-                    if ($count -eq 0) { break }
-                    $total += $count
-                    if ($total -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
-                    $file.Write($buffer, 0, $count)
+                Assert-ResponseStatus $response
+                $status = [int]$response.StatusCode
+                if (@(301, 302, 303, 307, 308) -contains $status) {
+                    $location = $response.Headers['Location']
+                    if (-not $location) { throw 'Download redirect has no destination.' }
+                    $Uri = [Uri]::new($Uri, $location)
+                    continue
                 }
-                $file.Flush()
-            } finally { if ($file) { $file.Dispose() }; $downloadStream.Dispose() }
-            return
-        } finally { $response.Dispose() }
+                if ($status -ne 200) { throw "Download server returned HTTP $status." }
+                if ($response.ContentLength -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
+                $downloadStream = $response.GetResponseStream()
+                $file = $null
+                try {
+                    $file = [IO.File]::Open($Output, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $buffer = New-Object byte[] 65536
+                    [long]$total = 0
+                    while ($true) {
+                        $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
+                        if ($remaining -le 0) { Throw-TransientDownload 'Download timed out.' }
+                        $downloadStream.ReadTimeout = $remaining
+                        try { $count = $downloadStream.Read($buffer, 0, $buffer.Length) }
+                        catch [IO.IOException] { Throw-TransientDownload 'Download was interrupted.' }
+                        catch [Net.WebException] {
+                            if ($_.Exception.Status -eq [Net.WebExceptionStatus]::Timeout) { Throw-TransientDownload 'Download timed out.' }
+                            throw
+                        }
+                        if ($count -eq 0) { break }
+                        $total += $count
+                        if ($total -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
+                        $file.Write($buffer, 0, $count)
+                    }
+                    # Some Windows HttpWebRequest streams return EOF instead of throwing on a broken response.
+                    # Only a violated HTTP Content-Length is a transport failure; complete wrong-size/hash payloads stay fatal.
+                    if ($response.ContentLength -ge 0 -and $total -lt $response.ContentLength) {
+                        Throw-TransientDownload 'Download was interrupted before its declared Content-Length.'
+                    }
+                    $file.Flush()
+                } finally { if ($file) { $file.Dispose() }; $downloadStream.Dispose() }
+                $complete = $true
+                return
+            } finally { $response.Dispose() }
+        }
+        throw 'Too many download redirects.'
+    } finally {
+        # A new request always starts from byte zero; never append a different source's bytes.
+        if (-not $complete -and (Test-Path -LiteralPath $Output)) { Remove-Item -LiteralPath $Output -Force }
     }
-    throw 'Too many download redirects.'
 }
 
 function Get-LatestVersion {
     # GitHub's stable-release redirect works without the API's anonymous rate-limit quota.
     $response = Open-Response ([Uri]'https://github.com/starroyhq/computer-use/releases/latest') 30000
     try {
+        Assert-ResponseStatus $response
         if (@(301, 302, 303, 307, 308) -notcontains [int]$response.StatusCode) { throw 'Latest release did not return a stable tag.' }
         $location = [string]$response.Headers['Location']
         if ($location -cnotmatch '^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$') {
@@ -482,7 +634,77 @@ function Get-InstallerMetadata([string]$Path, [string]$Version, [string]$Platfor
         [math]::Truncate($metadata.installer.bytes) -ne $metadata.installer.bytes) {
         throw 'Release metadata does not match the installer.'
     }
-    return $metadata.installer
+    return $metadata
+}
+
+function Get-MirrorManifest([string]$Path, [string]$Version = '') {
+    $manifest = Read-BoundedJson $Path 1048576
+    $date = [DateTimeOffset]::MinValue
+    if ($manifest.schemaVersion -isnot [ValueType] -or $manifest.schemaVersion -is [bool] -or $manifest.schemaVersion -cne 1 -or
+        $manifest.repository -cne 'starroyhq/computer-use' -or $manifest.version -isnot [string] -or
+        $manifest.version -cnotmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$' -or
+        $manifest.tag -cne ('v' + $manifest.version) -or $manifest.commit -cnotmatch '^[a-f0-9]{40}$' -or
+        $manifest.publishedAt -isnot [string] -or $manifest.publishedAt -cnotmatch '^\d{4}-\d{2}-\d{2}T' -or
+        -not [DateTimeOffset]::TryParse($manifest.publishedAt, [ref]$date) -or
+        $manifest.assets -isnot [array] -or $manifest.assets.Count -lt 1 -or $manifest.assets.Count -gt 128 -or
+        ($Version -and $manifest.version -cne $Version)) { throw 'Invalid mirror release manifest.' }
+    $names = @{}
+    foreach ($asset in $manifest.assets) {
+        if ($asset.name -isnot [string] -or $asset.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$' -or
+            $names.ContainsKey($asset.name) -or $asset.bytes -isnot [ValueType] -or $asset.bytes -is [bool] -or
+            $asset.bytes -le 0 -or $asset.bytes -gt 2147483648 -or [math]::Truncate($asset.bytes) -ne $asset.bytes -or
+            $asset.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid mirror release asset.' }
+        $names[$asset.name] = $true
+    }
+    return $manifest
+}
+
+function Get-MirrorAsset([string]$Name) {
+    $assets = @($downloadState.manifest.assets | Where-Object { $_.name -ceq $Name })
+    if ($assets.Count -ne 1) { throw 'Mirror release is missing an asset.' }
+    return $assets[0]
+}
+
+function Assert-MirrorFile([string]$Name, [string]$Path) {
+    $asset = Get-MirrorAsset $Name
+    if ((Get-Item -LiteralPath $Path).Length -ne $asset.bytes -or
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $asset.sha256) {
+        throw 'Mirror manifest disagrees with the selected release size or SHA-256.'
+    }
+}
+
+function Enable-Mirror {
+    $path = Join-Path $work 'mirror-manifest.json'
+    Get-OfficialFile ([Uri]"$mirrorBase/releases/v$version/manifest.json") $path 1048576 30
+    $downloadState.manifest = Get-MirrorManifest $path $version
+    $latestPath = Join-Path $work 'mirror-latest.json'
+    if ((Test-Path -LiteralPath $latestPath) -and
+        (Get-FileHash -LiteralPath $latestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) {
+        throw 'Mirror index and version manifest disagree.'
+    }
+    if (Test-Path -LiteralPath $metadataPath) {
+        Assert-MirrorFile "$prefix.json" $metadataPath
+        $previous = Get-InstallerMetadata $metadataPath $version $platform $installerName
+        if ($previous.commit -cne $downloadState.manifest.commit) { throw 'Mirror release commit differs from the selected release.' }
+    }
+    if (Test-Path -LiteralPath $checksumPath) { Assert-MirrorFile "$installerName.sha256" $checksumPath }
+    $downloadState.useMirror = $true
+}
+
+function Get-ReleaseFile([string]$Name, [string]$Output, [long]$MaximumBytes, [int]$Seconds) {
+    if (-not $downloadState.useMirror) {
+        try {
+            Get-OfficialFile ([Uri]"https://github.com/starroyhq/computer-use/releases/download/v$version/$Name") $Output $MaximumBytes $Seconds
+            return
+        } catch {
+            if (-not (Test-TransientDownload $_)) { throw }
+            Enable-Mirror
+        }
+    }
+    $asset = Get-MirrorAsset $Name
+    if ($asset.bytes -gt $MaximumBytes) { throw 'Mirror asset exceeds the expected size.' }
+    Get-OfficialFile ([Uri]"$mirrorBase/releases/v$version/$Name") $Output $asset.bytes $Seconds
+    Assert-MirrorFile $Name $Output
 }
 
 function Write-Result([string]$Package, [string]$Architecture, [bool]$Installed) {
@@ -518,20 +740,30 @@ try {
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $work -AclObject $security
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $version = Get-LatestVersion
+    # Resolve a version once. A later network failure can only use that version's mirror.
+    try { $version = Get-LatestVersion }
+    catch {
+        if (-not (Test-TransientDownload $_)) { throw }
+        $latestPath = Join-Path $work 'mirror-latest.json'
+        Get-OfficialFile ([Uri]"$mirrorBase/latest.json") $latestPath 1048576 30
+        $latest = Get-MirrorManifest $latestPath
+        $version = $latest.version
+    }
     $platform = "windows-$architecture"
     $prefix = "computer-use-$version-$platform"
-    $name = "$prefix-setup.exe"
-    $base = "https://github.com/starroyhq/computer-use/releases/download/v$version"
+    $installerName = "$prefix-setup.exe"
     $metadataPath = Join-Path $work 'metadata.json'
-    Get-OfficialFile ([Uri]"$base/$prefix.json") $metadataPath 65536 30
-    $metadata = Get-InstallerMetadata $metadataPath $version $platform $name
     $checksumPath = Join-Path $work 'checksum'
-    Get-OfficialFile ([Uri]"$base/$name.sha256") $checksumPath 65536 30
+    if (Test-Path -LiteralPath (Join-Path $work 'mirror-latest.json')) { Enable-Mirror }
+    Get-ReleaseFile "$prefix.json" $metadataPath 65536 30
+    $releaseMetadata = Get-InstallerMetadata $metadataPath $version $platform $installerName
+    if ($downloadState.useMirror -and $releaseMetadata.commit -cne $downloadState.manifest.commit) { throw 'Mirror release commit differs from metadata.' }
+    $metadata = $releaseMetadata.installer
+    Get-ReleaseFile "$installerName.sha256" $checksumPath 65536 30
     $checksum = [IO.File]::ReadAllText($checksumPath)
-    if ($checksum -cne "$($metadata.sha256)  $name`n") { throw 'Installer checksum and metadata disagree.' }
-    $installer = Join-Path $work $name
-    Get-OfficialFile ([Uri]"$base/$name") $installer $metadata.bytes 1200
+    if ($checksum -cne "$($metadata.sha256)  $installerName`n") { throw 'Installer checksum and metadata disagree.' }
+    $installer = Join-Path $work $installerName
+    Get-ReleaseFile $installerName $installer $metadata.bytes 1200
     if ((Get-Item -LiteralPath $installer).Length -ne $metadata.bytes -or
         (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -cne $metadata.sha256) {
         throw 'Installer size or SHA-256 verification failed.'
@@ -540,6 +772,8 @@ try {
     if (Test-Path -LiteralPath $destination) { throw 'Destination appeared during installation; review it instead of overwriting.' }
     # Fixed arguments; the official installer selects its standard current-user destination.
     $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER') -PassThru
+    # Retain a native handle before waiting: Windows PowerShell can otherwise report a null ExitCode after process exit.
+    $null = $process.Handle
     if (-not $process.WaitForExit(180000)) {
         # Do not kill a partly committed installer. Keep its files until it exits for safe cleanup.
         $retainedFiles = $work

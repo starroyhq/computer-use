@@ -20,7 +20,7 @@ pnpm dlx @starroy/computer-use setup
 
 `setup` does not launch desktop services, request pairing, clear a stopped state, or edit your Agent's configuration. It only calls the installed App's help, preflight and prompt commands. Existing profiles are preserved. Readiness of a real desktop session is verified afterwards with `doctor`, `targets` and an actual observation.
 
-Want to use the App without Node? [Download the native installer](https://github.com/starroyhq/computer-use/releases/latest) and copy the setup prompt from **Settings → Connect** instead.
+Want to use the App without Node? [Download the native installer](https://computer-use.starroy.com/en/download) and copy the setup prompt from **Settings → Connect** instead. The download page also offers an alternate download link.
 
 ## CLI and MCP
 
@@ -67,6 +67,8 @@ computer-use --app-path '/Applications/Computer Use.app' targets --profile my-ag
 ## Installation checks and permissions
 
 The maintained bootstrap scripts are shared with the standalone Skill. They select the native architecture and verify official HTTPS download addresses, release metadata, size and SHA-256. macOS additionally checks the publisher signature, Bundle ID and notarization. Unknown or incomplete installations are not overwritten. Windows packages remain unsigned and may be blocked by system policy; the launcher does not disable protections.
+
+GitHub is the default download service, with the official Tencent COS mirror used only after a network failure, timeout, server error or explicit rate limit. After choosing a release, switching services preserves its version, commit, sizes and SHA-256; an outdated mirror cannot silently select another version. Invalid metadata, certificate/signature/checksum failures and cancellation stop installation. These official services may receive download requests. Existing installations are discovered offline; Chromium downloads for the isolated browser are outside this mirror. Older launcher and Skill copies do not gain this fallback until updated.
 
 macOS system permissions and pairing require your local approval. Pairing defaults to all desktop applications and includes foreground permission, while execution defaults to background mode without automatic foreground fallback. Existing restricted pairings keep their scope. Review, pause or revoke access in the App.
 

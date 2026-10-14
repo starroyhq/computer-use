@@ -1,5 +1,5 @@
 #!/bin/bash
-# Standalone bootstrap v1. Discovery/installation only; never starts the Host.
+# Standalone bootstrap v2. Discovery/installation only; never starts the Host.
 set -euo pipefail
 umask 077
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -45,7 +45,26 @@ function run(a) {
         !m.installer || m.installer.name !== name || !/^[a-f0-9]{64}$/.test(m.installer.sha256) ||
         !Number.isSafeInteger(m.installer.bytes) || m.installer.bytes <= 0 || m.installer.bytes > 2147483648)
       throw Error('Release metadata does not match the installer.');
-    return m.installer.bytes + '\t' + m.installer.sha256;
+    return m.installer.bytes + '\t' + m.installer.sha256 + '\t' + m.commit;
+  }
+  if (a[0] === 'manifest' || a[0] === 'asset') {
+    var m = read(a[1]), names = Object.create(null);
+    if (m.schemaVersion !== 1 || m.repository !== 'starroyhq/computer-use' ||
+        !/^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/.test(m.version) ||
+        m.tag !== 'v' + m.version || !/^[a-f0-9]{40}$/.test(m.commit) ||
+        typeof m.publishedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(m.publishedAt) || !isFinite(Date.parse(m.publishedAt)) ||
+        !Array.isArray(m.assets) || !m.assets.length || m.assets.length > 128 || (a[2] && m.version !== a[2]))
+      throw Error('Invalid mirror release manifest.');
+    for (var i = 0; i < m.assets.length; i++) {
+      var f = m.assets[i];
+      if (!f || typeof f.name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(f.name) || names[f.name] ||
+          !Number.isSafeInteger(f.bytes) || f.bytes <= 0 || f.bytes > 2147483648 || !/^[a-f0-9]{64}$/.test(f.sha256))
+        throw Error('Invalid mirror release asset.');
+      names[f.name] = f;
+    }
+    if (a[0] === 'manifest') return m.version + '\t' + m.commit;
+    if (!names[a[3]]) throw Error('Mirror release is missing an asset.');
+    return names[a[3]].bytes + '\t' + names[a[3]].sha256;
   }
   if (a[0] === 'result') return JSON.stringify({platform:'macos-arm64', app:a[1],
     cli:a[1] + '/Contents/Resources/bin/computer-use', installed:a[2] === 'true'});
@@ -109,36 +128,116 @@ discover() {
   done
   printf '%s' "$found"
 }
+mirror_base='https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use'
+mirror=0
 trusted_url() {
   local url=$1 authority
   case "$url" in https://*) ;; *) return 1 ;; esac
-  case "$url" in *$'\r'*|*$'\n'*|*'\'*) return 1 ;; esac
+  case "$url" in *$'\r'*|*$'\n'*|*'\'*|*'#'*) return 1 ;; esac
   authority=${url#https://}; authority=${authority%%/*}
-  [[ "$authority" =~ ^(github\.com|api\.github\.com|[a-zA-Z0-9.-]+\.githubusercontent\.com)$ ]]
+  if [ "$authority" = computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com ]; then
+    [[ "$url" == "$mirror_base/"* ]]
+  else
+    [[ "$authority" =~ ^(github\.com|api\.github\.com|[a-zA-Z0-9.-]+\.githubusercontent\.com)$ ]]
+  fi
+}
+# Exit 75 means a transient network failure, never a trust/validation failure or cancellation.
+response() {
+  local url=$1 output=$2 limit=$3 timeout=$4 result=0
+  trusted_url "$url" || fail 'Download redirected to an untrusted address.'
+  /bin/rm -f "$output"
+  status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time "$timeout" \
+    --max-filesize "$limit" --user-agent 'computer-use-bootstrap/2' --dump-header "$work/headers" \
+    --output "$output" --write-out '%{http_code}' "$url") || result=$?
+  if [ "$result" != 0 ]; then
+    /bin/rm -f "$output"
+    case "$result" in
+      5|6|7|18|28|52|55|56|92) return 75 ;;
+      130|143) exit 130 ;;
+      *) fail 'Download failed a transport or local safety check; no alternate source was used.' ;;
+    esac
+  fi
+  [ -f "$output" ] && [ "$(/usr/bin/stat -f %z "$output")" -le "$limit" ] || fail 'Download exceeds the expected size.'
+  case "$status" in
+    408|429|5??) /bin/rm -f "$output"; return 75 ;;
+    403)
+      if /usr/bin/awk 'tolower($1)=="x-ratelimit-remaining:" && $2 ~ /^0\r?$/ {limited=1}
+          tolower($1)=="retry-after:" {limited=1} END {exit !limited}' "$work/headers"; then
+        /bin/rm -f "$output"; return 75
+      fi ;;
+  esac
 }
 # No curl -L: validate each redirect before making the next request.
 request() {
-  local url=$1 output=$2 limit=$3 timeout=$4 hop status location
+  local url=$1 output=$2 limit=$3 timeout=$4 hop location result source=github
+  if [[ "$url" == "$mirror_base/"* ]]; then source=mirror; fi
   for hop in 0 1 2 3 4 5; do
-    trusted_url "$url" || fail 'Download redirected to an untrusted address.'
-    status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time "$timeout" \
-      --max-filesize "$limit" --user-agent 'computer-use-bootstrap/1' --dump-header "$work/headers" \
-      --output "$output" --write-out '%{http_code}' "$url") || fail 'Download failed or timed out; check the connection and retry later.'
-    [ "$(/usr/bin/stat -f %z "$output")" -le "$limit" ] || fail 'Download exceeds the expected size.'
+    if { [ "$source" = github ] && [[ "$url" == "$mirror_base/"* ]]; } ||
+       { [ "$source" = mirror ] && [[ "$url" != "$mirror_base/"* ]]; }; then
+      fail 'Download redirected outside its original trusted source.'
+    fi
+    result=0; response "$url" "$output" "$limit" "$timeout" || result=$?
+    [ "$result" = 0 ] || return "$result"
     case "$status" in
       200) return ;;
       301|302|303|307|308)
         location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/headers")
         [ -n "$location" ] || fail 'Download redirect has no destination.'
-        # GitHub sends absolute asset redirects; root-relative redirects keep the same origin.
         if [[ "$location" == /* ]]; then
           local authority=${url#https://}; authority=${authority%%/*}
           url="https://$authority$location"
         else url=$location; fi ;;
-      *) fail "Download server returned HTTP $status; retry later without changing the trusted source." ;;
+      *) fail "Download server returned HTTP $status; no alternate source was used." ;;
     esac
   done
   fail 'Too many download redirects.'
+}
+github_latest() {
+  local result=0 location
+  response 'https://github.com/starroyhq/computer-use/releases/latest' "$work/latest" 1048576 30 || result=$?
+  [ "$result" = 0 ] || return "$result"
+  [[ "$status" =~ ^30[12378]$ ]] || fail "Latest release returned HTTP $status; no alternate source was used."
+  location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/headers")
+  [[ "$location" =~ ^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$ ]] || fail 'Latest release is not an official stable version.'
+  version=${BASH_REMATCH[1]}
+}
+verify_mirror_file() {
+  local name=$1 file=$2 fields expected_bytes expected_digest
+  fields=$(json asset "$work/mirror-manifest.json" "$version" "$name") || fail 'Invalid mirror release asset.'
+  IFS=$'\t' read -r expected_bytes expected_digest <<< "$fields"
+  [ "$(/usr/bin/stat -f %z "$file")" = "$expected_bytes" ] &&
+    [ "$(/usr/bin/shasum -a 256 "$file" | /usr/bin/awk '{print $1}')" = "$expected_digest" ] || fail 'Mirror manifest disagrees with the selected release size or SHA-256.'
+}
+activate_mirror() {
+  local fields ignored metadata_fields metadata_commit
+  request "$mirror_base/releases/v$version/manifest.json" "$work/mirror-manifest.json" 1048576 30 || fail 'The matching mirror release is unavailable; retry later.'
+  fields=$(json manifest "$work/mirror-manifest.json" "$version") || fail 'Invalid mirror release manifest.'
+  IFS=$'\t' read -r ignored mirror_commit <<< "$fields"
+  if [ -f "$work/mirror-latest.json" ]; then
+    /usr/bin/cmp -s "$work/mirror-latest.json" "$work/mirror-manifest.json" || fail 'Mirror index and version manifest disagree.'
+  fi
+  if [ -f "$work/metadata.json" ]; then
+    verify_mirror_file "$prefix.json" "$work/metadata.json"
+    metadata_fields=$(json metadata "$work/metadata.json" "$version" "$name") || fail 'Invalid release metadata.'
+    IFS=$'\t' read -r ignored ignored metadata_commit <<< "$metadata_fields"
+    [ "$metadata_commit" = "$mirror_commit" ] || fail 'Mirror release commit differs from the selected release.'
+  fi
+  if [ -f "$work/checksum" ]; then verify_mirror_file "$name.sha256" "$work/checksum"; fi
+  mirror=1
+}
+release_file() {
+  local asset=$1 output=$2 limit=$3 timeout=$4 result=0 fields expected_bytes ignored
+  if [ "$mirror" = 0 ]; then
+    request "https://github.com/starroyhq/computer-use/releases/download/v$version/$asset" "$output" "$limit" "$timeout" || result=$?
+    [ "$result" != 0 ] || return 0
+    [ "$result" = 75 ] || fail 'Download failed; no alternate source was used.'
+    activate_mirror
+  fi
+  fields=$(json asset "$work/mirror-manifest.json" "$version" "$asset") || fail 'Invalid mirror release asset.'
+  IFS=$'\t' read -r expected_bytes ignored <<< "$fields"
+  [ "$expected_bytes" -le "$limit" ] || fail 'Mirror asset exceeds the expected size.'
+  request "$mirror_base/releases/v$version/$asset" "$output" "$expected_bytes" "$timeout" || fail 'Mirror download failed or timed out; retry later.'
+  verify_mirror_file "$asset" "$output"
 }
 # Entry point. Existing installations are returned without network access or Host execution.
 app=$(discover "${1:-}")
@@ -152,24 +251,25 @@ done
 [ "$locked" = 1 ] || fail 'Another installation holds the lock. Wait for it, or review a stale lock after confirming no installer is running.'
 app=$(discover '')
 if [ -n "$app" ]; then json result "$app" false; exit 0; fi
-# /releases/latest is GitHub's stable-release redirect and avoids unauthenticated API rate limits.
-latest='https://github.com/starroyhq/computer-use/releases/latest'
-status=$(/usr/bin/curl --silent --show-error --proto '=https' --connect-timeout 15 --max-time 30 --max-filesize 1048576 \
-  --dump-header "$work/latest-headers" --output "$work/latest" --write-out '%{http_code}' "$latest") || fail 'Cannot resolve the latest stable release.'
-[[ "$status" =~ ^30[12378]$ ]] || fail "Latest release returned HTTP $status; retry later."
-location=$(/usr/bin/awk 'tolower($1)=="location:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0} END {print value}' "$work/latest-headers")
-[[ "$location" =~ ^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$ ]] || fail 'Latest release is not an official stable version.'
-version=${BASH_REMATCH[1]}
+# Resolve a stable version once; changing transport never re-resolves latest.
+result=0; github_latest || result=$?
+if [ "$result" != 0 ]; then
+  [ "$result" = 75 ] || fail 'Cannot resolve the latest stable release.'
+  request "$mirror_base/latest.json" "$work/mirror-latest.json" 1048576 30 || fail 'Both release sources are unavailable; retry later.'
+  fields=$(json manifest "$work/mirror-latest.json" '') || fail 'Invalid mirror release manifest.'
+  IFS=$'\t' read -r version ignored <<< "$fields"
+fi
 prefix="computer-use-$version-macos-arm64"
 name="$prefix.dmg"
-base="https://github.com/starroyhq/computer-use/releases/download/v$version"
-request "$base/$prefix.json" "$work/metadata.json" 65536 30
+if [ -f "$work/mirror-latest.json" ]; then activate_mirror; fi
+release_file "$prefix.json" "$work/metadata.json" 65536 30
 metadata_fields=$(json metadata "$work/metadata.json" "$version" "$name") || fail 'Invalid release metadata.'
-IFS=$'\t' read -r bytes digest <<< "$metadata_fields"
+IFS=$'\t' read -r bytes digest commit <<< "$metadata_fields"
 [[ "${bytes:-}" =~ ^[0-9]+$ ]] && [[ "${digest:-}" =~ ^[a-f0-9]{64}$ ]] || fail 'Invalid release metadata.'
-request "$base/$name.sha256" "$work/checksum" 65536 30
+if [ "$mirror" = 1 ]; then [ "$commit" = "$mirror_commit" ] || fail 'Mirror release commit differs from metadata.'; fi
+release_file "$name.sha256" "$work/checksum" 65536 30
 [ "$(cat "$work/checksum")" = "$digest  $name" ] || fail 'Installer checksum and metadata disagree.'
-request "$base/$name" "$work/installer.dmg" "$bytes" 1200
+release_file "$name" "$work/installer.dmg" "$bytes" 1200
 [ "$(/usr/bin/stat -f %z "$work/installer.dmg")" = "$bytes" ] || fail 'Installer download is incomplete.'
 [ "$(/usr/bin/shasum -a 256 "$work/installer.dmg" | /usr/bin/awk '{print $1}')" = "$digest" ] || fail 'Installer SHA-256 verification failed.'
 /bin/mkdir "$work/mount"

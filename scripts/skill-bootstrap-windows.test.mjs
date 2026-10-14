@@ -93,6 +93,27 @@ async function fixture(t, options = {}) {
     installer: { name, bytes: installer.length, sha256: digest },
     ...options.metadata,
   };
+  const mirrorMetadata = { ...metadata, ...options.mirrorMetadata };
+  const files = {
+    [`${prefix}.json`]: JSON.stringify(mirrorMetadata),
+    [`${name}.sha256`]: `${digest}  ${name}\n`,
+    [name]: installer,
+  };
+  const manifest = {
+    schemaVersion: 1,
+    repository: 'starroyhq/computer-use',
+    version,
+    tag: `v${version}`,
+    commit: metadata.commit,
+    publishedAt: '2026-10-14T00:00:00.000Z',
+    assets: Object.entries(files).map(([name, bytes]) => ({
+      name,
+      bytes: Buffer.byteLength(bytes),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    })),
+    ...options.manifest,
+  };
+  if (options.missingMirrorAsset) manifest.assets = manifest.assets.filter(asset => !asset.name.endsWith('.exe'));
   const home = join(directory, "Local AppData '$HOME' 电脑");
   await mkdir(home);
   const packagePath = join(home, 'Programs', 'Computer Use');
@@ -102,16 +123,37 @@ async function fixture(t, options = {}) {
   const server = createServer((request, response) => {
     requests.push(request.url);
     const path = new URL(request.url, 'http://127.0.0.1').pathname;
-    if (path.endsWith('/releases/latest')) {
+    const mirror = path.startsWith('/computer-use/');
+    if (!mirror && options.githubFailure && path.endsWith(options.githubFailure)) {
+      if (options.interrupt) {
+        response.writeHead(200, { 'Content-Length': installer.length });
+        response.write(installer.subarray(0, 10));
+        setTimeout(() => response.destroy(), 25);
+      } else {
+        response.writeHead(options.githubStatus ?? 503, options.rateLimited ? { 'X-RateLimit-Remaining': '0' } : {});
+        response.end();
+      }
+    } else if (mirror && options.mirrorStatus) {
+      response.writeHead(options.mirrorStatus);
+      response.end();
+    } else if (path.endsWith('/releases/latest')) {
       response.writeHead(302, { Location: options.latest ?? `https://github.com/starroyhq/computer-use/releases/tag/v${version}` });
       response.end();
-    } else if (path.endsWith('.json')) response.end(JSON.stringify(metadata));
+    } else if (mirror && (path.endsWith('/latest.json') || path.endsWith('/manifest.json'))) response.end(JSON.stringify(manifest));
+    else if (path.endsWith('.json')) response.end(JSON.stringify(mirror ? mirrorMetadata : metadata));
     else if (path.endsWith('.sha256')) response.end(`${digest}  ${name}\n`);
     else if (path.endsWith(name)) {
-      if (options.redirect) {
+      if (options.redirect && !mirror) {
         response.writeHead(302, { Location: options.redirect });
         response.end();
-      } else response.end(options.corrupt ? Buffer.alloc(installer.length, 88) : options.truncated ? installer.subarray(2) : installer);
+      } else
+        response.end(
+          options.corrupt || (mirror && options.mirrorCorrupt)
+            ? Buffer.alloc(installer.length, 88)
+            : options.truncated
+              ? installer.subarray(2)
+              : installer,
+        );
     } else {
       response.writeHead(404);
       response.end();
@@ -134,14 +176,15 @@ function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
     $request.AllowAutoRedirect = $false
     $request.Timeout = $TimeoutMilliseconds
     $request.ReadWriteTimeout = $TimeoutMilliseconds
-    return $request.GetResponse()
+    try { return $request.GetResponse() }
+    catch [Net.WebException] { if ($_.Exception.Response) { return $_.Exception.Response }; throw }
 }
 function Start-Process {
     param($FilePath, $ArgumentList, [switch]$PassThru)
     if ($ArgumentList.Count -ne 4 -or $ArgumentList[0] -ne '/VERYSILENT') { throw 'Unexpected installer arguments' }
     New-Item -ItemType Directory -Path ${quote(dirname(packagePath))} -Force | Out-Null
     Copy-Item -LiteralPath ${quote(source)} -Destination ${quote(packagePath)} -Recurse
-    $process = [pscustomobject]@{ ExitCode = 0 }
+    $process = [pscustomobject]@{ ExitCode = 0; Handle = 1 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Timeout) return $true }
     return $process
 }
@@ -170,6 +213,36 @@ if ($errors.Count) { throw ($errors | Out-String) }
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'parsed');
 });
+
+for (const exitCode of [0, 23]) {
+  test(`Windows observes exit code ${exitCode} from a real installer process`, { skip: !windows }, async () => {
+    const start = script.indexOf('    $process = Start-Process -FilePath $installer');
+    const end = script.indexOf("    $package = Get-Installations '' $architecture", start);
+    assert.ok(start > 0 && end > start);
+    // Exercise the exact process/wait handling, substituting only harmless cmd.exe arguments; no process API is mocked.
+    const processBlock = script.slice(start, end).replace(/-ArgumentList @\([^\n]+\)/, '-ArgumentList $testArguments');
+    const result = await powershell(`$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$installer = Join-Path $env:SystemRoot 'System32\\cmd.exe'
+$testArguments = @('/D', '/C', 'exit ${exitCode}')
+try {
+${processBlock}
+    'installer completed'
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+} finally {
+    if ($process) { $process.Dispose() }
+}`);
+    if (exitCode === 0) {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout.trim(), 'installer completed');
+    } else {
+      assert.equal(result.code, 1, result.stdout);
+      assert.match(result.stderr, /Installer returned exit code 23\./);
+    }
+  });
+}
 
 test('Windows discovery-only returns a missing result without downloading or installing', { skip: !windows }, async t => {
   const f = await fixture(t);
@@ -330,6 +403,11 @@ for (const [name, options, error] of [
   ['string sourceDirty', { metadata: { sourceDirty: 'false' } }, /metadata/],
   ['boolean size', { metadata: { bytes: true } }, /metadata/],
   ['unsafe redirect', { redirect: 'https://attacker.example/installer.exe' }, /untrusted/],
+  [
+    'cross-source redirect',
+    { redirect: 'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/releases/v99.0.1/file.exe' },
+    /original trusted source/,
+  ],
   ['prerelease', { latest: 'https://github.com/starroyhq/computer-use/releases/tag/v9.9.9-rc.1' }, /stable version/],
 ]) {
   test(`Windows bootstrap rejects ${name} before invoking an installer`, { skip: !windows }, async t => {
@@ -337,6 +415,7 @@ for (const [name, options, error] of [
     const result = await f.run();
     assert.equal(result.code, 1, result.stdout);
     assert.match(result.stderr, error);
+    assert.ok(!f.requests.some(url => url.startsWith('/computer-use/')), 'Validation failures must not use the mirror');
     await assert.rejects(readFile(join(f.packagePath, 'package.json')), /ENOENT/);
   });
 }
@@ -347,6 +426,8 @@ test('Windows URL validation rejects userinfo, HTTP, ports and untrusted hosts',
     'http://github.com/file',
     'https://github.com:444/file',
     'https://github.com.attacker.example/file',
+    'https://other-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/file',
+    'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/other/file',
   ];
   for (const url of bad) {
     const result = await powershell(
@@ -356,3 +437,59 @@ test('Windows URL validation rejects userinfo, HTTP, ports and untrusted hosts',
     assert.equal(result.stdout.trim(), 'rejected');
   }
 });
+
+for (const failure of ['/releases/latest', '.json', '.exe.sha256', '.exe']) {
+  test(`Windows uses a verified COS release after GitHub failure at ${failure}`, { skip: !windows }, async t => {
+    const f = await fixture(t, { githubFailure: failure });
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).installed, true);
+    assert.ok(f.requests.includes('/computer-use/releases/v99.0.1/manifest.json'));
+    assert.equal(f.requests.filter(url => url.endsWith('/latest.json')).length, failure === '/releases/latest' ? 1 : 0);
+    assert.equal(f.requests.filter(url => url.endsWith('/releases/latest')).length, 1);
+  });
+}
+
+for (const options of [{ interrupt: true }, { githubStatus: 429 }, { githubStatus: 403, rateLimited: true }]) {
+  test(`Windows retries a clean mirror download for ${JSON.stringify(options)}`, { skip: !windows }, async t => {
+    const f = await fixture(t, { githubFailure: '.exe', ...options });
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).installed, true);
+  });
+}
+
+for (const githubStatus of [403, 404]) {
+  test(`Windows does not switch source after HTTP ${githubStatus}`, { skip: !windows }, async t => {
+    const f = await fixture(t, { githubFailure: '.exe', githubStatus });
+    const result = await f.run();
+    assert.equal(result.code, 1);
+    assert.ok(!f.requests.some(url => url.startsWith('/computer-use/')));
+    await assert.rejects(readFile(join(f.packagePath, 'package.json')), /ENOENT/);
+  });
+}
+
+for (const [name, options, error] of [
+  ['array schema version', { manifest: { schemaVersion: [1] } }, /Invalid mirror release manifest/],
+  ['string schema version', { manifest: { schemaVersion: '1' } }, /Invalid mirror release manifest/],
+  ['another version', { manifest: { version: '99.0.2', tag: 'v99.0.2' } }, /Invalid mirror release manifest/],
+  ['another commit', { manifest: { commit: 'c'.repeat(40) } }, /commit differs/],
+  ['different primary metadata', { mirrorMetadata: { commit: 'c'.repeat(40) } }, /selected release size or SHA-256/],
+  ['corrupted mirror bytes', { mirrorCorrupt: true }, /SHA-256/],
+  ['missing installer', { missingMirrorAsset: true }, /missing an asset/],
+  ['unavailable mirror', { mirrorStatus: 503 }, /temporarily unavailable/],
+  [
+    'unsafe manifest name',
+    { manifest: { assets: [{ name: '../payload', bytes: 1, sha256: 'a'.repeat(64) }] } },
+    /Invalid mirror release asset/,
+  ],
+]) {
+  test(`Windows rejects ${name} without re-resolving latest`, { skip: !windows }, async t => {
+    const f = await fixture(t, { githubFailure: '.exe', ...options });
+    const result = await f.run();
+    assert.equal(result.code, 1, result.stdout);
+    assert.match(result.stderr, error);
+    assert.ok(!f.requests.some(url => url.endsWith('/latest.json')));
+    await assert.rejects(readFile(join(f.packagePath, 'package.json')), /ENOENT/);
+  });
+}

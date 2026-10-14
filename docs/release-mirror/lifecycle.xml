@@ -1,0 +1,9 @@
+<LifecycleConfiguration>
+  <Rule>
+    <ID>computer-use-release-retention</ID>
+    <Filter><Prefix>computer-use/</Prefix></Filter>
+    <Status>Enabled</Status>
+    <NoncurrentVersionExpiration><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionExpiration>
+    <AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation></AbortIncompleteMultipartUpload>
+  </Rule>
+</LifecycleConfiguration>

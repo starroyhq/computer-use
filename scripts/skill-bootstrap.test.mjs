@@ -93,6 +93,28 @@ async function fixture(t, changes = {}) {
     ...changes,
   };
   config.metadata = metadata;
+  const mirrorMetadata = { ...metadata, ...changes.mirrorMetadata };
+  const files = {
+    [`computer-use-${version}-macos-arm64.json`]: JSON.stringify(mirrorMetadata),
+    [`${name}.sha256`]: `${digest}  ${name}\n`,
+    [name]: installer,
+  };
+  config.mirrorMetadata = mirrorMetadata;
+  config.manifest = {
+    schemaVersion: 1,
+    repository: 'starroyhq/computer-use',
+    version,
+    tag: `v${version}`,
+    commit: metadata.commit,
+    publishedAt: '2026-10-14T00:00:00.000Z',
+    assets: Object.entries(files).map(([name, bytes]) => ({
+      name,
+      bytes: Buffer.byteLength(bytes),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    })),
+    ...changes.manifest,
+  };
+  if (changes.missingMirrorAsset) config.manifest.assets = config.manifest.assets.filter(asset => !asset.name.endsWith('.dmg'));
   await fakeApp(config.app, changes.appVersion ?? version);
   await writeFile(join(directory, 'config.json'), JSON.stringify(config));
   const code = `#!${process.execPath}
@@ -106,16 +128,23 @@ else if (operation === 'sysctl') process.stdout.write(c.unsupported ? '0\\n' : '
 else if (operation === 'sleep') await new Promise(resolve => setTimeout(resolve, 10));
 else if (operation === 'curl') {
   const url = args.at(-1); appendFileSync(c.log, JSON.stringify({ operation, url }) + '\\n');
-  let status = 200, body = '', location = '';
-  if (url.endsWith('/releases/latest')) { status = 302; location = c.latest ?? 'https://github.com/starroyhq/computer-use/releases/tag/v' + c.version; }
-  else if (url.endsWith('.json')) body = JSON.stringify(c.metadata);
+  let status = 200, body = '', location = '', extraHeaders = '';
+  const mirror = url.startsWith('https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/');
+  if (!mirror && c.githubFailure && url.endsWith(c.githubFailure)) {
+    if (c.githubExit) { writeFileSync(value('--output'), 'partial download'); process.exit(c.githubExit); }
+    status = c.githubStatus ?? 503;
+    if (c.rateLimited) extraHeaders = 'X-RateLimit-Remaining: 0\\r\\n';
+  } else if (mirror && c.mirrorStatus) status = c.mirrorStatus;
+  else if (url.endsWith('/releases/latest')) { status = 302; location = c.latest ?? 'https://github.com/starroyhq/computer-use/releases/tag/v' + c.version; }
+  else if (mirror && (url.endsWith('/latest.json') || url.endsWith('/manifest.json'))) body = JSON.stringify(c.manifest);
+  else if (url.endsWith('.json')) body = JSON.stringify(mirror ? c.mirrorMetadata : c.metadata);
   else if (url.endsWith('.sha256')) body = c.digest + '  ' + c.name + '\\n';
-  else if (url === c.base + '/' + c.name) {
-    if (c.redirect) { status = 302; location = c.redirect; }
-    else body = c.truncated ? c.installer.slice(2) : c.corrupt ? 'X'.repeat(c.installer.length) : c.installer;
+  else if (url === c.base + '/' + c.name || (mirror && url.endsWith('/' + c.name))) {
+    if (c.redirect && !mirror) { status = 302; location = c.redirect; }
+    else body = c.truncated ? c.installer.slice(2) : (c.corrupt || (mirror && c.mirrorCorrupt)) ? 'X'.repeat(c.installer.length) : c.installer;
   } else if (url === 'https://release-assets.githubusercontent.com/fixture') body = c.installer;
   else { status = 404; }
-  writeFileSync(value('--dump-header'), 'HTTP/2 ' + status + '\\r\\n' + (location ? 'Location: ' + location + '\\r\\n' : '') + '\\r\\n');
+  writeFileSync(value('--dump-header'), 'HTTP/2 ' + status + '\\r\\n' + (location ? 'Location: ' + location + '\\r\\n' : '') + extraHeaders + '\\r\\n');
   writeFileSync(value('--output'), body); process.stdout.write(String(status));
 } else if (operation === 'hdiutil') {
   if (args[0] === 'attach') cpSync(c.app, join(value('-mountpoint'), 'Computer Use.app'), { recursive: true });
@@ -284,6 +313,17 @@ for (const [name, changes, error] of [
   ['prerelease', { latest: 'https://github.com/starroyhq/computer-use/releases/tag/v1.2.3-beta' }, /stable version/],
   ['untrusted redirect', { redirect: 'https://attacker.example/payload' }, /untrusted address/],
   ['userinfo redirect', { redirect: 'https://github.com@attacker.example/payload' }, /untrusted address/],
+  ['another COS bucket', { redirect: 'https://other-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/file' }, /untrusted address/],
+  [
+    'another COS prefix',
+    { redirect: 'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/other/file' },
+    /untrusted address/,
+  ],
+  [
+    'cross-source redirect',
+    { redirect: 'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/releases/v99.0.1/file.dmg' },
+    /original trusted source/,
+  ],
   ['metadata mismatch', { metadata: { platform: 'windows-arm64' } }, /Invalid release metadata/],
   ['dirty release', { metadata: { sourceDirty: true } }, /Invalid release metadata/],
   ['truncated download', { truncated: true }, /incomplete/],
@@ -299,6 +339,7 @@ for (const [name, changes, error] of [
     assert.match(result.stderr, error);
     await assert.rejects(stat(join(f.applications, 'Computer Use.app')), /ENOENT/);
     if (changes.redirect?.includes('attacker')) assert.ok(!(await f.logs()).some(row => row.url?.includes('attacker')));
+    assert.ok(!(await f.logs()).some(row => row.url?.includes('.myqcloud.com')), 'Validation failures must not use the mirror');
   });
 }
 
@@ -320,3 +361,58 @@ test('stale/held lock stops with a bounded error without deleting another lock',
   assert.ok((await stat(lock)).isDirectory());
   assert.deepEqual(await f.logs(), []);
 });
+
+for (const failure of ['/releases/latest', '-macos-arm64.json', '.dmg.sha256', '.dmg']) {
+  test(`macOS uses a verified COS release after GitHub network failure at ${failure}`, { skip: !mac }, async t => {
+    const f = await fixture(t, { githubFailure: failure });
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).installed, true);
+    const urls = (await f.logs()).map(row => row.url).filter(Boolean);
+    assert.ok(urls.some(url => url.includes('.myqcloud.com/computer-use/releases/v99.0.1/manifest.json')));
+    assert.equal(urls.filter(url => url.endsWith('/latest.json')).length, failure === '/releases/latest' ? 1 : 0);
+    assert.equal(urls.filter(url => url.endsWith('/releases/latest')).length, 1);
+  });
+}
+
+for (const options of [{ githubExit: 28 }, { githubExit: 18 }, { githubStatus: 429 }, { githubStatus: 403, rateLimited: true }]) {
+  test(`macOS retries a clean mirror download for ${JSON.stringify(options)}`, { skip: !mac }, async t => {
+    const f = await fixture(t, { githubFailure: '.dmg', ...options });
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).installed, true);
+  });
+}
+
+for (const options of [{ githubStatus: 403 }, { githubStatus: 404 }, { githubExit: 60 }, { githubExit: 63 }, { githubExit: 130 }]) {
+  test(`macOS does not switch source after terminal failure ${JSON.stringify(options)}`, { skip: !mac }, async t => {
+    const f = await fixture(t, { githubFailure: '.dmg', ...options });
+    const result = await f.run();
+    assert.notEqual(result.code, 0);
+    assert.ok(!(await f.logs()).some(row => row.url?.includes('.myqcloud.com')));
+    await assert.rejects(stat(join(f.applications, 'Computer Use.app')), /ENOENT/);
+  });
+}
+
+for (const [name, options, error] of [
+  ['another version', { manifest: { version: '99.0.2', tag: 'v99.0.2' } }, /Invalid mirror release manifest/],
+  ['another commit', { manifest: { commit: 'c'.repeat(40) } }, /commit differs/],
+  ['different primary metadata', { mirrorMetadata: { commit: 'c'.repeat(40) } }, /selected release size or SHA-256/],
+  ['corrupted mirror bytes', { mirrorCorrupt: true }, /SHA-256/],
+  ['missing installer', { missingMirrorAsset: true }, /Invalid mirror release asset/],
+  ['unavailable mirror', { mirrorStatus: 503 }, /matching mirror release is unavailable/],
+  [
+    'unsafe manifest name',
+    { manifest: { assets: [{ name: '../payload', bytes: 1, sha256: 'a'.repeat(64) }] } },
+    /Invalid mirror release manifest/,
+  ],
+]) {
+  test(`macOS rejects ${name} without re-resolving latest`, { skip: !mac }, async t => {
+    const f = await fixture(t, { githubFailure: '.dmg', ...options });
+    const result = await f.run();
+    assert.equal(result.code, 1, result.stdout);
+    assert.match(result.stderr, error);
+    assert.ok(!(await f.logs()).some(row => row.url?.endsWith('/latest.json')));
+    await assert.rejects(stat(join(f.applications, 'Computer Use.app')), /ENOENT/);
+  });
+}

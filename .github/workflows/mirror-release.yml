@@ -1,0 +1,78 @@
+name: Mirror published Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published stable tag to mirror, for example v0.7.1
+        required: true
+        type: string
+
+# Shared with release.yml: a backfill and a fresh release must never race latest.json.
+concurrency:
+  group: official-release-publish
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Verify published bytes and mirror
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+      - name: Install locked publishing SDK
+        run: pnpm --dir .github/cos install --ignore-workspace --frozen-lockfile --ignore-scripts
+      - name: Test immutable release publication
+        run: node --test .github/scripts/publish-mirror.test.mjs
+      - name: Validate the existing stable release and exact source commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo 'Invalid release tag'; exit 1; }
+          state=$(node .github/scripts/verify-release.mjs preflight "$RELEASE_TAG")
+          jq -e '.reuse == true and .draft == false' <<< "$state" >/dev/null || { echo 'Backfill requires a published stable release'; exit 1; }
+          source_sha=$(git rev-parse --verify "$RELEASE_TAG^{commit}")
+          version=$(git show "$source_sha:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
+          [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "snapshot_time=$(jq -r .createdAt <<< "$state")" >> "$GITHUB_OUTPUT"
+      - name: Download and verify the existing 15 release assets
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --dir release-assets
+          node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
+      - name: Prepare the immutable manifest and documents from the release commit
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ steps.source.outputs.version }}
+          SNAPSHOT_TIME: ${{ steps.source.outputs.snapshot_time }}
+        run: node .github/scripts/release-manifest.mjs release-assets mirror-assets "$VERSION" "$SOURCE_SHA" "$SNAPSHOT_TIME"
+      - name: Upload and verify the version directory
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SDK_DIRECTORY: .github/cos
+        run: node .github/scripts/publish-mirror.mjs upload mirror-assets
+      - name: Verify public assets and promote the index
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SDK_DIRECTORY: .github/cos
+        run: node .github/scripts/publish-mirror.mjs promote mirror-assets

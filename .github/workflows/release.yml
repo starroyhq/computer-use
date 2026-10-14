@@ -1,6 +1,8 @@
 name: Publish verified Release
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -11,58 +13,68 @@ on:
         description: Successful CI run that built all three development packages from the tag commit
         required: true
         type: string
+      recovery_run_id:
+        description: Original publishing run holding verified-release-assets (only for recovering a partial draft)
+        required: false
+        type: string
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: official-release-publish
   cancel-in-progress: false
 
 jobs:
   source:
     name: Verify release source
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 55
     permissions:
       actions: read
       contents: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
+      reuse: ${{ steps.source.outputs.reuse }}
+      tools_sha: ${{ steps.source.outputs.tools_sha }}
+      ci_run_id: ${{ steps.source.outputs.ci_run_id }}
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       CI_RUN_ID: ${{ inputs.ci_run_id }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0
       - name: Test release artifact preparation
-        run: node --test .github/scripts/prepare-release.test.mjs
+        run: node --test .github/scripts/prepare-release.test.mjs .github/scripts/publish-mirror.test.mjs .github/scripts/select-release-ci.test.mjs
       - name: Require a successful CI run for this tag
         id: source
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release tag'; exit 1; }
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Invalid CI run ID'; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo 'Invalid release tag'; exit 1; }
           git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null
           tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
           version=$(git show "$RELEASE_TAG:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
           [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
           git cat-file -e "$RELEASE_TAG:.github/release-notes/$RELEASE_TAG.md"
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")
-          jq -e --arg sha "$tag_sha" --arg repo "$GITHUB_REPOSITORY" \
-            '.name == "CI" and .event == "push" and .head_branch == "main" and .head_repository.full_name == $repo and .head_sha == $sha and .conclusion == "success"' \
-            <<< "$run" >/dev/null || { echo 'CI run does not match the successful tag commit'; exit 1; }
+          CI_RUN_ID=$(node .github/scripts/select-release-ci.mjs "$tag_sha" "$CI_RUN_ID")
+          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "tools_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          state=$(node .github/scripts/verify-release.mjs preflight "$RELEASE_TAG")
+          reuse=$(jq -r .reuse <<< "$state")
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
 
   notarize_macos:
     name: Sign and notarize macOS ARM64
     needs: source
+    if: needs.source.outputs.reuse != 'true'
     runs-on: macos-15
     timeout-minutes: 75
     permissions:
@@ -110,24 +122,49 @@ jobs:
   publish:
     name: Verify packages and publish
     needs: [source, notarize_macos]
+    if: always() && needs.source.result == 'success' && (needs.notarize_macos.result == 'success' || needs.notarize_macos.result == 'skipped')
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
-      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      CI_RUN_ID: ${{ needs.source.outputs.ci_run_id }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      SOURCE_SHA: ${{ needs.source.outputs.sha }}
+      VERSION: ${{ needs.source.outputs.version }}
+      VERIFIED_ARTIFACT: verified-release-assets-${{ inputs.tag || github.ref_name }}-${{ needs.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.source.outputs.sha }}
+          ref: ${{ needs.source.outputs.tools_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - name: Install locked publishing SDK
+        run: pnpm --dir .github/cos install --ignore-workspace --frozen-lockfile --ignore-scripts
+      - name: Recheck release state and recover this run's preserved bytes
+        id: release_state
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=$(node .github/scripts/verify-release.mjs preflight "$RELEASE_TAG")
+          echo "reuse=$(jq -r .reuse <<< "$state")" >> "$GITHUB_OUTPUT"
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100")
+          preserved=$(jq -r --arg name "$VERIFIED_ARTIFACT" 'any(.artifacts[]; .name == $name and .expired == false)' <<< "$artifacts")
+          echo "preserved=$preserved" >> "$GITHUB_OUTPUT"
+      - name: Reuse this run's artifact if draft creation has not completed
+        if: steps.release_state.outputs.reuse != 'true' && steps.release_state.outputs.preserved == 'true'
+        run: gh run download "$GITHUB_RUN_ID" --name "$VERIFIED_ARTIFACT" --dir release-assets
       - name: Download Windows development packages
+        if: steps.release_state.outputs.reuse != 'true' && steps.release_state.outputs.preserved != 'true'
         shell: bash
         env:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
@@ -139,25 +176,88 @@ jobs:
               --dir "release-input/$platform"
           done
       - name: Download notarized macOS package
+        if: steps.release_state.outputs.reuse != 'true' && steps.release_state.outputs.preserved != 'true'
         uses: actions/download-artifact@v8
         with:
           name: computer-use-macos-arm64-${{ needs.source.outputs.sha }}-notarized
           path: release-input/macos-arm64
       - name: Verify checksums and prepare Release filenames
+        if: steps.release_state.outputs.reuse != 'true' && steps.release_state.outputs.preserved != 'true'
         shell: bash
         env:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
           VERSION: ${{ needs.source.outputs.version }}
         run: node .github/scripts/prepare-release.mjs release-input release-assets "$VERSION" "$SOURCE_SHA"
-      - name: Create draft, verify uploads, then publish
+      - name: Preserve the exact verified bytes before creating a draft
+        if: steps.release_state.outputs.reuse != 'true' && steps.release_state.outputs.preserved != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.VERIFIED_ARTIFACT }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+      - name: Reuse existing bytes or recover a partial draft from its original publishing run
+        if: steps.release_state.outputs.reuse == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" release-assets/* \
-              --verify-tag --draft \
-              --title "Computer Use $RELEASE_TAG" \
-              --notes-file ".github/release-notes/$RELEASE_TAG.md"
+          if [[ -z "$RECOVERY_RUN_ID" && "${{ steps.release_state.outputs.preserved }}" == true && "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]; then
+            RECOVERY_RUN_ID=$GITHUB_RUN_ID
+          fi
+          if [[ -n "$RECOVERY_RUN_ID" ]]; then
+            [[ "$RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Invalid recovery run ID'; exit 1; }
+            [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]] || { echo 'Only a partial draft can use recovery_run_id'; exit 1; }
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID")
+            jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$SOURCE_SHA" \
+              '(.event == "workflow_dispatch" or (.event == "push" and .head_sha == $sha)) and .path == ".github/workflows/release.yml" and .head_repository.full_name == $repo' \
+              <<< "$run" >/dev/null || { echo 'Recovery artifacts must come from the original official publishing workflow'; exit 1; }
+            gh run download "$RECOVERY_RUN_ID" --name "$VERIFIED_ARTIFACT" --dir release-assets
+          else
+            gh release download "$RELEASE_TAG" --dir release-assets || { echo 'Incomplete draft: rerun with recovery_run_id from the original publishing run. Never rebuild or overwrite its assets.'; exit 1; }
+            node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
+          fi
+      - name: Create draft without replacing an existing release
+        if: steps.release_state.outputs.reuse != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .github/scripts/verify-release.mjs preflight "$RELEASE_TAG" >/dev/null
+          git show "$SOURCE_SHA:.github/release-notes/$RELEASE_TAG.md" > release-notes.md
+          gh release create "$RELEASE_TAG" --verify-tag --draft \
+            --title "Computer Use $RELEASE_TAG" --notes-file release-notes.md
+      - name: Prepare immutable mirror from the exact release commit
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          snapshot_time=$(gh release view "$RELEASE_TAG" --json createdAt --jq .createdAt)
+          node .github/scripts/release-manifest.mjs release-assets mirror-assets "$VERSION" "$SOURCE_SHA" "$snapshot_time"
+      - name: Upload only missing draft assets and verify all GitHub bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]; then
+            node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG" --allow-partial > missing-assets.json
+            while IFS= read -r asset; do
+              gh release upload "$RELEASE_TAG" "release-assets/$asset"
+            done < <(jq -r '.[]' missing-assets.json)
           fi
           node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+      - name: Upload immutable files and verify authenticated readback
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SDK_DIRECTORY: .github/cos
+        run: node .github/scripts/publish-mirror.mjs upload mirror-assets
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+          node .github/scripts/verify-release.mjs publish "$RELEASE_TAG"
+      - name: Verify both public sources, then promote mirror index
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SDK_DIRECTORY: .github/cos
+        run: node .github/scripts/publish-mirror.mjs promote mirror-assets

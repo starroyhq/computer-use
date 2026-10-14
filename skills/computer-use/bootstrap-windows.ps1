@@ -1,11 +1,13 @@
 param([string]$Hint = '', [switch]$DiscoverOnly)
-# Standalone bootstrap v1. Discovery/installation only; never starts the Host.
+# Standalone bootstrap v2. Discovery/installation only; never starts the Host.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $ProgressPreference = 'SilentlyContinue'
 $work = $null
 $mutex = $null
 $locked = $false
+$mirrorBase = 'https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use'
+$downloadState = @{ useMirror = $false; manifest = $null }
 $originalModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
 
 function Get-NativeArchitecture {
@@ -30,9 +32,9 @@ public static class ComputerUseBootstrapNativeV1 {
     } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($pointer) }
 }
 
-function Read-BoundedJson([string]$Path) {
+function Read-BoundedJson([string]$Path, [long]$MaximumBytes = 65536) {
     $file = Get-Item -LiteralPath $Path
-    if ($file.Length -gt 65536) { throw 'Package JSON exceeds the size limit.' }
+    if ($file.Length -gt $MaximumBytes) { throw 'Package JSON exceeds the size limit.' }
     return [IO.File]::ReadAllText($Path) | ConvertFrom-Json
 }
 
@@ -92,11 +94,23 @@ function Get-Installations([string]$PackageHint, [string]$Architecture) {
 }
 
 function Assert-TrustedUri([Uri]$Uri) {
+    $mirrorHost = 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com'
     if (-not $Uri.IsAbsoluteUri -or $Uri.Scheme -cne 'https' -or $Uri.UserInfo -or -not $Uri.IsDefaultPort -or
         $Uri.Fragment -or ($Uri.Host -cne 'github.com' -and $Uri.Host -cne 'api.github.com' -and
-        -not $Uri.Host.EndsWith('.githubusercontent.com', [StringComparison]::Ordinal))) {
+        $Uri.Host -cne $mirrorHost -and -not $Uri.Host.EndsWith('.githubusercontent.com', [StringComparison]::Ordinal)) -or
+        ($Uri.Host -ceq $mirrorHost -and -not $Uri.AbsolutePath.StartsWith('/computer-use/', [StringComparison]::Ordinal))) {
         throw 'Download redirected to an untrusted address.'
     }
+}
+
+function Throw-TransientDownload([string]$Message) {
+    $failure = [Exception]::new($Message)
+    $failure.Data['ComputerUseTransientNetwork'] = $true
+    throw $failure
+}
+
+function Test-TransientDownload($Failure) {
+    return $Failure.Exception.Data['ComputerUseTransientNetwork'] -eq $true
 }
 
 function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
@@ -105,58 +119,94 @@ function Open-Response([Uri]$Uri, [int]$TimeoutMilliseconds) {
     $request.AllowAutoRedirect = $false
     $request.Timeout = $TimeoutMilliseconds
     $request.ReadWriteTimeout = $TimeoutMilliseconds
-    $request.UserAgent = 'computer-use-bootstrap/1'
+    $request.UserAgent = 'computer-use-bootstrap/2'
     try { return $request.GetResponse() }
     catch [Net.WebException] {
-        if ($_.Exception.Response) { $_.Exception.Response.Dispose() }
-        throw 'Release download failed or was blocked. Check network/system policy and retry without changing the trusted source.'
+        if ($_.Exception.Response) { return $_.Exception.Response }
+        if (@('NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'ConnectionClosed',
+            'Timeout', 'ReceiveFailure', 'SendFailure', 'KeepAliveFailure', 'PipelineFailure') -contains [string]$_.Exception.Status) {
+            Throw-TransientDownload 'Release download failed or timed out.'
+        }
+        # TLS/trust failures and cancellation must not silently change the download source.
+        throw 'Release download failed a transport security check or was canceled.'
+    }
+}
+
+function Assert-ResponseStatus($Response) {
+    $status = [int]$Response.StatusCode
+    if ($status -eq 408 -or $status -eq 429 -or ($status -ge 500 -and $status -le 599) -or
+        ($status -eq 403 -and ($Response.Headers['X-RateLimit-Remaining'] -ceq '0' -or $Response.Headers['Retry-After']))) {
+        Throw-TransientDownload "Download server temporarily unavailable (HTTP $status)."
     }
 }
 
 function Get-OfficialFile([Uri]$Uri, [string]$Output, [long]$MaximumBytes, [int]$Seconds) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    for ($hop = 0; $hop -le 5; $hop++) {
-        $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
-        if ($remaining -le 0) { throw 'Download timed out.' }
-        $response = Open-Response $Uri $remaining
-        try {
-            $status = [int]$response.StatusCode
-            if (@(301, 302, 303, 307, 308) -contains $status) {
-                $location = $response.Headers['Location']
-                if (-not $location) { throw 'Download redirect has no destination.' }
-                $Uri = [Uri]::new($Uri, $location)
-                continue
+    $mirrorRequest = $Uri.Host -ceq 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com'
+    $complete = $false
+    try {
+        for ($hop = 0; $hop -le 5; $hop++) {
+            $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0) { Throw-TransientDownload 'Download timed out.' }
+            if (($Uri.Host -ceq 'computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com') -ne $mirrorRequest) {
+                throw 'Download redirected outside its original trusted source.'
             }
-            if ($status -ne 200) { throw "Download server returned HTTP $status." }
-            if ($response.ContentLength -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
-            $downloadStream = $response.GetResponseStream()
-            $file = $null
+            $response = Open-Response $Uri $remaining
             try {
-                $file = [IO.File]::Open($Output, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                $buffer = New-Object byte[] 65536
-                [long]$total = 0
-                while ($true) {
-                    $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
-                    if ($remaining -le 0) { throw 'Download timed out.' }
-                    $downloadStream.ReadTimeout = $remaining
-                    $count = $downloadStream.Read($buffer, 0, $buffer.Length)
-                    if ($count -eq 0) { break }
-                    $total += $count
-                    if ($total -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
-                    $file.Write($buffer, 0, $count)
+                Assert-ResponseStatus $response
+                $status = [int]$response.StatusCode
+                if (@(301, 302, 303, 307, 308) -contains $status) {
+                    $location = $response.Headers['Location']
+                    if (-not $location) { throw 'Download redirect has no destination.' }
+                    $Uri = [Uri]::new($Uri, $location)
+                    continue
                 }
-                $file.Flush()
-            } finally { if ($file) { $file.Dispose() }; $downloadStream.Dispose() }
-            return
-        } finally { $response.Dispose() }
+                if ($status -ne 200) { throw "Download server returned HTTP $status." }
+                if ($response.ContentLength -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
+                $downloadStream = $response.GetResponseStream()
+                $file = $null
+                try {
+                    $file = [IO.File]::Open($Output, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $buffer = New-Object byte[] 65536
+                    [long]$total = 0
+                    while ($true) {
+                        $remaining = $Seconds * 1000 - [int]$watch.ElapsedMilliseconds
+                        if ($remaining -le 0) { Throw-TransientDownload 'Download timed out.' }
+                        $downloadStream.ReadTimeout = $remaining
+                        try { $count = $downloadStream.Read($buffer, 0, $buffer.Length) }
+                        catch [IO.IOException] { Throw-TransientDownload 'Download was interrupted.' }
+                        catch [Net.WebException] {
+                            if ($_.Exception.Status -eq [Net.WebExceptionStatus]::Timeout) { Throw-TransientDownload 'Download timed out.' }
+                            throw
+                        }
+                        if ($count -eq 0) { break }
+                        $total += $count
+                        if ($total -gt $MaximumBytes) { throw 'Download exceeds the expected size.' }
+                        $file.Write($buffer, 0, $count)
+                    }
+                    # Some Windows HttpWebRequest streams return EOF instead of throwing on a broken response.
+                    # Only a violated HTTP Content-Length is a transport failure; complete wrong-size/hash payloads stay fatal.
+                    if ($response.ContentLength -ge 0 -and $total -lt $response.ContentLength) {
+                        Throw-TransientDownload 'Download was interrupted before its declared Content-Length.'
+                    }
+                    $file.Flush()
+                } finally { if ($file) { $file.Dispose() }; $downloadStream.Dispose() }
+                $complete = $true
+                return
+            } finally { $response.Dispose() }
+        }
+        throw 'Too many download redirects.'
+    } finally {
+        # A new request always starts from byte zero; never append a different source's bytes.
+        if (-not $complete -and (Test-Path -LiteralPath $Output)) { Remove-Item -LiteralPath $Output -Force }
     }
-    throw 'Too many download redirects.'
 }
 
 function Get-LatestVersion {
     # GitHub's stable-release redirect works without the API's anonymous rate-limit quota.
     $response = Open-Response ([Uri]'https://github.com/starroyhq/computer-use/releases/latest') 30000
     try {
+        Assert-ResponseStatus $response
         if (@(301, 302, 303, 307, 308) -notcontains [int]$response.StatusCode) { throw 'Latest release did not return a stable tag.' }
         $location = [string]$response.Headers['Location']
         if ($location -cnotmatch '^https://github\.com/starroyhq/computer-use/releases/tag/v((0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8}))$') {
@@ -179,7 +229,77 @@ function Get-InstallerMetadata([string]$Path, [string]$Version, [string]$Platfor
         [math]::Truncate($metadata.installer.bytes) -ne $metadata.installer.bytes) {
         throw 'Release metadata does not match the installer.'
     }
-    return $metadata.installer
+    return $metadata
+}
+
+function Get-MirrorManifest([string]$Path, [string]$Version = '') {
+    $manifest = Read-BoundedJson $Path 1048576
+    $date = [DateTimeOffset]::MinValue
+    if ($manifest.schemaVersion -isnot [ValueType] -or $manifest.schemaVersion -is [bool] -or $manifest.schemaVersion -cne 1 -or
+        $manifest.repository -cne 'starroyhq/computer-use' -or $manifest.version -isnot [string] -or
+        $manifest.version -cnotmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$' -or
+        $manifest.tag -cne ('v' + $manifest.version) -or $manifest.commit -cnotmatch '^[a-f0-9]{40}$' -or
+        $manifest.publishedAt -isnot [string] -or $manifest.publishedAt -cnotmatch '^\d{4}-\d{2}-\d{2}T' -or
+        -not [DateTimeOffset]::TryParse($manifest.publishedAt, [ref]$date) -or
+        $manifest.assets -isnot [array] -or $manifest.assets.Count -lt 1 -or $manifest.assets.Count -gt 128 -or
+        ($Version -and $manifest.version -cne $Version)) { throw 'Invalid mirror release manifest.' }
+    $names = @{}
+    foreach ($asset in $manifest.assets) {
+        if ($asset.name -isnot [string] -or $asset.name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$' -or
+            $names.ContainsKey($asset.name) -or $asset.bytes -isnot [ValueType] -or $asset.bytes -is [bool] -or
+            $asset.bytes -le 0 -or $asset.bytes -gt 2147483648 -or [math]::Truncate($asset.bytes) -ne $asset.bytes -or
+            $asset.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid mirror release asset.' }
+        $names[$asset.name] = $true
+    }
+    return $manifest
+}
+
+function Get-MirrorAsset([string]$Name) {
+    $assets = @($downloadState.manifest.assets | Where-Object { $_.name -ceq $Name })
+    if ($assets.Count -ne 1) { throw 'Mirror release is missing an asset.' }
+    return $assets[0]
+}
+
+function Assert-MirrorFile([string]$Name, [string]$Path) {
+    $asset = Get-MirrorAsset $Name
+    if ((Get-Item -LiteralPath $Path).Length -ne $asset.bytes -or
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $asset.sha256) {
+        throw 'Mirror manifest disagrees with the selected release size or SHA-256.'
+    }
+}
+
+function Enable-Mirror {
+    $path = Join-Path $work 'mirror-manifest.json'
+    Get-OfficialFile ([Uri]"$mirrorBase/releases/v$version/manifest.json") $path 1048576 30
+    $downloadState.manifest = Get-MirrorManifest $path $version
+    $latestPath = Join-Path $work 'mirror-latest.json'
+    if ((Test-Path -LiteralPath $latestPath) -and
+        (Get-FileHash -LiteralPath $latestPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) {
+        throw 'Mirror index and version manifest disagree.'
+    }
+    if (Test-Path -LiteralPath $metadataPath) {
+        Assert-MirrorFile "$prefix.json" $metadataPath
+        $previous = Get-InstallerMetadata $metadataPath $version $platform $installerName
+        if ($previous.commit -cne $downloadState.manifest.commit) { throw 'Mirror release commit differs from the selected release.' }
+    }
+    if (Test-Path -LiteralPath $checksumPath) { Assert-MirrorFile "$installerName.sha256" $checksumPath }
+    $downloadState.useMirror = $true
+}
+
+function Get-ReleaseFile([string]$Name, [string]$Output, [long]$MaximumBytes, [int]$Seconds) {
+    if (-not $downloadState.useMirror) {
+        try {
+            Get-OfficialFile ([Uri]"https://github.com/starroyhq/computer-use/releases/download/v$version/$Name") $Output $MaximumBytes $Seconds
+            return
+        } catch {
+            if (-not (Test-TransientDownload $_)) { throw }
+            Enable-Mirror
+        }
+    }
+    $asset = Get-MirrorAsset $Name
+    if ($asset.bytes -gt $MaximumBytes) { throw 'Mirror asset exceeds the expected size.' }
+    Get-OfficialFile ([Uri]"$mirrorBase/releases/v$version/$Name") $Output $asset.bytes $Seconds
+    Assert-MirrorFile $Name $Output
 }
 
 function Write-Result([string]$Package, [string]$Architecture, [bool]$Installed) {
@@ -215,20 +335,30 @@ try {
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $work -AclObject $security
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $version = Get-LatestVersion
+    # Resolve a version once. A later network failure can only use that version's mirror.
+    try { $version = Get-LatestVersion }
+    catch {
+        if (-not (Test-TransientDownload $_)) { throw }
+        $latestPath = Join-Path $work 'mirror-latest.json'
+        Get-OfficialFile ([Uri]"$mirrorBase/latest.json") $latestPath 1048576 30
+        $latest = Get-MirrorManifest $latestPath
+        $version = $latest.version
+    }
     $platform = "windows-$architecture"
     $prefix = "computer-use-$version-$platform"
-    $name = "$prefix-setup.exe"
-    $base = "https://github.com/starroyhq/computer-use/releases/download/v$version"
+    $installerName = "$prefix-setup.exe"
     $metadataPath = Join-Path $work 'metadata.json'
-    Get-OfficialFile ([Uri]"$base/$prefix.json") $metadataPath 65536 30
-    $metadata = Get-InstallerMetadata $metadataPath $version $platform $name
     $checksumPath = Join-Path $work 'checksum'
-    Get-OfficialFile ([Uri]"$base/$name.sha256") $checksumPath 65536 30
+    if (Test-Path -LiteralPath (Join-Path $work 'mirror-latest.json')) { Enable-Mirror }
+    Get-ReleaseFile "$prefix.json" $metadataPath 65536 30
+    $releaseMetadata = Get-InstallerMetadata $metadataPath $version $platform $installerName
+    if ($downloadState.useMirror -and $releaseMetadata.commit -cne $downloadState.manifest.commit) { throw 'Mirror release commit differs from metadata.' }
+    $metadata = $releaseMetadata.installer
+    Get-ReleaseFile "$installerName.sha256" $checksumPath 65536 30
     $checksum = [IO.File]::ReadAllText($checksumPath)
-    if ($checksum -cne "$($metadata.sha256)  $name`n") { throw 'Installer checksum and metadata disagree.' }
-    $installer = Join-Path $work $name
-    Get-OfficialFile ([Uri]"$base/$name") $installer $metadata.bytes 1200
+    if ($checksum -cne "$($metadata.sha256)  $installerName`n") { throw 'Installer checksum and metadata disagree.' }
+    $installer = Join-Path $work $installerName
+    Get-ReleaseFile $installerName $installer $metadata.bytes 1200
     if ((Get-Item -LiteralPath $installer).Length -ne $metadata.bytes -or
         (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -cne $metadata.sha256) {
         throw 'Installer size or SHA-256 verification failed.'
@@ -237,6 +367,8 @@ try {
     if (Test-Path -LiteralPath $destination) { throw 'Destination appeared during installation; review it instead of overwriting.' }
     # Fixed arguments; the official installer selects its standard current-user destination.
     $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER') -PassThru
+    # Retain a native handle before waiting: Windows PowerShell can otherwise report a null ExitCode after process exit.
+    $null = $process.Handle
     if (-not $process.WaitForExit(180000)) {
         # Do not kill a partly committed installer. Keep its files until it exits for safe cleanup.
         $retainedFiles = $work

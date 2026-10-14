@@ -190,7 +190,7 @@ test('artifact verification detects bootstrap drift and tampered bytes', async t
   const result = await packageNpm({ root });
   const bytes = await readFile(result.path);
   const tar = gunzipSync(bytes);
-  const marker = Buffer.from('Standalone bootstrap v1');
+  const marker = await readFile(join(root, 'skills', 'computer-use', 'bootstrap-macos.sh'));
   const position = tar.indexOf(marker);
   assert.ok(position > 0);
   tar[position] = 'X'.charCodeAt(0);

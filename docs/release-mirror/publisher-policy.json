@@ -1,0 +1,8 @@
+{
+  "version": "2.0",
+  "statement": [{
+    "effect": "allow",
+    "action": ["name/cos:GetObject", "name/cos:PutObject"],
+    "resource": ["qcs::cos:ap-guangzhou:uid/1308799022:computer-use-download-1308799022/computer-use/*"]
+  }]
+}

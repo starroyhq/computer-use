@@ -72,7 +72,7 @@ export function setupPrompt(profile: string, paths: LocalPaths): string {
   const binding = localBinding(profile, paths);
   return `请为你当前使用的 Agent 安装 Computer Use Skill，并完成连接验证。先验证下方本机 App 路径，再以参数数组调用它自带的 node 和 cli，执行 skill export --profile ${profile}，取得完整 SKILL.md。按你自身支持的 Skill 安装方式安装并启用，仅复用内容及本地绑定一致的 Skill，保留用户自定义改动；不要让我手动保存脚本、选择目录或安装 Node/Git。如果你不支持安装 Skill，说明限制，不要声称已安装。
 
-路径只是发现提示；移动后先重新定位 App。旧 App 没有 skill export 时读取经验证包内的 skills/computer-use/SKILL.md。确实没有 App 时，从官方仓库 https://github.com/starroyhq/computer-use/blob/main/skills/computer-use/SKILL.md 获取 Skill，按其中说明安装 App。
+路径只是发现提示；移动后先重新定位 App。旧 App 没有 skill export 时读取经验证包内的 skills/computer-use/SKILL.md。确实没有 App 时，从官方仓库 https://github.com/starroyhq/computer-use/blob/main/skills/computer-use/SKILL.md 获取 Skill。仅在网络故障或明确限流时，改读 https://computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/latest.json；要求 schemaVersion=1、repository=starroyhq/computer-use、正式语义版本及匹配的 tag，从同一域名 computer-use/releases/TAG/SKILL.md 下载，按清单中的 bytes 和 SHA-256 验证后使用。固定选定版本，不跟随其他域名或清单内的任意 URL；校验失败或用户取消立即停止。按 Skill 说明安装 App。
 
 安装后按 Skill 读取 App 当前指南，使用下方 profile，完成 doctor、targets 和实际 observe 验证。后续每个新会话也遵循 Skill 中的指南读取、故障恢复和结果验证流程。已有 profile 不重复配对；系统权限和首次配对由我在本机批准。暂停、紧停和撤销仍由我在 App 内处理，不绕过、不自动重新配对。最后报告 Skill 安装位置、使用的 profile 和实际观察结果。
 

@@ -57,10 +57,12 @@ describe('local onboarding', () => {
     expect(prompt).toContain('skill export --profile existing-agent');
     expect(prompt).toContain('保留用户自定义改动');
     expect(prompt).toContain('首次配对由我在本机批准');
+    expect(prompt).toContain('computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/latest.json');
+    expect(prompt).toContain('校验失败或用户取消立即停止');
     expect(prompt).not.toMatch(/\.codex|\.claude|```bash|```powershell/);
     expect(prompt).not.toContain(token);
     expect(prompt).not.toContain('test-client');
-    expect(prompt.length).toBeLessThan(2200);
+    expect(prompt.length).toBeLessThan(2500);
     expect(JSON.parse(prompt.split('```json\n')[1]!.split('```')[0]!)).toMatchObject({ profile: 'existing-agent', ...paths });
     expect(() => setupPrompt('../invalid', paths)).toThrow('Invalid profile');
   });
