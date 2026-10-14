@@ -90,19 +90,47 @@ function cosStore() {
   // CI-only official SDK; no cloud SDK or credentials are bundled in the App or npm launcher.
   const require = createRequire(join(resolve(process.env.COS_SDK_DIRECTORY), 'package.json'));
   const COS = require('cos-nodejs-sdk-v5');
+  // This is a connection/socket idle timeout, not a limit on a progressing large transfer.
+  // The pinned SDK retries network failures itself; MaxRetryTimes is not a supported option.
   const client = new COS({ SecretId: process.env.COS_SECRET_ID, SecretKey: process.env.COS_SECRET_KEY,
     ...(process.env.COS_SECURITY_TOKEN ? { SecurityToken: process.env.COS_SECURITY_TOKEN } : {}),
-    Protocol: 'https:', Timeout: 20 * 60_000, MaxRetryTimes: 2 });
+    Protocol: 'https:', Timeout: 60_000 });
   const common = { Bucket: 'computer-use-download-1308799022', Region: 'ap-guangzhou' };
+  const progress = (method, key) => {
+    const started = Date.now();
+    console.log(`COS ${method} ${key}: started`);
+    return result => console.log(`COS ${method} ${key}: ${result} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
+  };
+  const failure = error => {
+    // SDK errors may contain signed requests. Only report bounded codes, never the raw error.
+    const status = Number.isInteger(error.statusCode) ? error.statusCode : 'unknown';
+    const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,48}$/.test(error.code) ? error.code : 'UNKNOWN';
+    return `HTTP ${status}, ${code}`;
+  };
+  console.log(`Mirror runtime: ${process.version} (${process.execPath})`);
   return {
     async get(Key) {
-      try { return Buffer.from((await client.getObject({ ...common, Key })).Body); }
-      catch (error) { if (error.statusCode === 404) return null; throw new Error(`COS read failed (HTTP ${error.statusCode ?? 'unknown'}).`); }
+      const report = progress('GET', Key);
+      try {
+        const bytes = Buffer.from((await client.getObject({ ...common, Key })).Body);
+        report(`${bytes.length} bytes`);
+        return bytes;
+      } catch (error) {
+        if (error.statusCode === 404) { report('not found'); return null; }
+        report(`failed (${failure(error)})`);
+        throw new Error(`COS read failed for ${Key} (${failure(error)}).`);
+      }
     },
     async put(Key, Body, CacheControl) {
-      try { await client.putObject({ ...common, Key, Body, ContentLength: Body.length, CacheControl,
-        ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream' }); }
-      catch (error) { throw new Error(`COS upload failed (HTTP ${error.statusCode ?? 'unknown'}).`); }
+      const report = progress('PUT', Key);
+      try {
+        await client.putObject({ ...common, Key, Body, ContentLength: Body.length, CacheControl,
+          ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream' });
+        report(`${Body.length} bytes`);
+      } catch (error) {
+        report(`failed (${failure(error)})`);
+        throw new Error(`COS upload failed for ${Key} (${failure(error)}).`);
+      }
     },
   };
 }

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { compareVersions, mirrorBase, platforms, prepareMirror, releaseNames, validateManifest } from './release-manifest.mjs';
 import { promoteMirror, uploadMirror, verifyGitHubRelease, verifyPublicAsset } from './publish-mirror.mjs';
 import { inspectRelease, runReleaseCommand, verifyReleaseAssets } from './verify-release.mjs';
@@ -11,6 +13,57 @@ import { inspectRelease, runReleaseCommand, verifyReleaseAssets } from './verify
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const latestKey = 'computer-use/latest.json';
 const serialized = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+
+test('COS CLI reports progress and propagates network failures without exposing signed request details', async t => {
+  const f = await fixture(t);
+  await f.prepare();
+  const sdk = join(f.output, '..', 'sdk');
+  const moduleDirectory = join(sdk, 'node_modules', 'cos-nodejs-sdk-v5');
+  await mkdir(moduleDirectory, { recursive: true });
+  await writeFile(join(sdk, 'package.json'), '{}');
+  await writeFile(join(moduleDirectory, 'index.js'), `
+    module.exports = class {
+      constructor(options) {
+        if (options.Timeout !== 60000 || 'MaxRetryTimes' in options) throw new Error('Unexpected timeout configuration');
+        this.objects = new Map();
+      }
+      fail(operation) {
+        if (process.env.FAKE_COS_FAILURE !== operation) return;
+        const error = new Error('private-test-secret signed request');
+        error.code = process.env.FAKE_COS_CODE;
+        error.headers = { Authorization: 'private-test-secret' };
+        throw error;
+      }
+      async getObject({ Key }) {
+        this.fail('GET');
+        if (!this.objects.has(Key)) throw Object.assign(new Error('not found'), { statusCode: 404 });
+        return { Body: this.objects.get(Key) };
+      }
+      async putObject({ Key, Body }) { this.fail('PUT'); this.objects.set(Key, Body); }
+    };
+  `);
+  for (const [operation, code] of [['', ''], ['GET', 'ESOCKETTIMEDOUT'], ['PUT', 'ECONNRESET'], ['GET', 'private-test-secret']]) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./publish-mirror.mjs', import.meta.url)), 'upload', f.output], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, COS_SDK_DIRECTORY: sdk, COS_SECRET_ID: 'private-test-id', COS_SECRET_KEY: 'private-test-secret',
+        FAKE_COS_FAILURE: operation, FAKE_COS_CODE: code },
+    });
+    assert.ifError(result.error);
+    const output = result.stdout + result.stderr;
+    assert.doesNotMatch(output, /private-test-secret|private-test-id|signed request|Authorization/);
+    assert.match(output, /Mirror runtime: v\d/);
+    assert.match(output, /COS GET computer-use\/latest.json: started/);
+    if (operation) {
+      assert.equal(result.status, 1);
+      assert.match(output, new RegExp(`failed \\(HTTP unknown, ${code === 'private-test-secret' ? 'UNKNOWN' : code}\\)`));
+    } else {
+      assert.equal(result.status, 0);
+      assert.match(output, /COS GET computer-use\/latest.json: not found/);
+      assert.match(output, /COS PUT .*: \d+ bytes \([\d.]+s\)/);
+      assert.match(output, /upload: v0.7.1 verified\./);
+    }
+  }
+});
 
 async function fixture(t, version = '0.7.1') {
   const directory = await mkdtemp(join(tmpdir(), 'computer-use-mirror-'));
