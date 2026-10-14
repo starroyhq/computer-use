@@ -76,7 +76,8 @@ jobs:
   notarize_macos:
     name: Sign and notarize macOS ARM64
     needs: source
-    if: needs.source.outputs.reuse != 'true'
+    # Explicit recovery must use preserved bytes even when the read-only source token cannot see a draft.
+    if: needs.source.outputs.reuse != 'true' && !inputs.recovery_run_id
     runs-on: macos-15
     timeout-minutes: 75
     permissions:
