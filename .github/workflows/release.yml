@@ -17,14 +17,6 @@ on:
         description: Original publishing run holding verified-release-assets (only for recovering a partial draft)
         required: false
         type: string
-      publish_runner:
-        description: Publication runner (macOS provides an alternative network path for recovery)
-        required: false
-        type: choice
-        default: ubuntu-24.04
-        options:
-          - ubuntu-24.04
-          - macos-15
 
 concurrency:
   group: official-release-publish
@@ -134,8 +126,8 @@ jobs:
     name: Verify packages and publish
     needs: [source, notarize_macos]
     if: always() && needs.source.result == 'success' && (needs.notarize_macos.result == 'success' || needs.notarize_macos.result == 'skipped')
-    runs-on: ${{ inputs.publish_runner || 'ubuntu-24.04' }}
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write
@@ -156,11 +148,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24.21.0
-      - uses: pnpm/action-setup@v6
-        with:
-          run_install: false
-      - name: Install locked publishing SDK
-        run: pnpm --dir .github/cos install --ignore-workspace --frozen-lockfile --ignore-scripts
       - name: Recheck release state and recover this run's preserved bytes
         id: release_state
         shell: bash
@@ -237,14 +224,6 @@ jobs:
           git show "$SOURCE_SHA:.github/release-notes/$RELEASE_TAG.md" > release-notes.md
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "Computer Use $RELEASE_TAG" --notes-file release-notes.md
-      - name: Prepare immutable mirror from the exact release commit
-        env:
-          SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          VERSION: ${{ needs.source.outputs.version }}
-        run: |
-          set -euo pipefail
-          snapshot_time=$(gh release view "$RELEASE_TAG" --json createdAt --jq .createdAt)
-          node .github/scripts/release-manifest.mjs release-assets mirror-assets "$VERSION" "$SOURCE_SHA" "$snapshot_time"
       - name: Upload only missing draft assets and verify all GitHub bytes
         shell: bash
         run: |
@@ -256,19 +235,7 @@ jobs:
             done < <(jq -r '.[]' missing-assets.json)
           fi
           node .github/scripts/verify-release.mjs release-assets "$RELEASE_TAG"
-      - name: Upload immutable files and verify authenticated readback
-        env:
-          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
-          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
-          COS_SDK_DIRECTORY: .github/cos
-        run: node .github/scripts/publish-mirror.mjs upload mirror-assets
       - name: Publish GitHub release
         run: |
           set -euo pipefail
           node .github/scripts/verify-release.mjs publish "$RELEASE_TAG"
-      - name: Verify both public sources, then promote mirror index
-        env:
-          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
-          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
-          COS_SDK_DIRECTORY: .github/cos
-        run: node .github/scripts/publish-mirror.mjs promote mirror-assets
