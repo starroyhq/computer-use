@@ -57,6 +57,8 @@ describe('local onboarding', () => {
     expect(prompt).toContain('skill export --profile existing-agent');
     expect(prompt).toContain('保留用户自定义改动');
     expect(prompt).toContain('首次配对由我在本机批准');
+    expect(prompt).toContain('允许所有应用');
+    expect(prompt).toContain('保留原凭据和 profile');
     expect(prompt).toContain('computer-use-download-1308799022.cos.ap-guangzhou.myqcloud.com/computer-use/latest.json');
     expect(prompt).toContain('校验失败或用户取消立即停止');
     expect(prompt).not.toMatch(/\.codex|\.claude|```bash|```powershell/);
@@ -98,10 +100,14 @@ describe('local onboarding', () => {
     await expect(stat(credentials)).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('does not mistake an offline saved credential for a valid grant or change it', async () => {
-    await credential();
+    await writeFile(
+      join(directory, 'default.json'),
+      JSON.stringify({ clientId: 'test-client', token, authorization: { allApps: true, appIds: [], browser: true, foreground: true } }),
+    );
     const before = await readFile(join(directory, 'default.json'), 'utf8');
     const result = await preflight(options());
     expect(result.profile.state).toBe('unverified');
+    expect(result.profile).not.toHaveProperty('authorization');
     expect(result.profiles).toEqual(['default']);
     expect(JSON.stringify(result)).not.toContain(token);
     expect(await readFile(join(directory, 'default.json'), 'utf8')).toBe(before);
@@ -148,8 +154,43 @@ describe('local onboarding', () => {
     });
     const result = await preflight({ ...options(), socket });
     expect(result.profile.state).toBe('valid');
+    expect(result.profile).not.toHaveProperty('authorization');
     expect(result.host.state).toBe('paused');
     expect(methods).toEqual(['capabilities']);
+  });
+  it.each([
+    { allApps: true, appIds: [], browser: false, foreground: true },
+    { allApps: false, appIds: ['com.example.Editor'], browser: false, foreground: false },
+    { allApps: false, appIds: [], browser: true, foreground: true },
+  ])('reports only the selected credential’s verified authorization: %j', async authorization => {
+    await credential();
+    const methods: string[] = [];
+    const socket = await server((request, peer) => {
+      methods.push(request.method);
+      expect(request.token).toBe(token);
+      peer.end(
+        JSON.stringify({ id: request.id, result: { paused: false, stopped: false, authorization: { ...authorization, token } } }) + '\n',
+      );
+    });
+    const result = await preflight({ ...options(), socket });
+    expect(result.profile).toEqual({ name: 'default', state: 'valid', authorization });
+    expect(methods).toEqual(['capabilities']);
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+  it.each([
+    undefined,
+    null,
+    { allApps: 'true', appIds: [], browser: false, foreground: true },
+    { allApps: true, browser: false, foreground: true },
+    { allApps: false, appIds: [42], browser: false, foreground: true },
+  ])('leaves authorization unknown for an old or malformed optional response: %j', async authorization => {
+    await credential();
+    const socket = await server((request, peer) =>
+      peer.end(JSON.stringify({ id: request.id, result: { paused: false, stopped: false, authorization } }) + '\n'),
+    );
+    const result = await preflight({ ...options(), socket });
+    expect(result.profile).toEqual({ name: 'default', state: 'valid' });
+    expect(result.host.state).toBe('ready');
   });
   it('keeps rejected credentials and reports unauthorized without re-pairing', async () => {
     await credential();
@@ -158,6 +199,7 @@ describe('local onboarding', () => {
     );
     const result = await preflight({ ...options(), socket });
     expect(result.profile.state).toBe('unauthorized');
+    expect(result.profile).not.toHaveProperty('authorization');
     expect(await readFile(join(directory, 'default.json'), 'utf8')).toContain(token);
   });
   it('bounds an unresponsive existing runtime instead of hanging the connection pane', async () => {

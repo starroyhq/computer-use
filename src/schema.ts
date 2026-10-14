@@ -126,6 +126,7 @@ export const pairSchema = z
 export const hostCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.enum(['pair_allow', 'pair_deny']), clientId: id, allApps: z.boolean().optional() }).strict(),
   z.object({ command: z.literal('revoke'), clientId: id }).strict(),
+  z.object({ command: z.literal('grant_all_apps'), clientId: id, requestId: z.uuid() }).strict(),
   z.object({ command: z.enum(['foreground_allow', 'foreground_deny']), sessionId: id }).strict(),
   z.object({ command: z.enum(['pause', 'resume', 'stop', 'http_enable', 'http_disable']) }).strict(),
   z.object({ command: z.literal('control_ready'), pid: z.number().int().positive().max(2_147_483_647) }).strict(),

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ActionStore,
   ClientStore,
@@ -9,6 +9,7 @@ import {
   hash,
   matchesHash,
   privateDirectory,
+  prepareClientSnapshot,
   readJson,
   type ActionRecord,
   type ActionState,
@@ -91,6 +92,175 @@ describe('private persisted state', () => {
     const second = store.save();
     await Promise.all([first, second]);
     expect(await readJson(file)).toEqual([]);
+  });
+
+  it('does not expose an expanded grant before persistence and leaves the old grant after a write failure', async () => {
+    const file = join(directory, 'clients.json');
+    const writer = vi.fn(prepareClientSnapshot);
+    const store = new ClientStore(file, writer);
+    const token = 'existing-token';
+    const client = {
+      id: 'existing',
+      name: 'Existing',
+      tokenHash: hash(token),
+      grant: { appIds: ['com.example.Editor'], browser: true, foreground: false },
+    };
+    await store.add(client, () => true);
+    let complete!: () => void;
+    const gate = new Promise<void>(resolve => {
+      complete = resolve;
+    });
+    writer.mockImplementationOnce(async (path, value) => {
+      await gate;
+      return prepareClientSnapshot(path, value);
+    });
+    const pending = store.grantAllApps(client.id, () => true);
+    await vi.waitFor(() => expect(writer).toHaveBeenCalledTimes(2));
+    expect(store.authenticate(token)).toEqual(client);
+    expect(await readJson(file)).toEqual([client]);
+    complete();
+    await pending;
+    expect(store.authenticate(token)).toMatchObject({ grant: { allApps: true, appIds: [], foreground: true, browser: true } });
+
+    const other = { ...client, id: 'failure', tokenHash: hash('failure-token') };
+    await store.add(other, () => true);
+    writer.mockRejectedValueOnce(new Error('private path or credential must not leak'));
+    await expect(store.grantAllApps(other.id, () => true)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(store.authenticate('failure-token')).toEqual(other);
+    expect(((await readJson(file)) as (typeof client)[]).find(value => value.id === other.id)).toEqual(other);
+  });
+
+  it('revokes immediately while an upgrade is saving and never resurrects it on disk or in memory', async () => {
+    const file = join(directory, 'clients.json');
+    const writer = vi.fn(prepareClientSnapshot);
+    const store = new ClientStore(file, writer);
+    const token = 'revoked-during-upgrade';
+    const client = { id: 'revoked', name: 'Old', tokenHash: hash(token), grant: { appIds: ['com.example.Editor'], browser: false } };
+    await store.add(client, () => true);
+    let complete!: () => void;
+    const gate = new Promise<void>(resolve => {
+      complete = resolve;
+    });
+    writer.mockImplementationOnce(async (path, value) => {
+      await gate;
+      return prepareClientSnapshot(path, value);
+    });
+    const upgraded = store.grantAllApps(client.id, () => true);
+    const rejected = expect(upgraded).rejects.toMatchObject({ code: 'not_found' });
+    await vi.waitFor(() => expect(writer).toHaveBeenCalledTimes(2));
+    const revoked = store.revoke(client.id);
+    expect(() => store.authenticate(token)).toThrow();
+    complete();
+    await Promise.all([rejected, revoked]);
+    expect(await readJson(file)).toEqual([]);
+    await expect(store.grantAllApps(client.id, () => true)).rejects.toMatchObject({ code: 'not_found' });
+    const loaded = new ClientStore(file);
+    await loaded.load();
+    expect(() => loaded.authenticate(token)).toThrow();
+  });
+
+  it('serializes new pairings with upgrades and discards a grant interrupted before commit', async () => {
+    const file = join(directory, 'clients.json');
+    const writer = vi.fn(prepareClientSnapshot);
+    const store = new ClientStore(file, writer);
+    const first = { id: 'first', name: 'First', tokenHash: hash('first-token'), grant: { appIds: ['com.example.Editor'], browser: false } };
+    const second = { ...first, id: 'second', tokenHash: hash('second-token') };
+    await store.add(first, () => true);
+    await Promise.all([store.grantAllApps(first.id, () => true), store.add(second, () => true)]);
+    expect(await readJson(file)).toEqual([store.authenticate('first-token'), second]);
+    const count = writer.mock.calls.length;
+    await store.grantAllApps(first.id, () => true);
+    expect(writer).toHaveBeenCalledTimes(count);
+    let active = true;
+    writer.mockImplementationOnce(async (path, value) => {
+      const staged = await prepareClientSnapshot(path, value);
+      active = false;
+      return staged;
+    });
+    await expect(store.grantAllApps(second.id, () => active)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(store.authenticate('second-token')).toEqual(second);
+    expect(await readJson(file)).toEqual([store.authenticate('first-token'), second]);
+  });
+
+  it('does not authenticate new credentials while pairing is being saved or after an interrupted approval', async () => {
+    const file = join(directory, 'clients.json');
+    const token = 'not-active-until-saved';
+    let active = true;
+    let store!: ClientStore;
+    const writer = vi.fn(async (path: string, value: unknown) => {
+      expect(() => store.authenticate(token)).toThrow();
+      const staged = await prepareClientSnapshot(path, value);
+      active = false;
+      return staged;
+    });
+    store = new ClientStore(file, writer);
+    await expect(
+      store.add({ id: 'pending', name: 'Pending', tokenHash: hash(token), grant: { appIds: ['app'], browser: false } }, () => active),
+    ).rejects.toMatchObject({ code: 'unavailable' });
+    expect(await readJson(file)).toBeUndefined();
+    expect(() => store.authenticate(token)).toThrow();
+  });
+
+  it('keeps the persisted grant restricted when stop is followed by temporary-file cleanup failure', async () => {
+    const file = join(directory, 'clients.json');
+    const writer = vi.fn(prepareClientSnapshot);
+    const store = new ClientStore(file, writer);
+    const client = {
+      id: 'interrupted',
+      name: 'Old',
+      tokenHash: hash('old-token'),
+      grant: { appIds: ['com.example.Editor'], browser: false },
+    };
+    await store.add(client, () => true);
+    let active = true;
+    writer.mockImplementationOnce(async (path, value) => {
+      const staged = await prepareClientSnapshot(path, value);
+      active = false;
+      return {
+        ...staged,
+        discard: async () => {
+          throw new Error('cleanup failed');
+        },
+      };
+    });
+    await expect(store.grantAllApps(client.id, () => active)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(await readJson(file)).toEqual([client]);
+    const restarted = new ClientStore(file);
+    await restarted.load();
+    expect(restarted.authenticate('old-token').grant.allApps).toBe(false);
+  });
+
+  it('does not commit a stale snapshot after another client is revoked during preparation', async () => {
+    const file = join(directory, 'clients.json');
+    const writer = vi.fn(prepareClientSnapshot);
+    const store = new ClientStore(file, writer);
+    const client = {
+      id: 'upgrading',
+      name: 'Old',
+      tokenHash: hash('kept-token'),
+      grant: { appIds: ['com.example.Editor'], browser: false },
+    };
+    const revoked = { ...client, id: 'revoking', tokenHash: hash('removed-token') };
+    await store.add(client, () => true);
+    await store.add(revoked, () => true);
+    let revocation: Promise<void> | undefined;
+    let staleCommitted = false;
+    writer.mockImplementationOnce(async (path, value) => {
+      const staged = await prepareClientSnapshot(path, value);
+      revocation = store.revoke(revoked.id);
+      return {
+        ...staged,
+        commit: () => {
+          staleCommitted = true;
+          staged.commit();
+        },
+      };
+    });
+    await store.grantAllApps(client.id, () => true);
+    await revocation;
+    expect(staleCommitted).toBe(false);
+    expect(await readJson(file)).toEqual([store.authenticate('kept-token')]);
+    expect(() => store.authenticate('removed-token')).toThrow();
   });
 
   it('recovers queued and running work as unknown without replaying successful actions', async () => {

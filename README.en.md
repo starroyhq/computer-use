@@ -72,7 +72,7 @@ On macOS, open Settings from the menu bar and grant Computer Use **Accessibility
 
 Go to **Settings → Connect → Copy setup prompt** and paste it into your Agent. The Agent follows the prompt to retrieve the complete Skill, check the local App and configure its connection. You do not need to choose a Skill directory manually. Approve the first pairing request locally in the App.
 
-The default profile is `default`; existing pairings are preserved. **New pairings authorize all desktop applications with one approval**, including future applications and windows, and persist across host restarts. Existing restricted pairings keep their scope. Profile selection and manual MCP configuration are under Advanced connection.
+The default profile is `default`; existing pairings are preserved. **New pairings authorize all desktop applications with one approval**, including future applications and windows, and persist across host restarts. Existing restricted pairings keep their scope until you upgrade them through **Clients → Allow all apps**, preserving the profile and credential. The advanced `--app` restricted mode remains available; windows outside its grant are omitted from `targets`. Profile selection and manual MCP configuration are under Advanced connection.
 
 ### 3. Verify a real observation first
 
@@ -130,7 +130,7 @@ Manage service status, paired clients and updates in the native App. Release bui
 
 v0.7.1 adds `recover --profile NAME` for any Agent. It restores service faults without clearing pause, emergency stop or revocation, and never replays actions with uncertain outcomes. The Skill requires each new session to read the installed App's current instructions, and requires a new session and observation after recovery.
 
-Pairing includes permission for foreground actions, while execution defaults to background mode and **never switches to foreground mode automatically**. Background support depends on the application and control; it cannot guarantee zero focus changes. Source execution, custom sockets and remote HTTP do not start the host automatically.
+Pairing includes permission for foreground actions, while execution defaults to background mode. Within an authorized task, changing applications, windows or sessions does not require another approval. When real mouse and keyboard control is needed, the Agent gives a short notice and proceeds; continuous work needs no per-window confirmation, and competing user input calls for a pause to coordinate. Background support depends on the application and control; it cannot guarantee zero focus changes. Source execution, custom sockets and remote HTTP do not start the host automatically.
 
 HTTP is off by default and listens only on loopback when enabled; cross-machine connections use a manual SSH tunnel. Default action logs exclude screenshots, typed text, URLs and window titles; CLI screenshots are saved locally. Screenshots and results sent to a cloud Agent are still processed by your chosen model provider. See [permissions and action limits](docs/USAGE.md).
 

@@ -152,7 +152,7 @@ describe('Runtime authorization and execution', () => {
   });
 
   it('confirms pairing only after credentials have been persisted', async () => {
-    const save = vi.spyOn(runtime.clients, 'save').mockRejectedValueOnce(new Error('disk failure'));
+    const save = vi.spyOn(runtime.clients, 'add').mockRejectedValueOnce(new Error('disk failure'));
     await expect(pair()).rejects.toThrow('disk failure');
     expect(events.findLast(e => e.event === 'decision_finished')).toMatchObject({ approved: false });
     expect(runtime.clients.clients.size).toBe(0);
@@ -206,7 +206,7 @@ describe('Runtime authorization and execution', () => {
     runtime.clients.clients.get(legacy.clientId)!.grant = { appIds: [target.appId], browser: false };
     await expect(call(legacy.token, 'session_open', { targetId: target.id, mode: 'foreground' })).rejects.toMatchObject({
       code: 'permission_denied',
-      message: expect.stringContaining('pair'),
+      message: expect.stringContaining('Allow all apps'),
     });
     await expect(call(legacy.token, 'session_open', { targetId: target.id })).resolves.toMatchObject({ mode: 'background' });
     expect(events.some(e => e.event === 'foreground_request')).toBe(false);
@@ -343,6 +343,88 @@ describe('Runtime authorization and execution', () => {
     await runtime.control({ command: 'revoke', clientId: client.clientId });
     await expect(call(client.token, 'observe', { sessionId })).rejects.toMatchObject({ code: 'unauthorized' });
     expect(await readFile(join(directory, 'clients.json'), 'utf8')).toBe('[]\n');
+  });
+
+  it('upgrades a scoped client locally without replacing credentials and keeps new windows visible after restart', async () => {
+    const client = await pair('Existing desktop', true, { appIds: [target.appId], browser: true });
+    const before = structuredClone(runtime.authenticate(client.token));
+    expect(await call(client.token, 'targets')).toEqual([target]);
+    events = [];
+    const command = { command: 'grant_all_apps' as const, clientId: client.clientId, requestId: randomUUID() };
+    await runtime.control(command);
+    const upgraded = runtime.authenticate(client.token);
+    expect(upgraded).toEqual({ ...before, grant: { allApps: true, appIds: [], browser: true, foreground: true } });
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({ operation: { ...command, ok: true } });
+    expect(JSON.stringify(events)).not.toContain(client.token);
+    expect(JSON.stringify(events)).not.toContain(before.tokenHash);
+    const persisted = JSON.parse(await readFile(join(directory, 'clients.json'), 'utf8'));
+    expect(persisted).toEqual([upgraded]);
+    const newWindow = { ...secretTarget, id: 'later-window' };
+    backend.targets = vi.fn(async () => [target, secretTarget, newWindow]);
+    for (const next of [secretTarget, newWindow]) {
+      const opened = await call<{ sessionId: string }>(client.token, 'session_open', { targetId: next.id });
+      await observation(client.token, opened.sessionId);
+      await call(client.token, 'session_close', { sessionId: opened.sessionId });
+    }
+    await runtime.control(command);
+    expect(events.some(event => event.event === 'pair_request' || event.event === 'foreground_request')).toBe(false);
+    await runtime.close();
+    runtime = new Runtime({ dataDir: directory, backends: [backend], emit: event => events.push(event), now: () => clock });
+    await runtime.start();
+    expect(await call(client.token, 'targets')).toEqual([target, secretTarget, newWindow]);
+    expect(runtime.authenticate(client.token).tokenHash).toBe(before.tokenHash);
+  });
+
+  it('reports only the authenticated client scope in capabilities and doctor', async () => {
+    const scoped = await pair();
+    const all = await pair('All', true, {});
+    for (const method of ['capabilities', 'doctor']) {
+      const result = await call(scoped.token, method);
+      expect(result.authorization).toEqual({ allApps: false, appIds: [target.appId], browser: false, foreground: true });
+      expect(JSON.stringify(result)).not.toContain(scoped.token);
+      expect(JSON.stringify(result)).not.toContain(runtime.authenticate(scoped.token).tokenHash);
+      expect((await call(all.token, method)).authorization).toMatchObject({ allApps: true, appIds: [] });
+      await expect(call(undefined, method)).rejects.toMatchObject({ code: 'unauthorized' });
+    }
+  });
+
+  it('keeps a failed scope upgrade restricted and rejects browser-only, revoked and public upgrade requests', async () => {
+    const client = await pair();
+    const command = { command: 'grant_all_apps' as const, clientId: client.clientId, requestId: randomUUID() };
+    for (const method of ['grant_all_apps', 'control'])
+      await expect(call(client.token, method, command)).rejects.toMatchObject({ code: 'invalid_request' });
+    const save = vi
+      .spyOn(runtime.clients, 'grantAllApps')
+      .mockRejectedValueOnce(new CuError('unavailable', 'Could not save client authorization.'));
+    await runtime.control(command);
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({
+      operation: { ...command, ok: false, error: { code: 'unavailable' } },
+    });
+    expect(await call(client.token, 'targets')).toEqual([target]);
+    save.mockRestore();
+    const browser = await pair('Browser', true, { browser: true });
+    await runtime.control({ ...command, clientId: browser.clientId });
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({
+      operation: { ok: false, error: { code: 'permission_denied' } },
+    });
+    expect(runtime.authenticate(browser.token).grant).toMatchObject({ allApps: false, appIds: [], browser: true });
+    await runtime.control({ command: 'revoke', clientId: client.clientId });
+    await runtime.control(command);
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({ operation: { ok: false, error: { code: 'not_found' } } });
+    expect(() => runtime.authenticate(client.token)).toThrow();
+  });
+
+  it('allows scope administration during pause without resuming and refuses upgrades after emergency stop', async () => {
+    const client = await pair();
+    await runtime.control({ command: 'pause' });
+    await runtime.control({ command: 'grant_all_apps', clientId: client.clientId, requestId: randomUUID() });
+    expect((await call(client.token, 'capabilities')).paused).toBe(true);
+    await expect(call(client.token, 'targets')).rejects.toMatchObject({ code: 'paused' });
+    expect(runtime.authenticate(client.token).grant.allApps).toBe(true);
+    await runtime.control({ command: 'stop' });
+    await runtime.control({ command: 'grant_all_apps', clientId: client.clientId, requestId: randomUUID() });
+    expect(events.findLast(event => event.event === 'clients')).toMatchObject({ operation: { ok: false, error: { code: 'unavailable' } } });
+    expect(await call(client.token, 'capabilities')).toMatchObject({ paused: true, stopped: true });
   });
 
   it('preserves explicit and browser-only pairing scopes and rejects ambiguous all-app requests', async () => {

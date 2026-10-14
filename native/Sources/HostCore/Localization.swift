@@ -50,6 +50,8 @@ public enum L10nKey: String, CaseIterable {
     // 客户端
     case clientsName, clientsApps, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
     case clientsEmpty, clientsNotRunning, clientsHint, clientsRevokeTitle, clientsRevokeBody
+    case clientsGrantAllApps, clientsGrantAlready, clientsGrantTitle, clientsGrantBody, clientsGrantConfirm
+    case clientsGrantPending, clientsGrantSucceeded, clientsGrantUnconfirmed, clientsGrantFailed, clientsGrantUnavailable, clientsGrantBrowserOnly
     // 接入
     case connectHTTP, connectHTTPToggle, connectHTTPHint, connectHTTPAddress, connectCopyAddress
     case connectStdio, connectCopy, connectCopied, connectCopiedBody, connectCopyFailed, connectPairing, connectPairingHint
@@ -189,9 +191,20 @@ public enum L10n {
         .clientsRevoke: "撤销…",
         .clientsEmpty: "还没有已配对的客户端。在终端运行 computer-use pair 发起配对。",
         .clientsNotRunning: "服务未运行，暂时无法读取客户端列表。",
-        .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。旧配对保持原范围；需要改变时，撤销后重新配对。",
+        .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。旧配对可在此升级授权，原有凭据继续有效。",
         .clientsRevokeTitle: "撤销“%@”？",
         .clientsRevokeBody: "该客户端的凭据会立即失效，需要重新配对才能再次使用。",
+        .clientsGrantAllApps: "允许所有应用…",
+        .clientsGrantAlready: "已授权所有应用",
+        .clientsGrantTitle: "允许“%@”访问所有应用？",
+        .clientsGrantBody: "该客户端将能访问当前和未来打开或安装的所有桌面应用及窗口，并可在前台使用鼠标和键盘。会话仍默认后台执行，独立浏览器权限保持不变。原有凭据继续有效，暂停和紧急停止状态不会解除。",
+        .clientsGrantConfirm: "允许所有应用",
+        .clientsGrantPending: "正在保存授权，等待服务确认…",
+        .clientsGrantSucceeded: "已保存所有应用及前台操作授权，原有凭据可继续使用。",
+        .clientsGrantUnconfirmed: "未能确认授权结果，未自动重发。当前显示的授权范围可能尚未更新。",
+        .clientsGrantFailed: "授权未保存。请检查服务状态后重试，原有授权保持不变。",
+        .clientsGrantUnavailable: "该客户端已不可用，请检查客户端列表。",
+        .clientsGrantBrowserOnly: "仅浏览器客户端不能在此扩展为桌面授权。请为桌面访问发起新的配对。",
 
         .statusStoppedPersistent: "服务已停止。请在 App 中重启服务。",
         .statusPausedPersistent: "操作已暂停。请在 App 中恢复。",
@@ -392,9 +405,20 @@ public enum L10n {
         .clientsRevoke: "Revoke…",
         .clientsEmpty: "No clients are paired yet. Run computer-use pair in Terminal to pair one.",
         .clientsNotRunning: "The service is not running, so the client list is unavailable.",
-        .clientsHint: "All apps includes apps opened or installed later and their windows. Existing pairings keep their scope; revoke and pair again to change it.",
+        .clientsHint: "All apps includes apps opened or installed later and their windows. Upgrade an existing desktop pairing here while keeping its credentials.",
         .clientsRevokeTitle: "Revoke “%@”?",
         .clientsRevokeBody: "Its credentials stop working immediately. It must pair again to reconnect.",
+        .clientsGrantAllApps: "Allow all apps…",
+        .clientsGrantAlready: "All apps authorized",
+        .clientsGrantTitle: "Allow “%@” to access all apps?",
+        .clientsGrantBody: "This client will access all current and future desktop apps and windows, including apps installed later, and may use the mouse and keyboard in the foreground. Sessions still default to background. Isolated browser access stays unchanged. Existing credentials keep working; pause and emergency stop stay in effect.",
+        .clientsGrantConfirm: "Allow all apps",
+        .clientsGrantPending: "Saving authorization; waiting for the service to confirm…",
+        .clientsGrantSucceeded: "All apps and foreground access saved. Existing credentials keep working.",
+        .clientsGrantUnconfirmed: "Authorization could not be confirmed; the request was not resent. The displayed access scope may not be up to date.",
+        .clientsGrantFailed: "Authorization was not saved. Check service status and retry. Existing access stays unchanged.",
+        .clientsGrantUnavailable: "This client is no longer available. Check the client list.",
+        .clientsGrantBrowserOnly: "Browser-only clients cannot gain desktop access here. Start a new pairing for desktop access.",
 
         .statusStoppedPersistent: "Services are stopped. Restart services in the app.",
         .statusPausedPersistent: "Actions are paused. Resume them in the app.",

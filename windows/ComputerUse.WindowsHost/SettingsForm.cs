@@ -8,6 +8,7 @@ using System.Windows.Forms;
 namespace ComputerUse.WindowsHost;
 
 internal sealed record ClientInfo(string Id, string Name, IReadOnlyList<string> AppIds, bool AllApps, bool Browser, bool Foreground);
+internal enum ClientGrantState { Idle, Pending, Succeeded, Failed, Missing, SaveFailed, Unconfirmed }
 
 /// <summary>设置窗口读取的托盘程序状态与可以执行的操作。</summary>
 internal interface ISettingsHost
@@ -26,6 +27,9 @@ internal interface ISettingsHost
     Task EmergencyStopAsync();
     Task RestartServicesAsync();
     Task RevokeAsync(string clientId);
+    ClientGrantState GrantState(string clientId);
+    long GrantRevision { get; }
+    Task GrantAllAppsAsync(string clientId, long revision);
     Task SetHttpAsync(bool enabled);
 }
 
@@ -43,6 +47,7 @@ internal sealed class SettingsForm : Form
     private string _shownClients = "";
     private readonly IAgentCommand _agentCommand;
     private readonly Func<string, bool> _copySetupPromptText;
+    private readonly Func<string, string, bool> _confirmGrant;
     private CancellationTokenSource? _promptCancellation;
     private bool _promptCancelledByUser;
     private CancellationTokenSource? _profileCancellation;
@@ -75,6 +80,9 @@ internal sealed class SettingsForm : Form
         HeaderStyle = ColumnHeaderStyle.Nonclickable, Height = 220, BorderStyle = BorderStyle.None, Margin = new Padding(0, 4, 0, 16)
     };
     private readonly Button _revoke = MakeButton(Msg.ClientsRevoke, ButtonTone.Danger);
+    private readonly Button _grantAllApps = MakeButton(Msg.ClientsGrantAllApps);
+    private readonly Label _grantFeedback = MakeFeedback();
+    private string? _grantClientId;
     private readonly Label _clientsNote = MakeNote();
     private readonly Label _clientScope = MakeNote();
     private readonly CheckBox _http = MakeCheckBox(Msg.ConnectHttpToggle);
@@ -111,11 +119,14 @@ internal sealed class SettingsForm : Form
     private FlowLayoutPanel _updateActions = null!;
     private readonly Label _aboutVersion = MakeNote();
 
-    internal SettingsForm(ISettingsHost host, IAgentCommand? agentCommand = null, Func<string, bool>? copySetupPrompt = null)
+    internal SettingsForm(ISettingsHost host, IAgentCommand? agentCommand = null, Func<string, bool>? copySetupPrompt = null,
+        Func<string, string, bool>? confirmGrant = null)
     {
         _host = host;
         _agentCommand = agentCommand ?? new AgentCommand(PackageCommand.ForPackage(host.PackageRoot));
         _copySetupPromptText = copySetupPrompt ?? CopyText;
+        _confirmGrant = confirmGrant ?? ((title, body) => MessageBox.Show(this, body, title,
+            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK);
         SuspendLayout();
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -329,9 +340,10 @@ internal sealed class SettingsForm : Form
         _clients.AccessibleName = L10n.T(Msg.PaneClients);
         _clients.SelectedIndexChanged += (_, _) => RefreshClientSelection();
         _revoke.Click += async (_, _) => await RevokeSelectedAsync();
+        _grantAllApps.Click += async (_, _) => await GrantSelectedAsync();
         var connect = MakeButton(Msg.ConnectAddClient, ButtonTone.Primary);
         connect.Click += (_, _) => ShowPage(SettingsPage.Connect);
-        return Card(Flow(connect, _revoke), _clientsNote, _clients, _clientScope, MakeNote().With(Msg.ClientsHint));
+        return Card(Flow(connect, _grantAllApps, _revoke), _clientsNote, _clients, _clientScope, _grantFeedback, MakeNote().With(Msg.ClientsHint));
     }
 
     private void FitColumns()
@@ -346,6 +358,24 @@ internal sealed class SettingsForm : Form
         _revoke.Enabled = _host.IsRunning && _clients.SelectedItems.Count == 1;
         var id = _clients.SelectedItems.Count == 1 ? _clients.SelectedItems[0].Tag as string : null;
         var client = id is null ? null : _host.Clients.FirstOrDefault(value => value.Id == id);
+        var state = (id ?? _grantClientId) is { } grantId ? _host.GrantState(grantId) : ClientGrantState.Idle;
+        var complete = client is { AllApps: true, Foreground: true };
+        _grantAllApps.Text = L10n.T(state == ClientGrantState.Pending ? Msg.ClientsGrantPending
+            : complete ? Msg.ClientsGranted : Msg.ClientsGrantAllApps);
+        _grantAllApps.AccessibleName = _grantAllApps.Text;
+        _grantAllApps.Enabled = _host.IsRunning && !_host.IsBusy && client is not null
+            && (client.AllApps || client.AppIds.Count > 0) && !complete && state != ClientGrantState.Pending;
+        _grantFeedback.Text = state switch
+        {
+            ClientGrantState.Pending => L10n.T(Msg.ClientsGrantPending),
+            ClientGrantState.Succeeded => L10n.T(Msg.ClientsGrantSucceeded),
+            ClientGrantState.Failed => L10n.T(Msg.ClientsGrantFailed),
+            ClientGrantState.Missing => L10n.T(Msg.ClientsGrantMissing),
+            ClientGrantState.SaveFailed => L10n.T(Msg.ClientsGrantSaveFailed),
+            ClientGrantState.Unconfirmed => L10n.T(Msg.ClientsGrantUnconfirmed),
+            _ => ""
+        };
+        _grantFeedback.Visible = _grantFeedback.Text.Length > 0;
         _clientScope.Text = client is null ? "" : client.AllApps ? L10n.T(Msg.ApprovalAllAppsDetail) : string.Join("\n", client.AppIds.Select(DisplayAppId));
         _clientScope.Visible = _clientScope.Text.Length > 0;
     }
@@ -710,6 +740,18 @@ internal sealed class SettingsForm : Form
         var answer = MessageBox.Show(this, L10n.T(Msg.ClientsRevokeBody), L10n.F(Msg.ClientsRevokeTitle, name),
             MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (answer == DialogResult.OK) await _host.RevokeAsync(id);
+    }
+
+    private async Task GrantSelectedAsync()
+    {
+        if (!_grantAllApps.Enabled || _clients.SelectedItems.Count != 1 || _clients.SelectedItems[0].Tag is not string id) return;
+        var name = _clients.SelectedItems[0].Text;
+        var revision = _host.GrantRevision;
+        if (_confirmGrant(L10n.F(Msg.ClientsGrantTitle, name), L10n.T(Msg.ClientsGrantBody)))
+        {
+            _grantClientId = id;
+            await _host.GrantAllAppsAsync(id, revision);
+        }
     }
 
     internal static string CliCommand(string root) =>

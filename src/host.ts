@@ -11,6 +11,9 @@ import { errorResult } from './contracts.js';
 import { z } from 'zod';
 
 const { values } = parseArgs({
+  // Windows imports this entrypoint through --eval after Job assignment; Node's
+  // default eval argument offset would incorrectly include the host.js path.
+  args: process.argv.slice(2),
   options: {
     socket: { type: 'string' },
     'driver-socket': { type: 'string' },
@@ -68,6 +71,10 @@ try {
   if (!values.windows) ipc = await listenIpc(values.socket!, runtime);
   const control = createInterface({ input: process.stdin });
   let commands = Promise.resolve();
+  const controlFailed = () => {
+    emit({ event: 'fatal', message: 'Host control channel failed.' });
+    void close();
+  };
   control.on('line', line => {
     let message: unknown;
     try {
@@ -87,11 +94,20 @@ try {
         .catch(error => emit({ event: 'rpc_response', id: request.id, error: errorResult(error) }));
       return;
     }
+    const result = hostCommandSchema.safeParse(message);
+    if (!result.success) {
+      controlFailed();
+      return;
+    }
+    const command = result.data;
+    if (command.command !== 'http_enable' && command.command !== 'http_disable') {
+      // Revocation and stop must reach Runtime while a grant is being saved.
+      // ClientStore serializes persistence; only listener changes need this queue.
+      void runtime.control(command).catch(controlFailed);
+      return;
+    }
     commands = commands
       .then(async () => {
-        const result = hostCommandSchema.safeParse(message);
-        if (!result.success) throw new Error('Invalid host control message');
-        const command = result.data;
         if (command.command === 'http_enable' && !http) {
           try {
             http = await listenHttp(runtime, token => runtime.authenticate(token));
@@ -102,12 +118,9 @@ try {
         } else if (command.command === 'http_disable' && http) {
           await http.close();
           http = undefined;
-        } else await runtime.control(command);
+        }
       })
-      .catch(() => {
-        emit({ event: 'fatal', message: 'Host control channel failed.' });
-        void close();
-      });
+      .catch(controlFailed);
   });
   control.on('close', () => void close());
   emit({ event: 'ready' });

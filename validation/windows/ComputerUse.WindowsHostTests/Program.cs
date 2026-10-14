@@ -58,6 +58,8 @@ internal static class Program
                 CheckAuthorizationLifecycle(host);
                 CheckPairingScopes(host);
                 CheckSettingsWindow(host);
+                CheckGrantAllApps(host);
+                CheckGrantRevocation(host);
                 CheckSettingsInteractions(host);
                 CheckSkillConnection(host);
                 CheckSettingsLayouts(host);
@@ -799,6 +801,193 @@ internal static class Program
         Console.WriteLine("PASS: Windows settings window");
     }
 
+    private static void CheckGrantAllApps(HostApplication host)
+    {
+        var clients = new object[]
+        {
+            new { id = "grant-scoped", name = "Scoped fixture", appIds = new[] { @"win32:c:\fixture.exe" }, allApps = false, browser = true, foreground = false },
+            new { id = "grant-foreground", name = "Legacy all apps", appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = false },
+            new { id = "grant-browser", name = "Browser fixture", appIds = Array.Empty<string>(), allApps = false, browser = true, foreground = true },
+            new { id = "grant-complete", name = "Complete fixture", appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = true },
+        };
+        Event(host, new { @event = "clients", clients });
+        var confirmed = false;
+        var confirmations = 0;
+        using var window = new SettingsForm(host, confirmGrant: (title, body) =>
+        {
+            confirmations++;
+            Check(title.Contains("Scoped fixture") && body == L10n.T(Msg.ClientsGrantBody), "upgrade confirmation identifies the selected client and complete scope");
+            return confirmed;
+        });
+        window.ShowPage(SettingsPage.Clients);
+        Pump();
+        var button = ControlField<Button>(window, "_grantAllApps");
+        void Select(int index)
+        {
+            foreach (ListViewItem item in window.ClientList.Items) item.Selected = false;
+            window.ClientList.Items[index].Selected = true;
+            window.RefreshAll();
+            Pump();
+        }
+        Select(2);
+        Check(!button.Enabled, "browser-only clients cannot be expanded into desktop clients");
+        Select(3);
+        Check(!button.Enabled && button.Text == L10n.T(Msg.ClientsGranted), "already complete grants show their status without an action");
+        Select(1);
+        Check(button.Enabled, "all-app clients missing foreground permission can upgrade");
+        Select(0);
+        var before = HostRuntime.Commands.Count;
+        button.PerformClick(); Pump();
+        Check(confirmations == 1 && HostRuntime.Commands.Count == before, "cancelling local confirmation does not send an upgrade command");
+        confirmed = true;
+        button.PerformClick(); Pump(); window.RefreshAll();
+        var id = HostRuntime.RequestIds.Last()!;
+        Check(confirmations == 2 && Guid.TryParse(id, out _) && HostRuntime.Commands.Last() == "grant_all_apps:grant-scoped",
+            "confirmation sends one correlated internal command with a fresh request UUID");
+        Check(host.GrantState("grant-scoped") == ClientGrantState.Pending && !button.Enabled,
+            "pipe write is not success and duplicate upgrade is disabled while awaiting persistence");
+        host.GrantAllAppsAsync("grant-scoped", host.GrantRevision).GetAwaiter().GetResult();
+        Check(HostRuntime.Commands.Count == before + 1, "pending request is not submitted twice");
+        object Ack(string requestId, bool ok) => new { @event = "clients", clients,
+            operation = new { command = "grant_all_apps", clientId = "grant-scoped", requestId, ok,
+                error = ok ? null : new { code = "unavailable", message = "private runtime details must not be displayed" } } };
+        Event(host, Ack(Guid.NewGuid().ToString(), true));
+        Check(host.GrantState("grant-scoped") == ClientGrantState.Pending, "unrelated acknowledgement cannot complete the current request");
+        Event(host, Ack(id, false)); window.RefreshAll();
+        Check(host.GrantState("grant-scoped") == ClientGrantState.SaveFailed && button.Enabled
+            && ControlField<Label>(window, "_grantFeedback").Text == L10n.T(Msg.ClientsGrantSaveFailed),
+            "persist failure is visible without leaking worker error details or changing scope");
+
+        host.TogglePauseAsync().GetAwaiter().GetResult();
+        host.GrantAllAppsAsync("grant-scoped", host.GrantRevision).GetAwaiter().GetResult();
+        id = HostRuntime.RequestIds.Last()!;
+        clients[0] = new { id = "grant-scoped", name = "Scoped fixture", appIds = Array.Empty<string>(), allApps = true, browser = true, foreground = true };
+        Event(host, Ack(id, true)); window.RefreshAll();
+        Check(host.GrantState("grant-scoped") == ClientGrantState.Succeeded && host.IsPaused
+            && host.Clients[0].Browser && !button.Enabled && button.Text == L10n.T(Msg.ClientsGranted),
+            "persisted acknowledgement updates the UI while preserving pause and browser permission");
+        host.TogglePauseAsync().GetAwaiter().GetResult();
+
+        host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
+        var timeoutStart = System.Diagnostics.Stopwatch.StartNew();
+        while (host.GrantState("grant-foreground") == ClientGrantState.Pending && timeoutStart.Elapsed < TimeSpan.FromSeconds(18))
+        { Pump(); Thread.Sleep(20); }
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Unconfirmed && timeoutStart.Elapsed >= TimeSpan.FromSeconds(14),
+            "missing persistence acknowledgement becomes unconfirmed after the bounded 15-second wait");
+        var timeoutId = HostRuntime.RequestIds.Last()!;
+        Event(host, new { @event = "clients", clients, operation = new { command = "grant_all_apps", clientId = "grant-foreground", requestId = timeoutId, ok = true } });
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Unconfirmed, "late acknowledgement after timeout cannot claim success");
+
+        HostRuntime.NextControl = Task.FromException(new IOException("write failed"));
+        host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Unconfirmed && host.IsRunning,
+            "a failed pipe write is unconfirmed and does not restart the service or replay the mutation");
+        host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
+        var old = HostRuntime.Last!;
+        var oldId = HostRuntime.RequestIds.Last()!;
+        var oldRevision = host.GrantRevision;
+        host.RestartServicesAsync().GetAwaiter().GetResult(); Pump();
+        old.Emit(new { @event = "clients", clients, operation = new { command = "grant_all_apps", clientId = "grant-foreground", requestId = oldId, ok = true } });
+        Pump();
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Idle && host.Clients.Count == 0,
+            "restart clears pending grants and rejects late events from the previous runtime");
+        Event(host, new { @event = "clients", clients });
+        var afterRestart = HostRuntime.Commands.Count;
+        host.GrantAllAppsAsync("grant-foreground", oldRevision).GetAwaiter().GetResult();
+        Check(HostRuntime.Commands.Count == afterRestart, "confirmation from a previous service generation cannot grant on a new runtime");
+        host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
+        Event(host, new { @event = "clients", clients,
+            operation = new { command = "grant_all_apps", clientId = "grant-foreground", requestId = HostRuntime.RequestIds.Last(), ok = false,
+                error = new { code = "not_found", message = "opaque internal details" } } });
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Missing, "revoked or missing client has a distinct bounded failure state");
+        host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
+        host.EmergencyStopAsync().GetAwaiter().GetResult(); window.RefreshAll();
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Idle && !button.Enabled,
+            "emergency stop clears pending grants and disables offline authorization");
+        host.RestartServicesAsync().GetAwaiter().GetResult(); Pump();
+        Console.WriteLine("PASS: local grant upgrade confirmation, persistence ACK, errors, timeout, pause and lifecycle isolation");
+    }
+
+    private static void CheckGrantRevocation(HostApplication host)
+    {
+        object Client(string id, bool complete = false) => new
+        {
+            id, name = id, appIds = complete ? Array.Empty<string>() : new[] { @"win32:c:\fixture.exe" },
+            allApps = complete, browser = true, foreground = complete
+        };
+        var clients = new[] { Client("revoke-success"), Client("revoke-pending"), Client("revoke-send-failed") };
+        object Ack(string clientId, string requestId) => new
+        {
+            @event = "clients", clients,
+            operation = new { command = "grant_all_apps", clientId, requestId, ok = true }
+        };
+        Event(host, new { @event = "clients", clients });
+        using var window = new SettingsForm(host, confirmGrant: (_, _) => true);
+        window.ShowPage(SettingsPage.Clients);
+        Pump();
+        var button = ControlField<Button>(window, "_grantAllApps");
+        var feedback = ControlField<Label>(window, "_grantFeedback");
+        void Begin(string id)
+        {
+            foreach (ListViewItem item in window.ClientList.Items) item.Selected = (string?)item.Tag == id;
+            window.RefreshAll();
+            button.PerformClick(); Pump();
+            Check(host.GrantState(id) == ClientGrantState.Pending, "revoke fixture starts a confirmed pending upgrade");
+        }
+        void CheckRemoved(string id)
+        {
+            window.RefreshAll(); Pump();
+            Check(host.Clients.All(client => client.Id != id) && host.GrantState(id) == ClientGrantState.Idle
+                && !feedback.Visible && !button.Enabled,
+                "revocation removes the client and clears pending or successful upgrade feedback");
+        }
+
+        Begin("revoke-success");
+        var successId = HostRuntime.RequestIds.Last()!;
+        clients[0] = Client("revoke-success", complete: true);
+        Event(host, Ack("revoke-success", successId)); window.RefreshAll();
+        Check(feedback.Visible && feedback.Text == L10n.T(Msg.ClientsGrantSucceeded),
+            "completed upgrade displays success before revocation");
+        host.TogglePauseAsync().GetAwaiter().GetResult();
+        host.RevokeAsync("revoke-success").GetAwaiter().GetResult();
+        CheckRemoved("revoke-success");
+        Event(host, Ack("revoke-success", successId));
+        CheckRemoved("revoke-success");
+        Check(host.IsRunning && host.IsPaused, "revoking an upgraded client does not resume paused execution");
+
+        Begin("revoke-pending");
+        var pendingId = HostRuntime.RequestIds.Last()!;
+        var send = new TaskCompletionSource();
+        HostRuntime.NextControl = send.Task;
+        var revoke = host.RevokeAsync("revoke-pending");
+        CheckRemoved("revoke-pending");
+        clients[1] = Client("revoke-pending", complete: true);
+        Event(host, Ack("revoke-pending", pendingId));
+        CheckRemoved("revoke-pending");
+        send.SetResult(); Pump(); revoke.GetAwaiter().GetResult();
+        Event(host, new { @event = "clients", clients });
+        CheckRemoved("revoke-pending");
+        Check(host.IsRunning && host.IsPaused, "late grant events during revocation preserve paused execution");
+        host.TogglePauseAsync().GetAwaiter().GetResult();
+
+        Begin("revoke-send-failed");
+        var failedId = HostRuntime.RequestIds.Last()!;
+        var previous = HostRuntime.Last!;
+        HostRuntime.NextControl = Task.FromException(new IOException("revoke write failed"));
+        host.RevokeAsync("revoke-send-failed").GetAwaiter().GetResult();
+        Check(!host.IsRunning, "failed revoke delivery stops the service instead of claiming successful revocation");
+        previous.Emit(Ack("revoke-send-failed", failedId)); Pump();
+        CheckRemoved("revoke-send-failed");
+        host.RestartServicesAsync().GetAwaiter().GetResult(); Pump();
+        previous.Emit(Ack("revoke-send-failed", failedId)); Pump();
+        Check(host.Clients.Count == 0 && host.GrantState("revoke-send-failed") == ClientGrantState.Idle,
+            "restarting rejects stale grant and client events from the retired runtime");
+        Event(host, new { @event = "clients", clients = new[] { Client("revoke-send-failed") } });
+        Check(host.Clients.Count == 1 && host.Clients[0].Id == "revoke-send-failed" && !host.Clients[0].AllApps,
+            "new runtime snapshots determine actual authorization after uncertain revoke delivery");
+        Console.WriteLine("PASS: grant revocation clears feedback, rejects late events and handles delivery failure and restart");
+    }
+
     private static void CheckSettingsInteractions(HostApplication host)
     {
         var window = (SettingsForm)Field(host, "_window")!;
@@ -1301,6 +1490,7 @@ namespace ComputerUse.WindowsHost
     {
         internal static readonly List<string> Commands = [];
         internal static readonly List<bool?> AllAppsAcknowledgments = [];
+        internal static readonly List<string?> RequestIds = [];
         internal static int StartCount { get; private set; }
         internal static int DisposeCount { get; private set; }
         internal static HostRuntime? Last { get; private set; }
@@ -1318,10 +1508,11 @@ namespace ComputerUse.WindowsHost
             return task;
         }
         internal void Emit(object message) => _onEvent(JsonSerializer.SerializeToElement(message));
-        internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null)
+        internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null, string? requestId = null)
         {
             Commands.Add(command + ":" + (clientId ?? sessionId));
             AllAppsAcknowledgments.Add(allApps);
+            RequestIds.Add(requestId);
             var task = NextControl ?? Task.CompletedTask;
             NextControl = null;
             return task;

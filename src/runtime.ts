@@ -6,6 +6,7 @@ import {
   errorResult,
   hasPixels,
   type Backend,
+  type Authorization,
   type BackendObservation,
   type Bounds,
   type Client,
@@ -13,6 +14,7 @@ import {
   type Element,
   type HostCommand,
   type HostEvent,
+  type GrantOperation,
   type Mode,
   type RpcService,
   type Target,
@@ -247,9 +249,18 @@ export class Runtime implements RpcService {
       if (session.expiresAt < now && ![...this.work.values()].some(w => w.sessionId === id)) this.removeSession(id);
     for (const [id, snapshot] of this.snapshots) if (now - snapshot.createdAt > SNAPSHOT_TTL) this.snapshots.delete(id);
   }
-  private emitClients(): void {
+  private authorization(client: Client): Authorization {
+    return {
+      appIds: [...client.grant.appIds],
+      allApps: client.grant.allApps === true,
+      browser: client.grant.browser,
+      foreground: client.grant.foreground === true,
+    };
+  }
+  private emitClients(operation?: GrantOperation): void {
     this.options.emit({
       event: 'clients',
+      ...(operation ? { operation } : {}),
       clients: [...this.clients.clients.values()].map(({ id, name, grant }) => ({
         id,
         name,
@@ -325,6 +336,15 @@ export class Runtime implements RpcService {
       case 'foreground_allow':
       case 'foreground_deny':
         break; // 前台权限已在配对时授予；保留命令以兼容旧宿主。
+      case 'grant_all_apps': {
+        try {
+          await this.clients.grantAllApps(command.clientId, () => !this.stopped);
+          this.emitClients({ ...command, ok: true });
+        } catch (error) {
+          this.emitClients({ ...command, ok: false, error: errorResult(error) });
+        }
+        break;
+      }
       case 'pause':
         this.paused = true;
         break;
@@ -339,12 +359,13 @@ export class Runtime implements RpcService {
         for (const id of this.sessions.keys()) this.removeSession(id);
         await Promise.allSettled(this.options.backends.map(b => b.cancel()));
         break;
-      case 'revoke':
-        this.clients.clients.delete(command.clientId);
+      case 'revoke': {
+        const saved = this.clients.revoke(command.clientId);
         for (const session of this.sessions.values()) if (session.clientId === command.clientId) this.removeSession(session.id);
-        await this.clients.save();
+        await saved;
         this.emitClients();
         break;
+      }
       case 'http_enable':
       case 'http_disable':
         break; // The host transport owns the listener.
@@ -407,13 +428,7 @@ export class Runtime implements RpcService {
         () => this.pairs.delete(client.id),
       );
       if (!approved || this.stopped) throw new CuError('permission_denied', 'Pairing was denied or expired.');
-      this.clients.clients.set(client.id, client);
-      try {
-        await this.clients.save();
-      } catch (error) {
-        this.clients.clients.delete(client.id);
-        throw error;
-      }
+      await this.clients.add(client, () => !this.stopped);
       this.emitClients();
       granted = true;
       return { clientId: client.id, token };
@@ -439,7 +454,7 @@ export class Runtime implements RpcService {
     if (p.mode === 'foreground' && client.grant.foreground !== true)
       throw new CuError(
         'permission_denied',
-        'This client was paired before foreground access was included; pair it again in the local app.',
+        'This client does not have foreground access. Review Clients > Allow all apps in the local app; keep the existing profile.',
       );
     const session: Session = {
       id: randomUUID(),
@@ -805,6 +820,7 @@ export class Runtime implements RpcService {
       case 'capabilities':
         return {
           protocolVersion: 1,
+          authorization: this.authorization(client),
           methods: descriptions,
           desktop: {
             driver: 'cua-driver',
@@ -832,6 +848,7 @@ export class Runtime implements RpcService {
         };
       case 'doctor':
         return {
+          authorization: this.authorization(client),
           paused: this.paused,
           stopped: this.stopped,
           backends: await bounded(Promise.all(this.options.backends.map(async b => ({ kind: b.kind, ...(await b.doctor()) }))), 25_000),
@@ -883,5 +900,7 @@ export class Runtime implements RpcService {
     for (const pair of this.pairs.values()) pair.resolve(false);
     await this.control({ command: 'stop' });
     await Promise.allSettled(this.options.backends.map(b => b.close()));
+    // EOF 可以紧跟撤销命令。先停止输入，再等待客户端保存，避免正常退出丢失撤销。
+    await this.clients.flush();
   }
 }

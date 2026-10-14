@@ -16,6 +16,7 @@ protocol HostContext: AnyObject {
     var serviceStatus: String { get }
     var isRunning: Bool { get }
     var clients: [ClientRecord] { get }
+    var clientGrantState: ClientGrantState { get }
     var httpEnabled: Bool { get }
     var httpStatus: String? { get }
     var controlledAppCount: Int { get }
@@ -26,6 +27,7 @@ protocol HostContext: AnyObject {
     func emergencyStop()
     func restartServices()
     func revokeClient(_ id: String)
+    func grantAllApps(_ id: String)
     func setHTTPEnabled(_ enabled: Bool)
     func requestPermissions()
     func installCLI()
@@ -67,6 +69,8 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private var activeAlert: NSAlert?
     private let readerQueue = DispatchQueue(label: "com.starroy.computeruse.events")
     private var controlLease = ControlLease()
+    private var clientGrants = ClientGrantTracker()
+    private var clientGrantTimer: Timer?
     private var statusText = tr(.statusNotStarted)
     private lazy var statusCursorImage: NSImage? = {
         guard let image = NSImage(contentsOf: paths.resources.appendingPathComponent("menu-bar-icon.png")) else { return nil }
@@ -81,6 +85,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private(set) var httpEnabled = false
     private(set) var httpStatus: String?
     var isRunning: Bool { running }
+    var clientGrantState: ClientGrantState { clientGrants.state }
     var controlledAppCount: Int { controlLease.counts.count }
     var permissionsGranted: Bool { AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() }
     var serviceStatus: String {
@@ -353,6 +358,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
                 try LocalSocket.removeStale(path: path)
             }
             let token = UUID()
+            clearClientGrant()
             generation = token
             let process = Process()
             process.executableURL = paths.driver
@@ -458,7 +464,15 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             }
         case "fatal": fail(event.message ?? tr(.failureRuntime))
         case "clients":
-            clients = event.clients ?? []
+            let snapshot = clientGrants.visibleClients(event.clients ?? [])
+            if let operation = event.operation {
+                // The event reader already rejects old generations. A late same-generation result may
+                // refresh the authoritative list, but cannot turn a timed-out operation into success.
+                if clientGrants.receive(operation, clients: snapshot, generation: generation) {
+                    clientGrantTimer?.invalidate(); clientGrantTimer = nil
+                }
+            }
+            clients = snapshot
             stateChanged()
         case "pair_request", "foreground_request":
             approvals.enqueue(event)
@@ -540,10 +554,10 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         if let alert = activeAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
     }
 
-    @discardableResult private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) -> Bool {
+    @discardableResult private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil) -> Bool {
         guard let input else { return false }
         do {
-            try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps))
+            try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps, requestID: requestID))
             return true
         } catch { if !stopping { fail(tr(.failureSendControl)) }; return false }
     }
@@ -608,7 +622,39 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         if stopping { setStatus(tr(.statusRestarting), state: .starting) }
         else { stopServices(message: tr(.statusRestarting), state: .starting) }
     }
-    func revokeClient(_ id: String) { send("revoke", clientID: id) }
+    func revokeClient(_ id: String) {
+        guard send("revoke", clientID: id) else { return }
+        if clientGrants.revoke(id) { clientGrantTimer?.invalidate(); clientGrantTimer = nil }
+        clients.removeAll { $0.id == id }
+        stateChanged()
+    }
+
+    func grantAllApps(_ id: String) {
+        guard running, !stopping, !terminating, !clientGrants.state.isPending,
+              let client = clients.first(where: { $0.id == id }), client.canGrantAllApps else { return }
+        let token = generation
+        guard Alerts.confirm(tr(.clientsGrantTitle, client.name), tr(.clientsGrantBody), confirm: tr(.clientsGrantConfirm), defaultCancel: true) else { return }
+        // A modal runs a nested event loop: stop, revoke or restart may have happened while it was open.
+        guard generation == token, running, !stopping, !terminating,
+              let current = clients.first(where: { $0.id == id }), current == client,
+              let request = clientGrants.begin(client: current, generation: token) else { return }
+        stateChanged()
+        guard send("grant_all_apps", clientID: id, requestID: request.requestID) else {
+            clientGrants.timeout(request)
+            stateChanged()
+            return
+        }
+        clientGrantTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            guard let self, self.generation == token, self.clientGrants.timeout(request) else { return }
+            self.clientGrantTimer = nil
+            self.stateChanged()
+        }
+    }
+
+    private func clearClientGrant() {
+        clientGrantTimer?.invalidate(); clientGrantTimer = nil
+        clientGrants.reset()
+    }
 
     func setHTTPEnabled(_ enabled: Bool) {
         guard running, enabled != httpEnabled else { return }
@@ -627,6 +673,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private func stopServices(message: String, state: ServiceState, completion: (() -> Void)? = nil) {
         guard !stopping else { return }
         stopping = true; running = false
+        clearClientGrant()
         for pid in controlLease.endAll() { registerComputerControl(Int32(pid), false) }
         startupTimer?.invalidate(); startupTimer = nil
         approvals.removeAll()
@@ -717,6 +764,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         terminating = true
+        clearClientGrant()
         startupLifecycle?.cancelRestart()
         if driver == nil && runtime == nil { return .terminateNow }
         if stopping {
@@ -771,15 +819,39 @@ enum Alerts {
         alert.runModal()
     }
 
-    static func confirm(_ title: String, _ message: String, confirm: String, destructive: Bool = false) -> Bool {
+    static func confirm(_ title: String, _ message: String, confirm: String, destructive: Bool = false, defaultCancel: Bool = false) -> Bool {
+        let alert = confirmation(title, message, confirm: confirm, destructive: destructive, defaultCancel: defaultCancel)
+        return runConfirmation(alert)
+    }
+
+    static func runConfirmation(_ alert: NSAlert) -> Bool {
+        // A button has only one key equivalent. Keep Escape cancelling when
+        // Return is assigned to Cancel, scoped to this modal window only.
+        let cancel = alert.buttons[1]
+        let monitor = cancel.keyEquivalent == "\r" ? NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.window === alert.window, NSApp.modalWindow === alert.window, event.keyCode == 53,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
+            cancel.performClick(nil)
+            return nil
+        } : nil
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    static func confirmation(_ title: String, _ message: String, confirm: String, destructive: Bool = false, defaultCancel: Bool = false) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         let button = alert.addButton(withTitle: confirm)
         button.hasDestructiveAction = destructive
-        alert.addButton(withTitle: tr(.commonCancel))
-        NSApp.activate(ignoringOtherApps: true)
-        return alert.runModal() == .alertFirstButtonReturn
+        let cancel = alert.addButton(withTitle: tr(.commonCancel))
+        if defaultCancel {
+            button.keyEquivalent = ""
+            cancel.keyEquivalent = "\r"
+            alert.window.initialFirstResponder = cancel
+        }
+        return alert
     }
 
     /// 在 run loop 计时器里执行，适合从 GCD 回调里弹出模态框；只在默认模式触发，不叠在其他模态框上。

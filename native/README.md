@@ -30,7 +30,9 @@ Contents/Resources/
 
 Node stdin 接收 NDJSON 控制消息（`pair_allow` / `pair_deny` + `clientId`，`pause` / `resume` / `stop`，`revoke` + `clientId`，`http_enable` / `http_disable`，`control_ready` + `pid`；`foreground_allow` / `foreground_deny` 仅为兼容旧宿主保留）。stdout 仅接收 `pair_request`、`decision_finished`、`ready`、`status`、`clients`、`fatal`、`control_begin` / `control_end` 事件。配对请求结束（批准、拒绝或 60 秒过期）时运行时发送 `decision_finished`，宿主据此撤回尚未处理的弹窗，不再发送迟到的决定。权限窗口先列出客户端与目标，再由本机用户决定；拒绝是默认按钮。显示内容与 Agent 提供名称不是身份验证依据，真正的凭据验证由运行时完成。
 
-首次 `computer-use pair --profile my-agent --name 'My Agent'` 默认请求所有桌面应用，配对弹窗和客户端列表明确显示“所有应用”；批准一次后覆盖新应用与新窗口，重启后持续有效。`allApps` 随授权保存，旧授权缺少此字段时保留原应用范围，需撤销后重新配对才可扩为全应用。`--app` 保留受限配对；`--browser` 单独使用只授权独立浏览器，`--all-apps --browser` 同时授权两者。前台权限在配对时一并授予，但会话默认后台，不逐窗口或逐会话审批；全应用授权不替代系统权限。
+首次 `computer-use pair --profile my-agent --name 'My Agent'` 默认请求所有桌面应用，配对弹窗和客户端列表明确显示“所有应用”；批准一次后覆盖新应用与新窗口，重启后持续有效。`allApps` 随授权保存，旧授权缺少此字段时保留原应用范围。旧桌面客户端可在“客户端”页点击“允许所有应用”，本机确认后升级全应用及前台能力，原 token、profile 和独立浏览器权限不变；仅浏览器客户端不能通过此按钮扩大为桌面授权。`--app` 保留受限配对；`--browser` 单独使用只授权独立浏览器，`--all-apps --browser` 同时授权两者。前台权限在配对时一并授予，但会话默认后台，不逐窗口或逐会话审批；全应用授权不替代系统权限。
+
+本地升级授权发送 `grant_all_apps`（`clientId`、UUID `requestId`），等待 `clients` 事件附带的 `operation` 结果；只有匹配当前服务 generation、请求及客户端的成功回执，并且客户端快照确认全应用和前台能力后，才显示保存成功。15 秒超时显示结果未确认，不自动重发；停止或重启清除等待状态，旧 generation 的回执被忽略。同代迟到回执仍更新客户端快照，但不把已超时的请求反馈改为成功；已在本机撤销的客户端不会被旧快照恢复。服务暂停但仍运行时可以管理授权，不解除暂停；离线时按钮禁用。
 
 暂停与紧停先将阻断原因写入当前用户私有的 `host-state.json`，普通退出、登录项、更新重开和 Agent 调用均保留；只有 App 内“恢复/重新启动服务”按钮清除。紧急停止随后发送 `stop`，允许运行时在一秒内释放手势并关闭会话，再终止全部子进程；无响应进程被强制终止。驱动、运行时崩溃或无效事件均停止整个执行层。恢复必须使用“重新启动服务”，不会重放任何动作。普通“暂停”只阻止新动作，不用于终止手势。
 

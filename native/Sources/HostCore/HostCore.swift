@@ -92,6 +92,10 @@ public struct ClientRecord: Decodable, Equatable {
     public let browser: Bool?
     public let foreground: Bool?
 
+    public var hasDesktopAccess: Bool { allApps == true || !(appIds ?? []).isEmpty }
+    public var hasAllAppsAccess: Bool { allApps == true && foreground == true }
+    public var canGrantAllApps: Bool { hasDesktopAccess && !hasAllAppsAccess }
+
     public init(id: String, name: String, appIds: [String]? = nil, allApps: Bool? = nil, browser: Bool? = nil, foreground: Bool? = nil) {
         self.id = id
         self.name = name
@@ -118,6 +122,7 @@ public struct HostEvent: Decodable {
     public let pid: Int?
     public let requestId: String?
     public let approved: Bool?
+    public let operation: ClientGrantOperation?
 
     public static func parse(_ data: Data) throws -> HostEvent {
         let item = try JSONDecoder().decode(Self.self, from: data)
@@ -128,7 +133,9 @@ public struct HostEvent: Decodable {
         case "foreground_request":
             guard let id = item.sessionId, !id.isEmpty, item.clientName != nil,
                   item.targetTitle != nil else { throw HostFailure.invalidEvent }
-        case "clients": guard item.clients != nil else { throw HostFailure.invalidEvent }
+        case "clients":
+            guard item.clients != nil else { throw HostFailure.invalidEvent }
+            if let operation = item.operation { try operation.validate() }
         case "decision_finished":
             guard let id = item.requestId, !id.isEmpty, item.approved != nil else { throw HostFailure.invalidEvent }
         case "fatal", "status": guard item.message != nil else { throw HostFailure.invalidEvent }
@@ -177,12 +184,13 @@ public struct LineFramer {
 }
 
 public enum HostControl {
-    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil) throws -> Data {
+    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil) throws -> Data {
         var object: [String: Any] = ["command": command]
         if let clientID { object["clientId"] = clientID }
         if let sessionID { object["sessionId"] = sessionID }
         if let pid { object["pid"] = pid }
         if let allApps { object["allApps"] = allApps }
+        if let requestID { object["requestId"] = requestID }
         var result = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         result.append(10)
         return result

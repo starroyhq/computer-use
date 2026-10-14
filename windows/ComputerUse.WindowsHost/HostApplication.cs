@@ -35,6 +35,11 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private string? _stopAfterStart;
     private string _status = L10n.T(Msg.StatusStarting);
     private IReadOnlyList<ClientInfo> _clients = Array.Empty<ClientInfo>();
+    private sealed record GrantOperation(string RequestId, HostRuntime Source, CancellationTokenSource Timeout);
+    private readonly Dictionary<string, GrantOperation> _grantOperations = new();
+    private readonly Dictionary<string, ClientGrantState> _grantStates = new();
+    private readonly HashSet<string> _revokedClients = new();
+    public long GrantRevision { get; private set; }
 
     /// <param name="showWindow">登录时启动（--background）不打开窗口，只在托盘运行。</param>
     /// <param name="dataDirectory">托盘偏好与更新下载的位置；测试程序传入临时目录。</param>
@@ -129,6 +134,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     public bool IsBusy => _busy;
     public string? PipeName => IsRunning ? _runtime!.PipeName : null;
     public IReadOnlyList<ClientInfo> Clients => _clients;
+    public ClientGrantState GrantState(string clientId) => _grantStates.GetValueOrDefault(clientId);
     public bool HttpEnabled => _httpEnabled;
     public string? HttpStatus => _httpStatus;
     public string PackageRoot => AppContext.BaseDirectory;
@@ -186,6 +192,7 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
     private async Task StartAsync()
     {
         if (_busy || _runtime is not null || _retiringRuntime is not null || _exiting || _autoStartBlocked) return;
+        GrantRevision++;
         _busy = true;
         SetStatus(L10n.T(Msg.StatusStartingRuntime));
         HostRuntime? next = null;
@@ -255,7 +262,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 break;
             case "fatal": _ = FailAsync(L10n.F(Msg.StatusRuntimeFault, String(message, "message"))); break;
             case "clients":
-                _clients = ParseClients(message);
+                _clients = ParseClients(message).Where(client => !_revokedClients.Contains(client.Id)).ToArray();
+                FinishGrantAllApps(message);
                 StateChanged();
                 break;
             case "pair_request":
@@ -427,7 +435,95 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         return StopAsync(L10n.T(Msg.StatusEmergencyStopped));
     }
     public Task RestartServicesAsync() => RestartAsync();
-    public Task RevokeAsync(string clientId) => ControlAsync("revoke", L10n.T(Msg.StatusRevoked), clientId: clientId);
+    public Task RevokeAsync(string clientId)
+    {
+        if (!IsRunning || _exiting) return Task.CompletedTask;
+        // Invalidate before sending: a grant acknowledgement already in flight
+        // must not restore a revoked row or its successful-upgrade feedback.
+        _revokedClients.Add(clientId);
+        CancelGrant(clientId);
+        _grantStates.Remove(clientId);
+        _clients = _clients.Where(client => client.Id != clientId).ToArray();
+        StateChanged();
+        return ControlAsync("revoke", L10n.T(Msg.StatusRevoked), clientId: clientId);
+    }
+
+    public async Task GrantAllAppsAsync(string clientId, long revision)
+    {
+        if (revision != GrantRevision || !IsRunning || _busy || _exiting || _grantOperations.ContainsKey(clientId)) return;
+        var client = _clients.FirstOrDefault(value => value.Id == clientId);
+        if (client is null || (!client.AllApps && client.AppIds.Count == 0) || (client.AllApps && client.Foreground)) return;
+        var operation = new GrantOperation(Guid.NewGuid().ToString(), _runtime!, new CancellationTokenSource());
+        _grantOperations[clientId] = operation;
+        _grantStates[clientId] = ClientGrantState.Pending;
+        StateChanged();
+        _ = WaitForGrantAllAppsAsync(clientId, operation);
+        try { await operation.Source.SendControlAsync("grant_all_apps", clientId: clientId, requestId: operation.RequestId); }
+        catch
+        {
+            // A partial pipe write has an unknown outcome. Only the persisted
+            // runtime acknowledgement can prove that the grant was changed.
+            if (CurrentGrant(clientId, operation)) CompleteGrant(clientId, ClientGrantState.Unconfirmed);
+        }
+    }
+
+    private bool CurrentGrant(string clientId, GrantOperation operation) => IsRunning && !_exiting
+        && ReferenceEquals(_runtime, operation.Source) && _grantOperations.GetValueOrDefault(clientId) == operation;
+
+    private async Task WaitForGrantAllAppsAsync(string clientId, GrantOperation operation)
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(15), operation.Timeout.Token); }
+        catch (OperationCanceledException) { return; }
+        if (CurrentGrant(clientId, operation)) CompleteGrant(clientId, ClientGrantState.Unconfirmed);
+    }
+
+    private void FinishGrantAllApps(JsonElement message)
+    {
+        if (!message.TryGetProperty("operation", out var result) || result.ValueKind != JsonValueKind.Object
+            || String(result, "command") != "grant_all_apps") return;
+        var clientId = String(result, "clientId");
+        if (!_grantOperations.TryGetValue(clientId, out var operation) || !CurrentGrant(clientId, operation)
+            || String(result, "requestId") != operation.RequestId
+            || !result.TryGetProperty("ok", out var ok) || ok.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return;
+        var saved = _clients.Any(client => client.Id == clientId && client.AllApps && client.Foreground);
+        var failed = result.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object
+            ? String(error, "code") switch
+            {
+                "not_found" => ClientGrantState.Missing,
+                "unavailable" => ClientGrantState.SaveFailed,
+                _ => ClientGrantState.Failed
+            } : ClientGrantState.Failed;
+        CompleteGrant(clientId, ok.ValueKind == JsonValueKind.False ? failed
+            : saved ? ClientGrantState.Succeeded : ClientGrantState.Unconfirmed);
+    }
+
+    private void CompleteGrant(string clientId, ClientGrantState state)
+    {
+        CancelGrant(clientId);
+        _grantStates[clientId] = state;
+        StateChanged();
+    }
+
+    private void CancelGrant(string clientId)
+    {
+        if (_grantOperations.Remove(clientId, out var operation))
+        {
+            operation.Timeout.Cancel();
+            operation.Timeout.Dispose();
+        }
+    }
+
+    private void ClearGrantOperations()
+    {
+        foreach (var operation in _grantOperations.Values)
+        {
+            operation.Timeout.Cancel();
+            operation.Timeout.Dispose();
+        }
+        _grantOperations.Clear();
+        _grantStates.Clear();
+        _revokedClients.Clear();
+    }
 
     public async Task SetHttpAsync(bool enabled)
     {
@@ -502,6 +598,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
 
     private async Task StopAsync(string status)
     {
+        GrantRevision++;
+        ClearGrantOperations();
         if (_busy) { _stopAfterStart = status; return; }
         _busy = true;
         if (!_exiting)

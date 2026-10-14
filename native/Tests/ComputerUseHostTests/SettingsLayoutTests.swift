@@ -116,6 +116,112 @@ final class SettingsLayoutTests: XCTestCase {
         [view] + view.subviews.flatMap(descendants)
     }
 
+    func testGrantConfirmationRequiresExplicitApprovalInBothLanguages() throws {
+        let policy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            for key in ["\r", "\u{1b}", nil] {
+                let alert = Alerts.confirmation(tr(.clientsGrantTitle, "Test Agent"), tr(.clientsGrantBody),
+                                                confirm: tr(.clientsGrantConfirm), defaultCancel: true)
+                alert.layout()
+                alert.window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+                XCTAssertEqual(alert.buttons[0].keyEquivalent, "", "Granting access must require an explicit choice")
+                XCTAssertEqual(alert.buttons[1].keyEquivalent, "\r")
+                XCTAssertTrue(alert.window.initialFirstResponder === alert.buttons[1])
+                let input = Timer(timeInterval: 0.1, repeats: false) { _ in
+                    guard let key else { alert.buttons[0].performClick(nil); return }
+                    guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: alert.window.windowNumber, context: nil, characters: key,
+                        charactersIgnoringModifiers: key, isARepeat: false, keyCode: key == "\r" ? 36 : 53) else {
+                        return XCTFail("Could not create the modal key event")
+                    }
+                    NSApp.postEvent(event, atStart: true)
+                }
+                var timedOut = false
+                let timeout = Timer(timeInterval: 2, repeats: false) { _ in
+                    timedOut = true
+                    NSApp.stopModal(withCode: .abort)
+                }
+                RunLoop.main.add(input, forMode: .modalPanel)
+                RunLoop.main.add(timeout, forMode: .modalPanel)
+                defer { input.invalidate(); timeout.invalidate(); alert.window.orderOut(nil) }
+                XCTAssertEqual(Alerts.runConfirmation(alert), key == nil, "Only an explicit click may approve")
+                XCTAssertFalse(timedOut, "\(language) \(String(describing: key)) must dismiss the confirmation")
+            }
+        }
+        let ordinary = Alerts.confirmation("Test", "Test", confirm: "Continue")
+        XCTAssertEqual(ordinary.buttons[0].keyEquivalent, "\r", "Other confirmation defaults are unchanged")
+    }
+
+    func testGrantAllAppsButtonUsesLocalClickAndRemainsAvailableWhilePaused() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext.states()[1].1
+            context.clients.append(ClientRecord(id: "4", name: "Old all apps", allApps: true, foreground: false))
+            let pane = ClientsPane(context: context)
+            _ = pane.view
+            pane.refresh()
+            let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
+            let grant = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
+                .first { $0.identifier?.rawValue == "clients-grant-all-apps" })
+            XCTAssertFalse(grant.isEnabled)
+            XCTAssertTrue(context.grantRequests.isEmpty, "Showing or refreshing the page never authorizes clients")
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            XCTAssertEqual(grant.title, tr(.clientsGrantAlready))
+            XCTAssertFalse(grant.isEnabled)
+            table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+            XCTAssertFalse(grant.isEnabled, "Browser-only access cannot expand through this action")
+            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            XCTAssertTrue(grant.isEnabled)
+            context.serviceState = .paused
+            pane.refresh()
+            XCTAssertTrue(grant.isEnabled)
+            grant.performClick(nil)
+            XCTAssertEqual(context.grantRequests, ["2"])
+            XCTAssertEqual(context.resumeCount, 0, "Authorization management must not resume actions")
+            table.selectRowIndexes(IndexSet(integer: 3), byExtendingSelection: false)
+            XCTAssertTrue(grant.isEnabled, "An old all-app grant may still need foreground access")
+            context.isRunning = false
+            pane.refresh()
+            XCTAssertFalse(grant.isEnabled)
+        }
+    }
+
+    func testClientGrantFeedbackWaitsForAckAndReportsTimeoutOrFailure() throws {
+        let context = FakeContext.states()[1].1
+        let pane = ClientsPane(context: context)
+        _ = pane.view
+        pane.refresh()
+        let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
+        let grant = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "clients-grant-all-apps" })
+        let feedback = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "clients-grant-feedback" })
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        var tracker = ClientGrantTracker()
+        _ = tracker.begin(client: context.clients[1], generation: UUID())
+        context.clientGrantState = tracker.state
+        pane.refresh()
+        XCTAssertFalse(grant.isEnabled)
+        XCTAssertEqual(feedback.stringValue, tr(.clientsGrantPending))
+        for (state, key) in [(ClientGrantState.unconfirmed("2"), L10nKey.clientsGrantUnconfirmed),
+                             (.failed("2", "unavailable"), .clientsGrantFailed),
+                             (.succeeded("2"), .clientsGrantSucceeded)] {
+            context.clientGrantState = state
+            pane.refresh()
+            XCTAssertEqual(feedback.stringValue, tr(key))
+        }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        XCTAssertTrue(feedback.isHidden, "Another client's successful grant must not appear on the selected client")
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        context.clientGrantState = .failed("2", "not_found")
+        context.clients.remove(at: 1)
+        pane.refresh()
+        XCTAssertEqual(feedback.stringValue, tr(.clientsGrantUnavailable), "Failure stays visible when revocation removed the row")
+    }
+
     func testPairingMessageDistinguishesAllAppsFromExistingRestrictedScope() throws {
         let all = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"all","name":"Agent","appIds":[],"allApps":true,"browser":false,"foreground":true}"#.utf8))
         let restricted = try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"old","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false,"foreground":true}"#.utf8))
@@ -210,6 +316,62 @@ final class SettingsLayoutTests: XCTestCase {
         }
     }
 
+    /// Render only fake clients and a non-modal confirmation; never send an authorization command.
+    func testClientGrantSnapshotsAndConfirmationLayout() throws {
+        guard let path = ProcessInfo.processInfo.environment["CU_SETTINGS_SNAPSHOTS"] else {
+            throw XCTSkip("Set CU_SETTINGS_SNAPSHOTS to render grant management")
+        }
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext.states()[1].1
+            context.serviceState = .paused
+            context.serviceStatus = tr(.statusPaused)
+            let controller = SettingsWindowController(context: context)
+            let window = try XCTUnwrap(controller.window)
+            window.appearance = NSAppearance(named: .aqua)
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            window.orderFrontRegardless()
+            defer { window.orderOut(nil) }
+            controller.tabs.select(.clients)
+            controller.tabs.refreshAll()
+            let view = try XCTUnwrap(controller.tabs.tabView.selectedTabViewItem?.viewController?.view)
+            let table = try XCTUnwrap(Self.descendants(view).compactMap { $0 as? NSTableView }.first)
+            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            var tracker = ClientGrantTracker()
+            _ = tracker.begin(client: context.clients[1], generation: UUID())
+            let states: [(String, ClientGrantState)] = [("ready", .idle), ("pending", tracker.state),
+                ("failed", .failed("2", "unavailable")), ("unconfirmed", .unconfirmed("2")), ("success", .succeeded("2"))]
+            for (name, state) in states {
+                if name == "success" {
+                    context.clients[1] = ClientRecord(id: "2", name: "Restricted Agent", appIds: [], allApps: true, browser: false, foreground: true)
+                }
+                context.clientGrantState = state
+                controller.tabs.refreshAll()
+                controller.tabs.fitWindow(animated: false)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                XCTAssertLessThanOrEqual(view.subviews.first!.fittingSize.width, Form.pageWidth - 56)
+                XCTAssertLessThan(view.fittingSize.height, 720)
+                try Self.snapshot(view, to: directory.appendingPathComponent("grant-\(language.rawValue)-\(name).png"))
+            }
+            let alert = Alerts.confirmation(tr(.clientsGrantTitle, "Restricted Agent"), tr(.clientsGrantBody), confirm: tr(.clientsGrantConfirm), defaultCancel: true)
+            alert.window.appearance = NSAppearance(named: .aqua)
+            alert.layout()
+            alert.window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            alert.window.orderFrontRegardless()
+            defer { alert.window.orderOut(nil) }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertEqual(alert.buttons.map(\.title), [tr(.clientsGrantConfirm), tr(.commonCancel)])
+            XCTAssertTrue(context.grantRequests.isEmpty, "Rendering confirmation must not send an authorization command")
+            let frame = try XCTUnwrap(alert.window.contentView?.superview)
+            let bitmap = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+            frame.cacheDisplay(in: frame.bounds, to: bitmap)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                .write(to: directory.appendingPathComponent("grant-\(language.rawValue)-confirmation.png"))
+        }
+    }
+
     /// 只检查可见的视图；NSTextView 内部由文本系统按 frame 排版，不参与自动布局。
     private static func ambiguousViews(in view: NSView) -> [String] {
         guard !view.isHidden, !(view is NSTextView) else { return [] }
@@ -242,6 +404,7 @@ private final class FakeContext: HostContext {
     var serviceStatus = tr(.statusReady)
     var isRunning = true
     var clients: [ClientRecord] = []
+    var clientGrantState: ClientGrantState = .idle
     var httpEnabled = false
     var httpStatus: String?
     var controlledAppCount = 0
@@ -255,6 +418,8 @@ private final class FakeContext: HostContext {
     func emergencyStop() {}
     func restartServices() {}
     func revokeClient(_ id: String) {}
+    var grantRequests: [String] = []
+    func grantAllApps(_ id: String) { grantRequests.append(id) }
     func setHTTPEnabled(_ enabled: Bool) {}
     func requestPermissions() {}
     func installCLI() {}

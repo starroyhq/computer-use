@@ -52,8 +52,16 @@ export type Point = { x: number; y: number };
 export type Action = z.infer<typeof actionSchema>;
 export type Condition = z.infer<typeof conditionSchema>;
 // allApps 仅覆盖桌面应用；缺失时沿用旧配对的 appIds，不能自动扩权。
-// foreground 在配对批准时一并授予并持久化；缺失表示旧版配对，需要重新配对才能使用前台。
+// foreground 在配对或本机升级授权时授予；缺失表示旧版配对，不能自行扩权。
 export type Grant = { appIds: string[]; allApps?: boolean; browser: boolean; foreground?: boolean };
+export type Authorization = Required<Grant>;
+export type GrantOperation = {
+  command: 'grant_all_apps';
+  requestId: string;
+  clientId: string;
+  ok: boolean;
+  error?: { code: ErrorCode; message: string };
+};
 export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> };
 export type BackendExecution = { effect: 'confirmed' | 'unconfirmed' };
 export interface Backend {
@@ -122,6 +130,7 @@ export type HostEvent =
   | {
       event: 'clients';
       clients: Array<{ id: string; name: string; appIds: string[]; allApps?: boolean; browser: boolean; foreground: boolean }>;
+      operation?: GrantOperation;
     }
   | { event: 'ready' }
   | { event: 'control_begin' | 'control_end'; pid: number }
@@ -131,6 +140,7 @@ export type HostCommand =
   | { command: 'pair_allow' | 'pair_deny'; clientId: string; allApps?: boolean | undefined }
   | { command: 'foreground_allow' | 'foreground_deny'; sessionId: string }
   | { command: 'revoke'; clientId: string }
+  | { command: 'grant_all_apps'; clientId: string; requestId: string }
   | { command: 'pause' | 'resume' | 'stop' | 'http_enable' | 'http_disable' }
   | { command: 'control_ready'; pid: number };
 export interface RpcService {

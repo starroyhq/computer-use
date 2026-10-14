@@ -142,6 +142,8 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
 
     private let table = NSTableView()
     private let placeholder = Form.note()
+    private let grantFeedback = Form.note()
+    private lazy var grantButton = Form.button(tr(.clientsGrantAllApps), self, #selector(grantAllApps))
     private lazy var revokeButton = Form.button(tr(.clientsRevoke), self, #selector(revoke))
     private var rows: [ClientRecord] = []
 
@@ -152,9 +154,9 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
             case .name: item.title = tr(.clientsName); item.width = 130
             case .apps: item.title = tr(.clientsApps); item.width = 170
             case .browser: item.title = tr(.clientsBrowser); item.width = 80
-            case .foreground: item.title = tr(.clientsForeground); item.width = 70
+            case .foreground: item.title = tr(.clientsForeground); item.width = 100
             }
-            item.minWidth = 50
+            item.minWidth = column == .foreground ? 95 : 50
             table.addTableColumn(item)
         }
         table.dataSource = self
@@ -174,9 +176,12 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
         placeholder.preferredMaxLayoutWidth = Form.pageWidth - 56
         let hint = Form.note(tr(.clientsHint))
         hint.preferredMaxLayoutWidth = Form.pageWidth - 56
-        let stack = Form.column([scroll, revokeButton, placeholder, hint])
+        grantButton.identifier = NSUserInterfaceItemIdentifier("clients-grant-all-apps")
+        grantFeedback.identifier = NSUserInterfaceItemIdentifier("clients-grant-feedback")
+        grantFeedback.preferredMaxLayoutWidth = Form.pageWidth - 56
+        let stack = Form.column([scroll, Form.row([grantButton, revokeButton]), grantFeedback, placeholder, hint])
         // 表格和说明文字铺满分区宽度，文字在这个宽度内换行。
-        NSLayoutConstraint.activate([scroll, placeholder, hint].map { $0.widthAnchor.constraint(equalTo: stack.widthAnchor) })
+        NSLayoutConstraint.activate([scroll, grantFeedback, placeholder, hint].map { $0.widthAnchor.constraint(equalTo: stack.widthAnchor) })
         view = Form.page(stack, fill: true)
     }
 
@@ -192,7 +197,34 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
         }
         placeholder.stringValue = !context.isRunning ? tr(.clientsNotRunning) : rows.isEmpty ? tr(.clientsEmpty) : ""
         placeholder.isHidden = placeholder.stringValue.isEmpty
-        revokeButton.isEnabled = context.isRunning && table.selectedRow >= 0
+        refreshActions()
+    }
+
+    private var selectedClient: ClientRecord? {
+        table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow] : nil
+    }
+
+    private func refreshActions() {
+        let client = selectedClient
+        let state = context.clientGrantState
+        revokeButton.isEnabled = context.isRunning && client != nil
+        grantButton.title = client?.hasAllAppsAccess == true ? tr(.clientsGrantAlready) : tr(.clientsGrantAllApps)
+        grantButton.isEnabled = context.isRunning && client?.canGrantAllApps == true && !state.isPending
+        var feedback = ""
+        if state.clientID != nil && (client == nil || state.clientID == client?.id) {
+            switch state {
+            case .idle: break
+            case .pending: feedback = tr(.clientsGrantPending)
+            case .succeeded: feedback = tr(.clientsGrantSucceeded)
+            case .unconfirmed: feedback = tr(.clientsGrantUnconfirmed)
+            case .failed(_, let code):
+                feedback = tr(code == "not_found" || code == "unauthorized" ? .clientsGrantUnavailable : .clientsGrantFailed)
+            }
+        } else if let client, !client.hasDesktopAccess {
+            feedback = tr(.clientsGrantBrowserOnly)
+        }
+        grantFeedback.stringValue = feedback
+        grantFeedback.isHidden = feedback.isEmpty
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -228,7 +260,14 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        revokeButton.isEnabled = context.isRunning && table.selectedRow >= 0
+        refreshActions()
+    }
+
+    @objc private func grantAllApps() {
+        guard context.isRunning, !context.clientGrantState.isPending,
+              let client = selectedClient, client.canGrantAllApps else { return }
+        context.grantAllApps(client.id)
+        refreshActions()
     }
 
     @objc private func revoke() {

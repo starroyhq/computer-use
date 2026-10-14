@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { CuError, type Client } from './contracts.js';
@@ -41,10 +42,31 @@ const clientSchema = z.object({
     foreground: z.boolean().default(false),
   }),
 });
+export type PreparedClientSnapshot = { commit(): void; discard(): Promise<void> };
+export async function prepareClientSnapshot(path: string, value: unknown): Promise<PreparedClientSnapshot> {
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+    await chmod(temporary, 0o600);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+  return {
+    // 最后的授权检查、原子替换与内存提交之间不能 await，否则停止/撤销会落在已写盘但未生效的间隙。
+    commit: () => renameSync(temporary, path),
+    discard: () => rm(temporary, { force: true }),
+  };
+}
 export class ClientStore {
   readonly clients = new Map<string, Client>();
   private writeTail: Promise<void> = Promise.resolve();
-  constructor(private readonly path: string) {}
+  private readonly revoked = new Set<string>();
+  private revision = 0;
+  constructor(
+    private readonly path: string,
+    private readonly prepare: typeof prepareClientSnapshot = prepareClientSnapshot,
+  ) {}
   async load(): Promise<void> {
     const raw = await readJson(this.path);
     const parsed = z.array(clientSchema).safeParse(raw ?? []);
@@ -57,11 +79,99 @@ export class ClientStore {
     if (!client) throw new CuError('unauthorized', 'Client credential is invalid or revoked.');
     return client;
   }
-  async save(): Promise<void> {
-    const snapshot = [...this.clients.values()];
-    const operation = this.writeTail.then(() => atomicJson(this.path, snapshot));
+  private enqueue(update: () => Promise<void>): Promise<void> {
+    const operation = this.writeTail.then(update);
     this.writeTail = operation.catch(() => {});
-    await operation;
+    return operation;
+  }
+  // 只等待已排队的保存；失败仍由各操作的原始 Promise 向调用方报告。
+  flush(): Promise<void> {
+    return this.writeTail;
+  }
+  private snapshot(replacement?: Client): Client[] {
+    const next = new Map(this.clients);
+    if (replacement) next.set(replacement.id, replacement);
+    return structuredClone([...next.values()]);
+  }
+  private async persist(replacement?: Client, validate: () => void = () => {}): Promise<void> {
+    const storageError = () => new CuError('unavailable', 'Could not save client authorization. Review local storage in the app.');
+    for (;;) {
+      validate();
+      const revision = this.revision;
+      let staged: PreparedClientSnapshot;
+      try {
+        staged = await this.prepare(this.path, this.snapshot(replacement));
+      } catch {
+        throw storageError();
+      }
+      let failure: unknown;
+      let failed = false;
+      try {
+        validate();
+        // 撤销在队列外立即失效；准备文件时发生任何撤销，都要基于最新认证表重新准备。
+        if (revision === this.revision) {
+          try {
+            staged.commit();
+          } catch {
+            throw storageError();
+          }
+          if (replacement) {
+            this.clients.set(replacement.id, replacement);
+            this.revision++;
+          }
+          return;
+        }
+      } catch (error) {
+        failure = error;
+        failed = true;
+      }
+      try {
+        await staged.discard();
+      } catch {
+        throw storageError();
+      }
+      if (failed) throw failure;
+    }
+  }
+  // 所有写入在队列执行时读取最新状态。扩大权限的候选对象在落盘前不进入认证表。
+  save(): Promise<void> {
+    return this.enqueue(() => this.persist());
+  }
+  add(client: Client, active: () => boolean): Promise<void> {
+    const candidate = structuredClone(client);
+    return this.enqueue(async () => {
+      await this.persist(candidate, () => {
+        if (this.clients.has(candidate.id) || this.revoked.has(candidate.id)) throw new CuError('unauthorized', 'Client is unavailable.');
+        if (!active()) throw new CuError('unavailable', 'Runtime stopped before authorization was saved.');
+      });
+    });
+  }
+  grantAllApps(clientId: string, active: () => boolean): Promise<void> {
+    return this.enqueue(async () => {
+      const client = this.clients.get(clientId);
+      if (!client || this.revoked.has(clientId)) throw new CuError('not_found', 'Client no longer exists or was revoked.');
+      if (!active()) throw new CuError('unavailable', 'Runtime stopped; review its state in the local app.');
+      if (client.grant.allApps !== true && client.grant.appIds.length === 0)
+        throw new CuError('permission_denied', 'Browser-only clients cannot be upgraded to desktop access.');
+      if (client.grant.allApps === true && client.grant.foreground === true && client.grant.appIds.length === 0) return;
+      const candidate: Client = {
+        ...client,
+        grant: { ...client.grant, allApps: true, appIds: [], foreground: true },
+      };
+      await this.persist(candidate, () => {
+        if (!active() || this.revoked.has(clientId) || this.clients.get(clientId) !== client)
+          throw new CuError(
+            this.revoked.has(clientId) ? 'not_found' : 'unavailable',
+            'Authorization changed or service stopped before completion.',
+          );
+      });
+    });
+  }
+  revoke(clientId: string): Promise<void> {
+    this.revoked.add(clientId);
+    this.clients.delete(clientId);
+    this.revision++;
+    return this.save();
   }
 }
 export type ActionState = 'queued' | 'running' | 'executed' | 'verified' | 'failed' | 'cancelled' | 'unknown';
