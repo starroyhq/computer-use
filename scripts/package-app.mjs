@@ -109,6 +109,10 @@ export async function verify(app) {
   if (run('/usr/bin/plutil', ['-extract', 'CFBundleIdentifier', 'raw', infoPlist]) !== BUNDLE_ID) {
     throw new Error(`Bundle identifier must be ${BUNDLE_ID}.`);
   }
+  const manifest = JSON.parse(await readFile(join(resources, 'package.json'), 'utf8'));
+  if (run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', infoPlist]) !== manifest.version) {
+    throw new Error('Bundle version must match the packaged runtime version. Update native/Info.plist before packaging.');
+  }
   if (run('/usr/bin/plutil', ['-extract', 'CFBundleIconFile', 'raw', infoPlist]) !== 'app-icon.icns') {
     throw new Error('Bundle icon must be app-icon.icns.');
   }
