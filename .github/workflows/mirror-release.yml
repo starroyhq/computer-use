@@ -50,9 +50,11 @@ jobs:
           source_sha=$(git rev-parse --verify "$RELEASE_TAG^{commit}")
           version=$(git show "$source_sha:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
           [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
-          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "snapshot_time=$(jq -r .createdAt <<< "$state")" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$source_sha"
+            echo "version=$version"
+            echo "snapshot_time=$(jq -r .createdAt <<< "$state")"
+          } >> "$GITHUB_OUTPUT"
       - name: Download and verify the existing 15 release assets
         run: |
           set -euo pipefail

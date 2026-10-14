@@ -63,10 +63,12 @@ jobs:
           [[ "$RELEASE_TAG" == "v$version" ]] || { echo 'Tag and package version differ'; exit 1; }
           git cat-file -e "$RELEASE_TAG:.github/release-notes/$RELEASE_TAG.md"
           CI_RUN_ID=$(node .github/scripts/select-release-ci.mjs "$tag_sha" "$CI_RUN_ID")
-          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "tools_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "ci_run_id=$CI_RUN_ID"
+            echo "tools_sha=$(git rev-parse HEAD)"
+            echo "sha=$tag_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
           state=$(node .github/scripts/verify-release.mjs preflight "$RELEASE_TAG")
           reuse=$(jq -r .reuse <<< "$state")
           echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
