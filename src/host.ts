@@ -1,8 +1,12 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CuaBackend, connectWindowsWorker } from './backends/cua.js';
 import { BrowserBackend } from './backends/browser.js';
 import { Runtime } from './runtime.js';
+import { bundledMacHost, bundledWindowsHost } from './runtime-client.js';
+import { createNativeHelper, type NativeHelper } from './native-helper.js';
 import { listenIpc } from './ipc.js';
 import { listenHttp } from './mcp.js';
 import { hostCommandSchema } from './schema.js';
@@ -32,9 +36,25 @@ if (
 const emit = (event: HostEvent): void => {
   process.stdout.write(JSON.stringify(event) + '\n');
 };
+// 用户输入空闲时间由同包宿主的辅助模式提供。只信任已校验的完整包布局；
+// 源码运行或布局不符时前台动作不做让行检查，其余功能不受影响。
+async function locateNativeHelper(): Promise<NativeHelper | undefined> {
+  try {
+    const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
+    const module = join(runtimeDirectory, 'runtime-client.js');
+    const entrypoint = join(runtimeDirectory, 'cli.js');
+    const host = values.windows
+      ? await bundledWindowsHost(module, entrypoint, process.execPath)
+      : await bundledMacHost(module, entrypoint, process.execPath);
+    return createNativeHelper(host, values.windows ? 'win32' : 'darwin');
+  } catch {
+    return undefined;
+  }
+}
+const native = await locateNativeHelper();
 const desktop = values.windows
-  ? new CuaBackend(values['driver-binary']!, connectWindowsWorker, 'win32')
-  : new CuaBackend(values['driver-socket']!);
+  ? new CuaBackend(values['driver-binary']!, connectWindowsWorker, 'win32', undefined, native)
+  : new CuaBackend(values['driver-socket']!, undefined, undefined, undefined, native);
 const runtime = new Runtime({ dataDir: values['data-dir'], backends: [desktop, new BrowserBackend(values['data-dir'])], emit });
 const rpcRequest = z
   .object({

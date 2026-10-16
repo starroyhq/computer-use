@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { CuaDriverLike, ToolResult, WindowElement, WindowStateOutput } from '@trycua/cua-driver';
 import {
   CuError,
   hasPixels,
+  type ActContext,
   type Action,
   type Backend,
   type BackendExecution,
@@ -14,6 +16,7 @@ import {
   type Doctor,
   type Element,
   type ErrorCode,
+  type ExecutionWarning,
   type Grant,
   type Mode,
   type ObserveOptions,
@@ -22,6 +25,7 @@ import {
   type Target,
 } from '../contracts.js';
 import { windowsAppId } from '../app-identity.js';
+import type { NativeHelper } from '../native-helper.js';
 
 export type CuaConnection = Pick<
   CuaDriverLike,
@@ -37,6 +41,21 @@ const APPS_CACHE_MS = 1000;
 // 一次有效截图会给驱动的坐标派发预热，大约一秒后失效。
 const CAPTURE_FRESH_MS = 1000;
 const readOptions = () => ({ signal: AbortSignal.timeout(10_000) });
+// 逐键输入的耗时（驱动 0.28.2，本机实测后台网页输入框）：每次调用约 4 秒固定开销（读回等待），之后每字符约 40 毫秒。
+// 前台约每秒 9 个字符（实际使用记录），这里按每字符 120 毫秒保守估计。
+const KEY_SETUP_MS = 4_500;
+const BACKGROUND_MS_PER_CHAR = 40;
+const FOREGROUND_MS_PER_CHAR = 120;
+// 前台长文本分段输入：每段之后停一下，检查用户是否开始操作；段太小会放大每次调用的固定开销。
+const FOREGROUND_CHUNK = 64;
+const CHUNK_SETTLE_MS = 450;
+// 前台动作前，用户需要至少这么久没有动键盘鼠标；自己刚发出的输入也会刷新这个时间，先等它过去。
+const USER_QUIET_MS = 1_000;
+const READBACK_WARNING: ExecutionWarning = {
+  code: 'readback_mismatch',
+  message:
+    'The field did not read back the typed text. Web inputs such as terminals clear themselves after each keystroke, so the text usually arrived in full: check the target in a current screenshot and do not type it again.',
+};
 const execFileAsync = promisify(execFile);
 const record = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
@@ -69,7 +88,8 @@ async function runningApps(client: CuaConnection): Promise<AppList | undefined> 
   }
 }
 
-function failure(code: unknown, mutation = false): CuError {
+// settled：驱动调用已经返回（不是中断或连接丢失），没有仍在进行的输入。
+function failure(code: unknown, mutation = false, settled = false): CuError {
   const known: Record<string, ErrorCode> = {
     background_unavailable: 'background_unavailable',
     background_occluded: 'background_unavailable',
@@ -104,26 +124,61 @@ function failure(code: unknown, mutation = false): CuError {
   };
   const mapped = typeof code === 'string' ? known[code] : undefined;
   const driverCode = typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : undefined;
+  const advice =
+    driverCode === 'type_text_incomplete'
+      ? ' The field did not read back all typed characters; observe it and do not type the text again.'
+      : ' Observe before retrying.';
   return new CuError(
     mapped ?? (mutation ? 'unknown_outcome' : 'unavailable'),
     mapped
       ? `Desktop backend refused the operation (${mapped}).${hints[code as string] ?? ''}`
       : mutation
-        ? `Desktop action outcome is unknown${driverCode ? ` (driver code ${driverCode})` : ''}. Observe before retrying.`
+        ? `Desktop action outcome is unknown${driverCode ? ` (driver code ${driverCode})` : ''}.${advice}`
         : 'Desktop backend is unavailable. Check the native host and permissions.',
+    { settled: settled && mutation && !mapped },
   );
 }
 
 function checkResult(result: ToolResult): void;
 function checkResult(result: ToolResult, mutation: true): BackendExecution;
 function checkResult(result: ToolResult, mutation = false): BackendExecution | undefined {
-  if (result.isError) throw failure(result.errorCode, mutation);
+  // 工具结果已经返回：即使效果不明，也没有仍在进行的输入。
+  if (result.isError) throw failure(result.errorCode, mutation, true);
   // UniFFI's ActionEffect enum: Confirmed=0; Partial=1; Unverifiable=2;
   // SuspectedNoop=3; Refused=4. A successful transport is not an effect proof.
   if (mutation) {
     if (result.action?.effect === 4) throw new CuError('unavailable', 'Desktop driver refused this action.');
     return { effect: result.action?.effect === 0 ? 'confirmed' : 'unconfirmed' };
   }
+}
+
+function structured(result: ToolResult): Record<string, unknown> | undefined {
+  try {
+    return record(JSON.parse(result.structuredJson ?? 'null'));
+  } catch {
+    return undefined;
+  }
+}
+
+// 按 Unicode 码位分段，不把代理对拆开。
+function chunks(text: string, size: number): string[] {
+  const characters = Array.from(text);
+  const parts: string[] = [];
+  for (let index = 0; index < characters.length; index += size) parts.push(characters.slice(index, index + size).join(''));
+  return parts;
+}
+
+// 驱动在派发前因输入预算不足而拒绝（驱动说明：拒绝发生在任何字符事件之前）。已合成的字符数不是 0 时不算。
+function budgetRefusal(result: ToolResult): CuError | undefined {
+  if (!result.isError || result.errorCode !== 'type_text_synthesis_budget_exceeded') return undefined;
+  const info = structured(result);
+  const sent = info?.synthesized_chars;
+  if (sent !== undefined && sent !== 0) return undefined;
+  const max = typeof info?.max_chunk_chars === 'number' && info.max_chunk_chars > 0 ? Math.floor(info.max_chunk_chars) : undefined;
+  return new CuError(
+    'invalid_request',
+    `The driver refused to type this much text in one call; nothing was sent. Split it into parts of${max ? ` at most ${max} characters` : ' fewer characters'}.`,
+  );
 }
 
 function exactTarget(target: Target): { pid: number; windowId: bigint } {
@@ -333,12 +388,16 @@ export class CuaBackend implements Backend {
   private readonly freshCaptures = new Map<string, number>();
   private closed = false;
   private interrupted = false;
+  // 本后端最近一次前台输入结束的时刻：它也会刷新系统的输入空闲时间。
+  private lastForegroundInput = 0;
 
   constructor(
     private readonly socketPath: string,
     private readonly connector: (socketPath: string) => Promise<CuaConnection> = connect,
     private readonly platform: NodeJS.Platform = process.platform,
     private readonly processPaths: (pids: number[]) => Promise<Map<number, string>> = pids => windowsProcessPaths(socketPath, pids),
+    // 同包宿主提供的用户输入空闲时间；没有时前台动作不做让行检查。
+    private readonly native: NativeHelper | undefined = undefined,
   ) {}
 
   private async client(): Promise<CuaConnection> {
@@ -644,6 +703,97 @@ export class CuaBackend implements Backend {
     return observation;
   }
 
+  private webElement(observation: BackendObservation, elementId: string | undefined): boolean {
+    if (!elementId) return false;
+    return this.states.get(observation)?.snapshot.elements?.find(item => item.elementToken === elementId)?.inWebContent === true;
+  }
+
+  // 只估算已知很慢的逐键输入：macOS 前台输入，以及后台向网页内容输入。原生文本框通常一次写入，不估算。
+  estimateMs(observation: BackendObservation, action: Action, mode: Mode): number | undefined {
+    if (action.type !== 'type' || this.platform !== 'darwin') return undefined;
+    const characters = Array.from(action.text).length;
+    if (characters === 0) return undefined;
+    if (mode === 'foreground')
+      return Math.ceil(characters / FOREGROUND_CHUNK) * (KEY_SETUP_MS + CHUNK_SETTLE_MS) + characters * FOREGROUND_MS_PER_CHAR;
+    return this.webElement(observation, action.elementId) ? KEY_SETUP_MS + characters * BACKGROUND_MS_PER_CHAR : undefined;
+  }
+
+  // 前台动作会动用真实的键盘鼠标：用户正在用时，派发前让行，什么都不发出。
+  private async ensureUserQuiet(signal: AbortSignal): Promise<void> {
+    if (!this.native) return;
+    const wait = this.lastForegroundInput + USER_QUIET_MS - Date.now();
+    if (wait > 0) await delay(wait, undefined, { signal }).catch(() => {});
+    if (signal.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
+    const idle = await this.native.inputIdleMs();
+    if (idle !== undefined && idle < USER_QUIET_MS)
+      throw new CuError(
+        'busy',
+        'The user is using the mouse or keyboard right now; nothing was sent. Wait until they stop, or tell them what you are about to do, then try again.',
+      );
+  }
+
+  // 一次输入调用的结果。网页输入框会自行清空，驱动按读回判定“未送达”并不可信：记为已执行、效果未确认。
+  private typeOutcome(result: ToolResult, web: boolean): BackendExecution {
+    const refusal = budgetRefusal(result);
+    if (refusal) throw refusal;
+    if (result.isError && result.errorCode === 'type_text_incomplete' && web && structured(result)?.path === 'key_events')
+      return { effect: 'unconfirmed', warning: READBACK_WARNING };
+    return checkResult(result, true);
+  }
+
+  // 前台长文本分段输入：每段之间检查剩余时间和用户是否开始操作；停下时报告已完整送达的字符数。
+  private async typeInParts(
+    client: CuaConnection,
+    args: Record<string, unknown>,
+    text: string,
+    web: boolean,
+    signal: AbortSignal,
+    budgetMs: number | undefined,
+  ): Promise<BackendExecution> {
+    const parts = chunks(text, FOREGROUND_CHUNK);
+    const total = Array.from(text).length;
+    const started = Date.now();
+    let delivered = 0;
+    let execution: BackendExecution = { effect: 'confirmed' };
+    const stop = (reason: string): BackendExecution => ({
+      effect: 'unconfirmed',
+      progress: { delivered, total },
+      warning: {
+        code: 'partial_input',
+        message: `Typing stopped after ${delivered} of ${total} characters ${reason}; the rest was not sent. Check the field before continuing.`,
+      },
+    });
+    for (const [index, part] of parts.entries()) {
+      const size = Array.from(part).length;
+      if (index > 0) {
+        if (budgetMs !== undefined && Date.now() - started + CHUNK_SETTLE_MS + KEY_SETUP_MS + size * FOREGROUND_MS_PER_CHAR > budgetMs)
+          return stop('to stay within timeoutMs');
+        await delay(CHUNK_SETTLE_MS, undefined, { signal }).catch(() => {});
+        if (signal.aborted) return stop('because the action was cancelled');
+        const idle = await this.native?.inputIdleMs();
+        if (idle !== undefined && idle < CHUNK_SETTLE_MS - 100) return stop('because the user started using the mouse or keyboard');
+      }
+      const result = await client.callTool('type_text', JSON.stringify({ ...args, text: part }), { signal });
+      this.lastForegroundInput = Date.now();
+      let outcome: BackendExecution;
+      try {
+        outcome = this.typeOutcome(result, web);
+      } catch (error) {
+        if (delivered === 0) throw error;
+        if (error instanceof CuError && error.code === 'invalid_request') return stop('because the driver refused the next part');
+        throw new CuError(
+          'unknown_outcome',
+          `Typing stopped after ${delivered} of ${total} characters; the outcome of the next part is unknown. Observe the field before retrying.`,
+          { settled: true },
+        );
+      }
+      delivered += size;
+      if (outcome.effect === 'unconfirmed') execution = { ...execution, effect: 'unconfirmed' };
+      if (outcome.warning && !execution.warning) execution = { ...execution, warning: outcome.warning };
+    }
+    return execution;
+  }
+
   async validate(observation: BackendObservation): Promise<boolean> {
     const state = this.states.get(observation);
     if (
@@ -672,6 +822,7 @@ export class CuaBackend implements Backend {
     mode: Mode,
     signal: AbortSignal,
     onDispatch?: () => void,
+    context?: ActContext,
   ): Promise<BackendExecution> {
     if (this.interrupted)
       throw new CuError('unavailable', 'An earlier desktop action was interrupted. Restart the native host before sending more actions.');
@@ -697,6 +848,9 @@ export class CuaBackend implements Backend {
     };
     let tool: string;
     let textClickPoint = false;
+    // 文字输入的附加信息：目标是否网页内容、是否分段。
+    let web = false;
+    let typedInParts: string | undefined;
     switch (action.type) {
       case 'click': {
         if (Boolean(action.elementId) === Boolean(action.point))
@@ -783,10 +937,13 @@ export class CuaBackend implements Backend {
         args.text = action.text;
         if (action.elementId) {
           args.element_token = element(action.elementId);
+          web = this.webElement(observation, action.elementId);
           // Windows UIA ValuePattern can confirm the value; foreground SendInput
           // only confirms queuing and may drop long text after focus restoration.
           if (this.platform === 'win32') args.delivery_mode = 'background';
         }
+        if (this.platform === 'darwin' && mode === 'foreground' && Array.from(action.text).length > FOREGROUND_CHUNK)
+          typedInParts = action.text;
         break;
       case 'key':
         if (action.keys.length === 0) throw new CuError('invalid_request', 'At least one key is required.');
@@ -892,13 +1049,18 @@ export class CuaBackend implements Backend {
         )
           throw new CuError('stale_snapshot', 'Text click geometry changed or could not be verified; observe again before acting.');
       }
+      // set_value 与 invoke_menu 不动用键盘鼠标，不需要让行。
+      const foreground = args.delivery_mode === 'foreground';
+      if (foreground) await this.ensureUserQuiet(combined);
       // 从这里到 callTool 之间没有 await：通过此处检查后不会再被中止打断，回调与派发处于同一时刻。
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
       onDispatch?.();
       state.consumed = true;
       dispatched = true;
+      if (typedInParts !== undefined) return await this.typeInParts(client, args, typedInParts, web, combined, context?.budgetMs);
       const result = await client.callTool(tool, JSON.stringify(args), { signal: combined });
-      return checkResult(result, true);
+      if (foreground) this.lastForegroundInput = Date.now();
+      return tool === 'type_text' ? this.typeOutcome(result, web) : checkResult(result, true);
     } catch (error) {
       if (error instanceof CuError) throw error;
       throw failure(record(record(error)?.inner)?.errorCode, dispatched);

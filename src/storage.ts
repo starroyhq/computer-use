@@ -185,6 +185,9 @@ export type ActionRecord = {
   updatedAt: number;
   effect?: 'confirmed' | 'unconfirmed';
   error?: { code: string; message: string };
+  // 只记固定代码、固定文案和字符计数，不含输入内容。
+  warning?: { code: string; message: string };
+  progress?: { delivered: number; total: number };
 };
 // 旧版把"已派发但效果未确认"记为 unknown，加载时按原文识别并迁移为 executed + effect。
 const LEGACY_UNCONFIRMED =
@@ -199,6 +202,8 @@ const recordSchema = z.object({
   updatedAt: z.number(),
   effect: z.enum(['confirmed', 'unconfirmed']).optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
+  warning: z.object({ code: z.string(), message: z.string() }).optional(),
+  progress: z.object({ delivered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).optional(),
 });
 // 只淘汰终态记录；被淘汰的 requestId 不再去重，因此保留期要远长于任何客户端的重试窗口。
 const RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -224,8 +229,14 @@ export class ActionStore {
     const parsed = z.array(recordSchema).safeParse((await readJson(this.path)) ?? []);
     if (!parsed.success) throw new CuError('unavailable', 'Action journal is invalid.');
     for (const raw of parsed.data) {
-      const { error, effect, ...rest } = raw;
-      const record: ActionRecord = { ...rest, ...(effect ? { effect } : {}), ...(error ? { error } : {}) };
+      const { error, effect, warning, progress, ...rest } = raw;
+      const record: ActionRecord = {
+        ...rest,
+        ...(effect ? { effect } : {}),
+        ...(error ? { error } : {}),
+        ...(warning ? { warning } : {}),
+        ...(progress ? { progress } : {}),
+      };
       if (record.state === 'unknown' && record.error?.message === LEGACY_UNCONFIRMED) {
         record.state = 'executed';
         record.effect = 'unconfirmed';

@@ -63,7 +63,23 @@ export type GrantOperation = {
   error?: { code: ErrorCode; message: string };
 };
 export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> };
-export type BackendExecution = { effect: 'confirmed' | 'unconfirmed' };
+/**
+ * 动作已派发、但有需要 Agent 知道的情况。只用固定代码和固定文案，不含输入内容或界面文字。
+ * - readback_mismatch：网页输入框（如终端）每次输入后自行清空，读回对不上；文字通常已完整送达。
+ * - partial_input：分段输入中途停下，progress 给出已完整送达的字符数。
+ */
+export type ExecutionWarning = {
+  code: 'readback_mismatch' | 'partial_input';
+  message: string;
+};
+export type BackendExecution = {
+  effect: 'confirmed' | 'unconfirmed';
+  warning?: ExecutionWarning;
+  /** 分段输入中途停下时：已完整送达的前缀字符数（按 Unicode 码位）和总字符数。 */
+  progress?: { delivered: number; total: number };
+};
+/** 派发时的执行条件。budgetMs：距离动作时限还剩的毫秒数，后端可据此在分段之间提前停下。 */
+export type ActContext = { budgetMs?: number };
 export interface Backend {
   readonly kind: 'desktop' | 'browser';
   /**
@@ -81,12 +97,18 @@ export interface Backend {
   targets(grant: Grant): Promise<Target[]>;
   observe(target: Target, options?: ObserveOptions): Promise<BackendObservation>;
   validate(observation: BackendObservation): Promise<boolean>;
+  /**
+   * 派发前估算动作大约要多少毫秒；只对已知很慢的动作（例如网页内容和前台的逐键输入）返回数值。
+   * 运行时据此在入队前拒绝注定超时的动作，避免输入到一半被时限截断。
+   */
+  estimateMs?(observation: BackendObservation, action: Action, mode: Mode): number | undefined;
   act(
     observation: BackendObservation,
     action: Action,
     mode: Mode,
     signal: AbortSignal,
     onDispatch?: () => void,
+    context?: ActContext,
   ): Promise<BackendExecution | undefined>;
   /** 该目标已没有任何会话时调用：释放后端为它缓存的截图、元素句柄等。 */
   release?(target: Target): Promise<void>;
@@ -108,12 +130,19 @@ export type ErrorCode =
   | 'unknown_outcome'
   | 'internal';
 export class CuError extends Error {
+  /**
+   * 仅对 unknown_outcome 有意义：为 true 表示驱动调用已经返回，没有仍在进行的输入，
+   * 只是无法判断它的效果。运行时记为 unknown，但不必停机；中断或连接丢失时为 false。
+   */
+  readonly settled: boolean;
   constructor(
     public readonly code: ErrorCode,
     message: string,
+    options: { settled?: boolean } = {},
   ) {
     super(message);
     this.name = 'CuError';
+    this.settled = options.settled === true;
   }
 }
 export function errorResult(error: unknown): { code: ErrorCode; message: string } {

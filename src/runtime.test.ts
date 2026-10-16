@@ -179,7 +179,9 @@ describe('Runtime authorization and execution', () => {
     });
     expect(first.mode).toBe('foreground');
     await call(client.token, 'act', await actionInput(client.token, first.sessionId));
-    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'foreground', expect.anything(), expect.any(Function));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'foreground', expect.anything(), expect.any(Function), {
+      budgetMs: expect.any(Number),
+    });
     await runtime.close();
     events = [];
     runtime = new Runtime({
@@ -300,7 +302,9 @@ describe('Runtime authorization and execution', () => {
     const first = await call<{ sessionId: string; mode: string }>(client.token, 'session_open', { targetId: secretTarget.id });
     expect(first.mode).toBe('background');
     await call(client.token, 'act', await actionInput(client.token, first.sessionId));
-    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function), {
+      budgetMs: expect.any(Number),
+    });
     await runtime.close();
 
     const newWindow = { ...target, id: 'window-2' };
@@ -468,7 +472,9 @@ describe('Runtime authorization and execution', () => {
     const { token } = await pair(),
       { sessionId } = await session(token);
     await call(token, 'act', await actionInput(token, sessionId));
-    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function));
+    expect(backend.act).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'background', expect.anything(), expect.any(Function), {
+      budgetMs: expect.any(Number),
+    });
   });
 
   it('consumes snapshots after one action, replaces observations, and hides backend state', async () => {
@@ -1588,5 +1594,84 @@ describe('Runtime authorization and execution', () => {
       { type: 'element', label: 'Submit', enabled: true, present: false },
     ])
       await expect(wait(condition)).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
+  describe('field report fixes', () => {
+    const act = (token: string, sessionId: string, snapshotId: string, action: unknown, extra: Record<string, unknown> = {}) =>
+      call<{ state: string; effect?: string; warning?: unknown; progress?: unknown; error?: { code: string; message: string } }>(
+        token,
+        'act',
+        { sessionId, snapshotId, requestId: randomUUID(), action, timeoutMs: 1000, ...extra },
+      );
+    const key = { type: 'key', keys: ['tab'] };
+
+    it('refuses input that cannot finish within its deadline before queueing it', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      backend.estimateMs = vi.fn(() => 40_000);
+      const first = await observation(token, sessionId);
+      await expect(act(token, sessionId, first.snapshotId, { type: 'type', text: 'x' }, { timeoutMs: 30_000 })).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: expect.stringContaining('Split it into shorter parts'),
+      });
+      backend.estimateMs = vi.fn(() => 20_000);
+      await expect(act(token, sessionId, first.snapshotId, { type: 'type', text: 'x' }, { timeoutMs: 15_000 })).rejects.toMatchObject({
+        message: expect.stringContaining('Raise timeoutMs to 20000'),
+      });
+      expect(backend.act).not.toHaveBeenCalled();
+      expect(vi.mocked(backend.estimateMs).mock.calls[0]?.[2]).toBe('background');
+      // 拒绝发生在入队前：快照没有被用掉，调大时限后照常执行。
+      expect(await act(token, sessionId, first.snapshotId, { type: 'type', text: 'x' }, { timeoutMs: 25_000 })).toMatchObject({
+        state: 'executed',
+      });
+    });
+
+    it('records an unknown outcome without stopping when the driver call already returned', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      vi.mocked(backend.act).mockImplementationOnce(async (_observation, _action, _mode, _signal, dispatched) => {
+        dispatched?.();
+        throw new CuError('unknown_outcome', 'Desktop action outcome is unknown (driver code window_busy).', { settled: true });
+      });
+      const first = await observation(token, sessionId);
+      expect(await act(token, sessionId, first.snapshotId, key)).toMatchObject({ state: 'unknown', error: { code: 'unknown_outcome' } });
+      expect(events.some(event => event.event === 'fatal')).toBe(false);
+      const next = await observation(token, sessionId);
+      expect(await act(token, sessionId, next.snapshotId, key)).toMatchObject({ state: 'executed' });
+      // 连接丢失或中断时没有返回，照旧停机。
+      vi.mocked(backend.act).mockImplementationOnce(async (_observation, _action, _mode, _signal, dispatched) => {
+        dispatched?.();
+        throw new CuError('unknown_outcome', 'Connection lost after dispatch.');
+      });
+      const last = await observation(token, sessionId);
+      expect(await act(token, sessionId, last.snapshotId, key)).toMatchObject({ state: 'unknown' });
+      expect(events.some(event => event.event === 'fatal')).toBe(true);
+    });
+
+    it('keeps execution warnings and partial progress in the record and the journal', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const warning = { code: 'partial_input', message: 'Typing stopped after 64 of 150 characters.' };
+      vi.mocked(backend.act).mockResolvedValueOnce({ effect: 'unconfirmed', warning, progress: { delivered: 64, total: 150 } } as never);
+      const first = await observation(token, sessionId);
+      const result = await act(token, sessionId, first.snapshotId, { type: 'type', text: 'a'.repeat(150) });
+      expect(result).toMatchObject({ state: 'executed', effect: 'unconfirmed', warning, progress: { delivered: 64, total: 150 } });
+      const journal = JSON.parse(await readFile(join(directory, 'actions.json'), 'utf8'));
+      expect(journal.at(-1)).toMatchObject({ warning, progress: { delivered: 64, total: 150 } });
+      expect(JSON.stringify(journal)).not.toContain('a'.repeat(20));
+      await runtime.close();
+      runtime = new Runtime({
+        dataDir: directory,
+        backends: [backend],
+        emit: event => events.push(event),
+        now: () => clock,
+        platform: 'darwin',
+      });
+      await runtime.start();
+      expect(await call(token, 'action_status', { requestId: journal.at(-1).requestId })).toMatchObject({
+        warning,
+        progress: { delivered: 64, total: 150 },
+      });
+    });
   });
 });

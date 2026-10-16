@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ToolResult, WindowStateOutput } from '@trycua/cua-driver';
 import { CuaBackend, type CuaConnection } from './cua.js';
 import type { Target } from '../contracts.js';
+import type { NativeHelper } from '../native-helper.js';
 
 const target: Target = { id: 'desktop:42:19', kind: 'desktop', appId: 'test.fixture', title: 'Fixture', pid: 42, windowId: 19 };
 const bounds = { x: 10, y: 20, width: 300, height: 200 };
@@ -1656,6 +1657,199 @@ describe('Cua socket adapter', () => {
       expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([]);
       expect(client.listApps).toHaveBeenCalledTimes(1);
       expect(client.callTool).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('typing results, budgets and estimates', () => {
+    const signal = () => new AbortController().signal;
+    const incomplete = (path = 'key_events'): ToolResult => ({
+      ...success(),
+      isError: true,
+      errorCode: 'type_text_incomplete',
+      structuredJson: JSON.stringify({
+        code: 'type_text_incomplete',
+        delivered_chars: 0,
+        effect: 'partial',
+        path,
+        requested_chars: 6,
+        retry_from_character: 0,
+        retryable: true,
+      }),
+    });
+    function web(inWebContent = true) {
+      const value = fixture();
+      Object.assign(value.state.elements![0]!, { role: 'AXTextArea', label: 'Terminal input', inWebContent });
+      return value;
+    }
+    const type = (text = 'ls -la') => ({ type: 'type' as const, text, elementId: 's1:1' });
+
+    it('records a failed read-back in a self-clearing web input as executed with a warning, never as a retry hint', async () => {
+      const { client, backend } = web();
+      client.callTool.mockResolvedValueOnce(incomplete());
+      await expect(backend.act(await backend.observe(target), type(), 'background', signal())).resolves.toEqual({
+        effect: 'unconfirmed',
+        warning: { code: 'readback_mismatch', message: expect.stringContaining('do not type it again') },
+      });
+      expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ text: 'ls -la', element_token: 's1:1' });
+    });
+
+    it('keeps other incomplete results unknown, but marks them settled because the driver call returned', async () => {
+      for (const [inWebContent, path] of [
+        [false, 'key_events'],
+        [true, 'accessibility'],
+      ] as const) {
+        const { client, backend } = web(inWebContent);
+        client.callTool.mockResolvedValueOnce(incomplete(path));
+        const error = await backend.act(await backend.observe(target), type(), 'background', signal()).catch(caught => caught);
+        expect(error).toMatchObject({
+          code: 'unknown_outcome',
+          settled: true,
+          message: expect.stringContaining('do not type the text again'),
+        });
+      }
+    });
+
+    it('distinguishes a returned but unclassified driver error from a lost connection', async () => {
+      const { client, backend } = fixture();
+      client.callTool.mockResolvedValueOnce({ ...success(), isError: true, errorCode: 'window_busy' });
+      await expect(
+        backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'unknown_outcome', settled: true });
+      client.callTool.mockRejectedValueOnce(new Error('transport'));
+      await expect(
+        backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'unknown_outcome', settled: false });
+      // 驱动明确拒绝的代码仍是确定的失败。
+      client.callTool.mockResolvedValueOnce({ ...success(), isError: true, errorCode: 'background_unavailable' });
+      await expect(
+        backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'background_unavailable', settled: false });
+    });
+
+    it('turns a pre-dispatch synthesis budget refusal into a definite failure with the safe part size', async () => {
+      const budget = (fields: Record<string, unknown>): ToolResult => ({
+        ...success(),
+        isError: true,
+        errorCode: 'type_text_synthesis_budget_exceeded',
+        structuredJson: JSON.stringify({ code: 'type_text_synthesis_budget_exceeded', ...fields }),
+      });
+      const { client, backend } = web();
+      client.callTool.mockResolvedValueOnce(budget({ synthesized_chars: 0, max_chunk_chars: 120, estimated_duration_ms: 90_000 }));
+      await expect(backend.act(await backend.observe(target), type(), 'background', signal())).rejects.toMatchObject({
+        code: 'invalid_request',
+        settled: false,
+        message: expect.stringContaining('at most 120 characters'),
+      });
+      client.callTool.mockResolvedValueOnce(budget({}));
+      await expect(backend.act(await backend.observe(target), type(), 'background', signal())).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: expect.stringContaining('nothing was sent'),
+      });
+      // 已经合成过字符时不能当作没有发出。
+      client.callTool.mockResolvedValueOnce(budget({ synthesized_chars: 5 }));
+      await expect(backend.act(await backend.observe(target), type(), 'background', signal())).rejects.toMatchObject({
+        code: 'unknown_outcome',
+        settled: true,
+      });
+    });
+
+    it('estimates only slow keystroke typing on macOS', async () => {
+      const { backend } = web();
+      const observation = await backend.observe(target);
+      const text = 'x'.repeat(100);
+      expect(backend.estimateMs(observation, type(text), 'background')).toBe(4_500 + 100 * 40);
+      expect(backend.estimateMs(observation, type(''), 'background')).toBeUndefined();
+      expect(backend.estimateMs(observation, { type: 'type', text }, 'background')).toBeUndefined();
+      expect(backend.estimateMs(observation, type(text), 'foreground')).toBe(2 * (4_500 + 450) + 100 * 120);
+      expect(backend.estimateMs(observation, { type: 'key', keys: ['tab'] }, 'foreground')).toBeUndefined();
+      // 码位计数：一个表情符号算一个字符。
+      expect(backend.estimateMs(observation, type('🙂🙂'), 'background')).toBe(4_500 + 2 * 40);
+      const native = web(false);
+      expect(native.backend.estimateMs(await native.backend.observe(target), type(text), 'background')).toBeUndefined();
+      const windows = new CuaBackend(
+        'C:\\Driver\\cua-driver.exe',
+        async () => native.client,
+        'win32',
+        async () => new Map(),
+      );
+      expect(windows.estimateMs(observation, type(text), 'foreground')).toBeUndefined();
+    });
+  });
+
+  describe('native helpers: user activity', () => {
+    const signal = () => new AbortController().signal;
+    function helper(idle: Array<number | undefined> = []) {
+      const values = [...idle];
+      return {
+        inputIdleMs: vi.fn(async () => (values.length > 0 ? values.shift() : 60_000)),
+      } satisfies NativeHelper;
+    }
+    function withHelper(native: NativeHelper) {
+      const value = fixture();
+      return { ...value, backend: new CuaBackend('/test/driver.sock', value.connector, 'darwin', undefined, native) };
+    }
+
+    it('sends nothing in the foreground while the user is using the mouse or keyboard', async () => {
+      const native = helper([200]);
+      const { client, backend } = withHelper(native);
+      const dispatched = vi.fn();
+      await expect(
+        backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'foreground', signal(), dispatched),
+      ).rejects.toMatchObject({ code: 'busy', message: expect.stringContaining('nothing was sent') });
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(client.callTool).not.toHaveBeenCalled();
+      // 后台动作和不动用键盘鼠标的动作不检查。
+      await backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'background', signal());
+      await backend.act(await backend.observe(target), { type: 'setValue', elementId: 's1:1', value: 'x' }, 'foreground', signal());
+      expect(native.inputIdleMs).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits out its own recent foreground input before checking the user', async () => {
+      vi.useFakeTimers();
+      try {
+        const native = helper();
+        const { client, backend } = withHelper(native);
+        await backend.act(await backend.observe(target), { type: 'key', keys: ['tab'] }, 'foreground', signal());
+        const next = backend.act(await backend.observe(target), { type: 'key', keys: ['return'] }, 'foreground', signal());
+        await vi.advanceTimersByTimeAsync(500);
+        expect(client.callTool).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(600);
+        await expect(next).resolves.toBeDefined();
+        expect(client.callTool).toHaveBeenCalledTimes(2);
+        expect(native.inputIdleMs).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('types long foreground text in parts and stops with an exact count when the user starts typing', async () => {
+      const native = helper([60_000, 60_000, 100]);
+      const { client, backend, state } = withHelper(native);
+      Object.assign(state.elements![0]!, { role: 'AXTextArea', inWebContent: true });
+      client.callTool.mockResolvedValue({ ...success(), action: { effect: 2, route: 0 } });
+      const text = 'a'.repeat(150);
+      await expect(
+        backend.act(await backend.observe(target), { type: 'type', text, elementId: 's1:1' }, 'foreground', signal()),
+      ).resolves.toEqual({
+        effect: 'unconfirmed',
+        progress: { delivered: 128, total: 150 },
+        warning: { code: 'partial_input', message: expect.stringContaining('user started using the mouse or keyboard') },
+      });
+      expect(client.callTool.mock.calls.map(([tool, json]) => [tool, JSON.parse(json).text.length])).toEqual([
+        ['type_text', 64],
+        ['type_text', 64],
+      ]);
+    });
+
+    it('stops between parts before the action would outlive its deadline', async () => {
+      const { client, backend } = withHelper(helper());
+      const text = 'b'.repeat(100);
+      await expect(
+        backend.act(await backend.observe(target), { type: 'type', text, elementId: 's1:1' }, 'foreground', signal(), undefined, {
+          budgetMs: 6_000,
+        }),
+      ).resolves.toMatchObject({ progress: { delivered: 64, total: 100 }, warning: { code: 'partial_input' } });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
     });
   });
 });

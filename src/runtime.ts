@@ -651,6 +651,17 @@ export class Runtime implements RpcService {
       throw new CuError('stale_snapshot', 'Element does not belong to this snapshot.');
     // 后端只认识它自己的元素 id；公开 id 在这里换回去。
     const backendAction = backendElementId === undefined ? action : { ...action, elementId: backendElementId };
+    // 逐键输入很慢；注定超过时限的输入在入队前拒绝，避免输入到一半被截断、结果不确定而停机。
+    const estimate = this.backend(session.target.kind).estimateMs?.(snapshot.observation, backendAction, session.mode);
+    if (estimate !== undefined && estimate > p.timeoutMs) {
+      const seconds = Math.ceil(estimate / 1000);
+      throw new CuError(
+        'invalid_request',
+        estimate > 30_000
+          ? `This input needs about ${seconds} seconds, longer than one action can take (30 seconds); nothing was sent. Split it into shorter parts.`
+          : `This input needs about ${seconds} seconds, longer than timeoutMs (${p.timeoutMs} ms); nothing was sent. Raise timeoutMs to ${Math.min(30_000, seconds * 1000)} or split the text.`,
+      );
+    }
     const record: ActionRecord = {
       requestId: p.requestId,
       clientId: client.id,
@@ -725,14 +736,18 @@ export class Runtime implements RpcService {
           work.started = true;
         };
         const execution = await Promise.race([
-          backend.act(snapshot.observation, backendAction, session.mode, controller.signal, dispatched),
+          backend.act(snapshot.observation, backendAction, session.mode, controller.signal, dispatched, { budgetMs: p.timeoutMs }),
           aborted,
         ]);
         clearTimeout(timer);
         work.started = false;
         // 派发已完成：effect 未确认只说明驱动无法证明效果，不属于结果不确定。
         record.state = 'executed';
-        if (execution) record.effect = execution.effect;
+        if (execution) {
+          record.effect = execution.effect;
+          if (execution.warning) record.warning = { ...execution.warning };
+          if (execution.progress) record.progress = { ...execution.progress };
+        }
         if (p.verify) {
           try {
             // 满足条件的那次观察会作为附带观察直接发布；没有附带观察、或附带的只要元素时，轮询用不着截图。
@@ -759,7 +774,9 @@ export class Runtime implements RpcService {
             ? 'cancelled'
             : 'failed';
         // 原生手势可能在取消后继续执行，必须停机；隔离后端只记录 unknown，由 Agent 重新观察。
-        if (work.started && record.state === 'unknown' && !work.contained)
+        // 驱动调用已经返回、只是无法判断效果时（settled），没有仍在进行的输入，记为 unknown 但不停机。
+        const settled = error instanceof CuError && error.settled && !controller.signal.aborted;
+        if (work.started && record.state === 'unknown' && !work.contained && !settled)
           this.haltUncertainInput(
             `Active action ${record.requestId} ended with ${record.error.code}; restart the runtime and inspect the target.`,
           );
