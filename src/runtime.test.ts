@@ -1707,5 +1707,153 @@ describe('Runtime authorization and execution', () => {
         progress: { delivered: 64, total: 150 },
       });
     });
+
+    describe('text recognition', () => {
+      let recognize: ReturnType<typeof vi.fn>;
+      beforeEach(async () => {
+        await runtime.close();
+        recognize = vi.fn(async () => [
+          { text: 'BUILD-DONE  rc=0', bounds: { x: 10.4, y: 20.6, width: 120.2, height: 18.5 } },
+          { text: '$', bounds: { x: 10, y: 44, width: 8, height: 18 } },
+        ]);
+        runtime = new Runtime({
+          dataDir: directory,
+          backends: [backend],
+          emit: event => {
+            events.push(event);
+            if (ackControl && event.event === 'control_begin') void runtime.control({ command: 'control_ready', pid: event.pid });
+          },
+          now: () => clock,
+          platform: 'darwin',
+          dispatchGraceMs: 250,
+          recognizeText: recognize as never,
+        });
+        await runtime.start();
+      });
+
+      it('adds recognized text lines to an observation on request', async () => {
+        const { token } = await pair(),
+          { sessionId } = await session(token);
+        const result = await call<Published & { text: unknown }>(token, 'observe', { sessionId, text: true, screenshot: false });
+        expect(result.text).toEqual([
+          { text: 'BUILD-DONE  rc=0', bounds: { x: 10, y: 21, width: 120, height: 19 } },
+          { text: '$', bounds: { x: 10, y: 44, width: 8, height: 18 } },
+        ]);
+        expect(result).not.toHaveProperty('screenshot');
+        expect(recognize.mock.calls[0]?.[0]).toEqual({ mimeType: 'image/png', data: 'cGl4ZWxz' });
+        expect(await call(token, 'observe', { sessionId })).not.toHaveProperty('text');
+        await expect(call(token, 'observe', { sessionId, text: true, elementsOnly: true })).rejects.toMatchObject({
+          code: 'invalid_request',
+        });
+        expect(await call(token, 'capabilities')).toMatchObject({ observation: { text: true } });
+      });
+
+      it('waits for text to appear and returns only text when asked', async () => {
+        const { token } = await pair(),
+          { sessionId } = await session(token);
+        recognize.mockResolvedValueOnce([{ text: 'building…', bounds: { x: 0, y: 0, width: 10, height: 10 } }]);
+        const result = await call<{ state: string; observation: Published & { text: Array<{ text: string }> } }>(token, 'wait', {
+          sessionId,
+          condition: { type: 'text', includes: 'BUILD-DONE rc=0' },
+          screenshot: false,
+          timeoutMs: 5_000,
+        });
+        expect(result.state).toBe('verified');
+        expect(result.observation).not.toHaveProperty('screenshot');
+        expect(result.observation.text[0]?.text).toBe('BUILD-DONE  rc=0');
+        expect(recognize).toHaveBeenCalledTimes(2);
+        recognize.mockResolvedValue([{ text: 'still running', bounds: { x: 0, y: 0, width: 10, height: 10 } }]);
+        await expect(
+          call(token, 'wait', { sessionId, condition: { type: 'text', includes: 'SMOKE-DONE' }, timeoutMs: 300 }),
+        ).rejects.toMatchObject({
+          code: 'timeout',
+        });
+        await expect(
+          call(token, 'wait', { sessionId, condition: { type: 'text', includes: 'x' }, elementsOnly: true }),
+        ).rejects.toMatchObject({ code: 'invalid_request' });
+      });
+
+      it('matches text across recognition spacing, full-width punctuation and dash styles', async () => {
+        const { token } = await pair(),
+          { sessionId } = await session(token);
+        // 实测：Windows 中文识别把 ls -la 认成 ls —la、把冒号认成全角；Vision 会多出或漏掉空格。
+        recognize.mockResolvedValue([
+          { text: 'kouzen@mac ~/proj % ls —la', bounds: { x: 0, y: 0, width: 10, height: 10 } },
+          { text: '错误：找不到文件 config.json （exit 1）', bounds: { x: 0, y: 12, width: 10, height: 10 } },
+          { text: 'echo " 你好，世界 "', bounds: { x: 0, y: 24, width: 10, height: 10 } },
+        ]);
+        for (const includes of ['ls -la', '错误:找不到文件 config.json (exit 1)', 'echo "你好，世界"', 'proj%ls']) {
+          await expect(call(token, 'wait', { sessionId, condition: { type: 'text', includes }, timeoutMs: 500 })).resolves.toMatchObject({
+            state: 'verified',
+          });
+        }
+        await expect(
+          call(token, 'wait', { sessionId, condition: { type: 'text', includes: 'LS -LA' }, timeoutMs: 300 }),
+        ).rejects.toMatchObject({
+          code: 'timeout',
+        });
+        await expect(
+          call(token, 'wait', { sessionId, condition: { type: 'text', includes: '   ' }, timeoutMs: 300 }),
+        ).rejects.toMatchObject({
+          code: 'invalid_request',
+        });
+      });
+
+      it('says the window may not have redrawn when a text wait times out on a covered web view', async () => {
+        const { token } = await pair(),
+          { sessionId } = await session(token);
+        vi.mocked(backend.observe).mockImplementation(async requested => {
+          clock += 50;
+          return { ...observationOf(requested, []), covered: true, screenshotMayBeStale: true };
+        });
+        recognize.mockResolvedValue([]);
+        await expect(
+          call(token, 'wait', { sessionId, condition: { type: 'text', includes: 'DONE' }, timeoutMs: 300 }),
+        ).rejects.toMatchObject({
+          code: 'timeout',
+          message: expect.stringContaining('may not have updated'),
+        });
+        // 被挡住的信息照常出现在观察结果里。
+        expect(await call(token, 'observe', { sessionId })).toMatchObject({ covered: true, screenshotMayBeStale: true });
+      });
+
+      it('verifies an action by recognized text and attaches the text to the follow-up observation', async () => {
+        const { token } = await pair(),
+          { sessionId } = await session(token);
+        const first = await observation(token, sessionId);
+        const result = await call<{ state: string; observation: { text: unknown[] } }>(token, 'act', {
+          sessionId,
+          snapshotId: first.snapshotId,
+          requestId: randomUUID(),
+          action: { type: 'key', keys: ['return'] },
+          verify: { type: 'text', includes: 'rc=0' },
+          observe: { text: true, screenshot: false },
+          timeoutMs: 2_000,
+        });
+        expect(result).toMatchObject({ state: 'verified', observation: { text: [{ text: 'BUILD-DONE  rc=0' }, { text: '$' }] } });
+        expect(recognize).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('reports text recognition as unavailable without the native helper', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      await expect(call(token, 'observe', { sessionId, text: true })).rejects.toMatchObject({ code: 'unavailable' });
+      await expect(call(token, 'wait', { sessionId, condition: { type: 'text', includes: 'x' }, timeoutMs: 200 })).rejects.toMatchObject({
+        code: 'unavailable',
+      });
+      const first = await observation(token, sessionId);
+      await expect(
+        call(token, 'act', {
+          sessionId,
+          snapshotId: first.snapshotId,
+          requestId: randomUUID(),
+          action: key,
+          verify: { type: 'text', includes: 'x' },
+        }),
+      ).rejects.toMatchObject({ code: 'unavailable' });
+      expect(backend.act).not.toHaveBeenCalled();
+      expect(await call(token, 'capabilities')).toMatchObject({ observation: { text: false } });
+    });
   });
 });

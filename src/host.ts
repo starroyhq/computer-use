@@ -36,8 +36,8 @@ if (
 const emit = (event: HostEvent): void => {
   process.stdout.write(JSON.stringify(event) + '\n');
 };
-// 用户输入空闲时间由同包宿主的辅助模式提供。只信任已校验的完整包布局；
-// 源码运行或布局不符时前台动作不做让行检查，其余功能不受影响。
+// 截图文字识别和输入空闲时间由同包宿主的辅助模式提供。只信任已校验的完整包布局；
+// 源码运行或布局不符时这些功能报告不可用，其余功能不受影响。
 async function locateNativeHelper(): Promise<NativeHelper | undefined> {
   try {
     const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
@@ -55,7 +55,12 @@ const native = await locateNativeHelper();
 const desktop = values.windows
   ? new CuaBackend(values['driver-binary']!, connectWindowsWorker, 'win32', undefined, native)
   : new CuaBackend(values['driver-socket']!, undefined, undefined, undefined, native);
-const runtime = new Runtime({ dataDir: values['data-dir'], backends: [desktop, new BrowserBackend(values['data-dir'])], emit });
+const runtime = new Runtime({
+  dataDir: values['data-dir'],
+  backends: [desktop, new BrowserBackend(values['data-dir'])],
+  emit,
+  ...(native ? { recognizeText: (image, signal) => native.recognizeText(image, signal) } : {}),
+});
 const rpcRequest = z
   .object({
     command: z.literal('rpc_request'),
@@ -144,6 +149,8 @@ try {
   });
   control.on('close', () => void close());
   emit({ event: 'ready' });
+  // 系统第一次为本 App 识别文字时要在本机编译模型（约 1 分钟）；启动后在后台先做一次，Agent 用到时就不必等。
+  native?.warmUp();
 } catch {
   emit({ event: 'fatal', message: 'Runtime startup failed. Check private sockets, driver and local state.' });
   await close();

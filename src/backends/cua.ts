@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { CuaDriverLike, ToolResult, WindowElement, WindowStateOutput } from '@trycua/cua-driver';
+import type { CuaDriverLike, ToolResult, WindowElement, WindowInfo, WindowStateOutput } from '@trycua/cua-driver';
 import {
   CuError,
   hasPixels,
@@ -179,6 +179,37 @@ function budgetRefusal(result: ToolResult): CuError | undefined {
     'invalid_request',
     `The driver refused to type this much text in one call; nothing was sent. Split it into parts of${max ? ` at most ${max} characters` : ' fewer characters'}.`,
   );
+}
+
+// 窗口是否被前面的其他窗口完全挡住：在窗口内取一组均匀分布的点，每个点都落在更靠前的某个窗口里才算。
+// 只是估算：透明或异形的窗口也会被当作遮挡。
+function fullyCovered(own: WindowInfo, windows: WindowInfo[]): boolean {
+  if (own.zIndex === undefined || own.bounds.width <= 0 || own.bounds.height <= 0) return false;
+  const front = windows.filter(
+    window =>
+      window.windowId !== own.windowId &&
+      window.isOnScreen &&
+      window.zIndex !== undefined &&
+      window.zIndex > own.zIndex! &&
+      window.bounds.width > 0 &&
+      window.bounds.height > 0,
+  );
+  if (front.length === 0) return false;
+  const { x, y, width, height } = own.bounds;
+  for (let column = 0; column < 9; column++)
+    for (let row = 0; row < 7; row++) {
+      const px = x + ((column + 0.5) * width) / 9;
+      const py = y + ((row + 0.5) * height) / 7;
+      const inside = front.some(
+        window =>
+          px >= window.bounds.x &&
+          px < window.bounds.x + window.bounds.width &&
+          py >= window.bounds.y &&
+          py < window.bounds.y + window.bounds.height,
+      );
+      if (!inside) return false;
+    }
+  return true;
 }
 
 function exactTarget(target: Target): { pid: number; windowId: bigint } {
@@ -649,10 +680,30 @@ export class CuaBackend implements Backend {
       // 过滤后的树不能再用于证明元素不存在。
       elementsComplete: state.elementsComplete === true && elements.length === (state.elements ?? []).length,
       elements: observedElements(elements),
+      ...(await this.coverage(target, state, false)),
     };
     this.states.set(observation, { snapshot: state, session, consumed: false });
     this.latest.set(this.captureKey(target), observation);
     return observation;
+  }
+
+  // 被完全挡住的窗口：网页视图此时可能不再重绘，截图可能停在旧画面。读不到窗口层级时不作判断。
+  private async coverage(
+    target: Target,
+    state: WindowStateOutput,
+    screenshot: boolean,
+  ): Promise<{ covered?: true; screenshotMayBeStale?: true }> {
+    try {
+      const { windows } = await this.read(client => client.listWindows({ onScreenOnly: true }, readOptions()));
+      const own = windows.find(
+        window => window.windowId === BigInt(target.windowId!) && (window.pid === undefined || window.pid === target.pid),
+      );
+      if (!own || !fullyCovered(own, windows)) return {};
+      const web = (state.elements ?? []).some(element => element.inWebContent === true);
+      return { covered: true, ...(screenshot && web ? { screenshotMayBeStale: true as const } : {}) };
+    } catch {
+      return {};
+    }
   }
 
   async observe(target: Target, options?: ObserveOptions): Promise<BackendObservation> {
@@ -691,6 +742,7 @@ export class CuaBackend implements Backend {
         width: state.screenshotWidth,
         height: state.screenshotHeight,
       }),
+      ...(await this.coverage(target, state, true)),
     };
     this.states.set(observation, { snapshot: state, session, consumed: false });
     this.latest.set(this.captureKey(target), observation);

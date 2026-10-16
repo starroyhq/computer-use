@@ -1781,6 +1781,8 @@ describe('Cua socket adapter', () => {
     function helper(idle: Array<number | undefined> = []) {
       const values = [...idle];
       return {
+        recognizeText: vi.fn(async () => []),
+        warmUp: vi.fn(),
         inputIdleMs: vi.fn(async () => (values.length > 0 ? values.shift() : 60_000)),
       } satisfies NativeHelper;
     }
@@ -1850,6 +1852,68 @@ describe('Cua socket adapter', () => {
         }),
       ).resolves.toMatchObject({ progress: { delivered: 64, total: 100 }, warning: { code: 'partial_input' } });
       expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('covered windows', () => {
+    const own = { windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds, isOnScreen: true, zIndex: 5n };
+    function covered(front: Array<Record<string, unknown>>, web = false) {
+      const value = fixture();
+      if (web) value.state.elements![0]!.inWebContent = true;
+      value.client.listWindows.mockImplementation(async ({ pid }) =>
+        pid === undefined
+          ? {
+              windows: [
+                own,
+                ...front.map((window, index) => ({
+                  windowId: BigInt(100 + index),
+                  pid: 7,
+                  appName: 'Other',
+                  title: 'Other',
+                  isOnScreen: true,
+                  ...window,
+                })),
+              ],
+            }
+          : { windows: [own] },
+      ) as never;
+      return value;
+    }
+    const big = { x: 0, y: 0, width: 1000, height: 800 };
+
+    it('marks a fully covered window and a possibly stale screenshot when it shows web content', async () => {
+      const plain = covered([{ bounds: big, zIndex: 9n }]);
+      expect(await plain.backend.observe(target)).toMatchObject({ covered: true });
+      expect(await plain.backend.observe(target)).not.toHaveProperty('screenshotMayBeStale');
+      const web = covered([{ bounds: big, zIndex: 9n }], true);
+      expect(await web.backend.observe(target)).toMatchObject({ covered: true, screenshotMayBeStale: true });
+      // 只取元素的快照没有截图，也就谈不上截图过期。
+      const slim = await web.backend.observe(target, { pixels: false });
+      expect(slim).toMatchObject({ covered: true });
+      expect(slim).not.toHaveProperty('screenshotMayBeStale');
+    });
+
+    it('does not mark partly visible windows, windows behind it, or windows without stacking order', async () => {
+      for (const front of [
+        [{ bounds: { ...bounds, width: bounds.width / 2 }, zIndex: 9n }],
+        [{ bounds: big, zIndex: 1n }],
+        [{ bounds: big }],
+        [{ bounds: big, zIndex: 9n, isOnScreen: false }],
+        // 两个窗口合起来盖住全部时也算。
+      ]) {
+        const { backend } = covered(front, true);
+        const observation = await backend.observe(target);
+        expect(observation).not.toHaveProperty('covered');
+        expect(observation).not.toHaveProperty('screenshotMayBeStale');
+      }
+      const halves = covered(
+        [
+          { bounds: { x: 0, y: 0, width: bounds.x + bounds.width / 2 + 1, height: 800 }, zIndex: 9n },
+          { bounds: { x: bounds.x + bounds.width / 2, y: 0, width: 1000, height: 800 }, zIndex: 8n },
+        ],
+        true,
+      );
+      expect(await halves.backend.observe(target)).toMatchObject({ covered: true, screenshotMayBeStale: true });
     });
   });
 });

@@ -17,7 +17,9 @@ import {
   type GrantOperation,
   type Mode,
   type RpcService,
+  type Screenshot,
   type Target,
+  type TextLine,
 } from './contracts.js';
 import { descriptions, pairSchema, schemas, type Method } from './schema.js';
 import { ActionStore, ClientStore, hash, privateDirectory, type ActionRecord } from './storage.js';
@@ -47,12 +49,20 @@ type Snapshot = {
 type ViewEntry = { key: string; state: string; id: string };
 // shown：这次发布是否把元素返回给了客户端。只有客户端见过的元素表才能作为增量的基准。
 type ElementView = { snapshotId: string; shown: boolean; entries: ViewEntry[] };
-type PublishOptions = { screenshot: boolean; elements: boolean; elementsOnly?: boolean; since?: string | undefined };
+type PublishOptions = { screenshot: boolean; elements: boolean; elementsOnly?: boolean; text?: boolean; since?: string | undefined };
 // observe 与 act.observe 的原始参数；screenshot 缺省时由 elementsOnly 决定。
-type ObserveRequest = { screenshot?: boolean | undefined; elements: boolean; elementsOnly: boolean; since?: string | undefined };
+type ObserveRequest = {
+  screenshot?: boolean | undefined;
+  elements: boolean;
+  elementsOnly: boolean;
+  text?: boolean | undefined;
+  since?: string | undefined;
+};
 // 快照被移除的原因，只用于给出更明确的错误信息；按会话记录，不向其他会话透露。
 type RetireReason = 'replaced' | 'consumed' | 'expired' | 'closed';
 type Retired = { reason: RetireReason; sessionId: string; at: number };
+// waitFor 的结果：满足条件的那次观察，以及（文字条件时）从它识别出的文字。
+type Found = { observation: BackendObservation; text?: TextLine[] | undefined };
 type PublicElement = {
   id: string;
   role: string;
@@ -66,6 +76,7 @@ type PublicElement = {
   max?: number;
 };
 type PendingPair = { client: Client; resolve: (allow: boolean) => void };
+type PublicTextLine = { text: string; bounds: Bounds };
 type Work = {
   controller: AbortController;
   sessionId: string;
@@ -93,9 +104,14 @@ const MIN_OBSERVE_MS = 1_000;
 // 观察结果中单个元素值的长度上限；条件判断仍使用后端读到的完整值。
 const VALUE_LIMIT = 2_000;
 const FULL: PublishOptions = { screenshot: true, elements: true };
+// 文字识别结果最多返回的行数和总字符数；超出部分不返回，结果标明 textTruncated。
+const TEXT_LINE_LIMIT = 1_000;
+const TEXT_CHAR_LIMIT = 20_000;
 // 已移除快照的原因只保留有限的数量和时长。
 const RETIRED_LIMIT = 256;
 const RETIRED_MS = 10 * 60_000;
+// 文字条件每轮要截图并识别，轮询间隔放宽，避免持续占用 CPU。
+const TEXT_POLL_MS = 500;
 
 function truncate(text: string, limit: number): string {
   if (text.length <= limit) return text;
@@ -111,10 +127,13 @@ function publishOptions(request: ObserveRequest): PublishOptions {
       'invalid_request',
       'elementsOnly returns elements without a screenshot; do not combine it with screenshot: true or elements: false.',
     );
+  if (request.elementsOnly && request.text)
+    throw new CuError('invalid_request', 'Text recognition reads the screenshot; do not combine text with elementsOnly.');
   return {
     screenshot: request.screenshot ?? !request.elementsOnly,
     elements: request.elements,
     ...(request.elementsOnly ? { elementsOnly: true } : {}),
+    ...(request.text ? { text: true } : {}),
     ...(request.since !== undefined ? { since: request.since } : {}),
   };
 }
@@ -144,6 +163,28 @@ function publicElement(element: Element, pixels: boolean): Omit<PublicElement, '
 
 // 不同平台的文本控件换行符不同，条件比较时统一成 \n。
 const newlines = (text: string) => text.replace(/\r\n?/g, '\n');
+// 文字识别会多出或漏掉空格、在换行处断开，还会把半角标点认成全角、把连字符认成破折号：
+// 文字条件比较时去掉全部空白，并统一字符宽度、横线和引号。
+const recognizable = (text: string) =>
+  text
+    .normalize('NFKC')
+    .replace(/[\u2010-\u2015\u2212]/gu, '-')
+    .replace(/[\u2018\u2019]/gu, "'")
+    .replace(/[\u201C\u201D]/gu, '"')
+    .replace(/\s+/gu, '');
+
+// 识别出的文字行按上限截断，位置取整。
+function publicText(lines: TextLine[]): { text: PublicTextLine[]; truncated: boolean } {
+  const text: PublicTextLine[] = [];
+  let characters = 0;
+  for (const line of lines) {
+    if (text.length >= TEXT_LINE_LIMIT || characters + line.text.length > TEXT_CHAR_LIMIT) return { text, truncated: true };
+    characters += line.text.length;
+    const { x, y, width, height } = line.bounds;
+    text.push({ text: line.text, bounds: { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) } });
+  }
+  return { text, truncated: false };
+}
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -192,6 +233,8 @@ export class Runtime implements RpcService {
       platform?: NodeJS.Platform;
       // 仅供测试缩短：输入已发出后，超过 timeoutMs 仍允许其完成的时长。
       dispatchGraceMs?: number;
+      // 从截图识别文字（本机系统能力，由宿主进程提供）；没有时文字相关功能报告不可用。
+      recognizeText?: (image: Screenshot, signal?: AbortSignal) => Promise<TextLine[]>;
     },
   ) {
     this.clients = new ClientStore(join(options.dataDir, 'clients.json'));
@@ -528,17 +571,37 @@ export class Runtime implements RpcService {
     const backend = this.backend(session.target.kind);
     return elementsOnly ? backend.observe(session.target, { pixels: false }) : backend.observe(session.target);
   }
+  private requireTextRecognition(): void {
+    if (!this.options.recognizeText)
+      throw new CuError('unavailable', 'Text recognition is not available in this installation; read the screenshot instead.');
+  }
+  // 识别截图上的文字。没有截图的快照（elementsOnly）不能识别。
+  private async recognize(observation: BackendObservation, signal?: AbortSignal): Promise<TextLine[]> {
+    this.requireTextRecognition();
+    if (!hasPixels(observation)) throw new CuError('invalid_request', 'Text recognition needs a snapshot with a screenshot.');
+    return this.options.recognizeText!(observation.screenshot, signal);
+  }
   private async observe(session: Session, options: PublishOptions = FULL, milliseconds = OBSERVE_MS): Promise<Record<string, unknown>> {
+    if (options.text) this.requireTextRecognition();
+    const started = this.now();
     const observation = await bounded(this.observeBackend(session, options.elementsOnly === true), milliseconds);
     try {
-      return this.publishObservation(session, observation, options);
+      const text = options.text
+        ? await bounded(this.recognize(observation), Math.max(MIN_OBSERVE_MS, milliseconds - (this.now() - started)))
+        : undefined;
+      return this.publishObservation(session, observation, options, text);
     } catch (error) {
       // 会话在观察期间被关闭时，后端刚缓存的截图不会再有人使用。
       if (!this.sessions.has(session.id)) this.releaseTarget(session.target);
       throw error;
     }
   }
-  private publishObservation(session: Session, observation: BackendObservation, options: PublishOptions = FULL): Record<string, unknown> {
+  private publishObservation(
+    session: Session,
+    observation: BackendObservation,
+    options: PublishOptions = FULL,
+    text?: TextLine[],
+  ): Record<string, unknown> {
     const client = this.clients.clients.get(session.clientId);
     if (!client) throw new CuError('unauthorized', 'Client revoked during observation.');
     this.getSession(client, session.id);
@@ -609,10 +672,19 @@ export class Runtime implements RpcService {
         result.elements = changed;
       } else result.elements = elements;
     }
+    if (text) {
+      const published = publicText(text);
+      result.text = published.text;
+      if (published.truncated) result.textTruncated = true;
+    }
     return result;
   }
-  private satisfies(observation: BackendObservation, condition: Condition): boolean {
+  private satisfies(observation: BackendObservation, condition: Condition, text?: TextLine[]): boolean {
     if (condition.type === 'title') return observation.target.title.includes(condition.includes);
+    if (condition.type === 'text') {
+      if (!text) throw new CuError('unavailable', 'Text recognition is not available in this installation.');
+      return recognizable(text.map(line => line.text).join('\n')).includes(recognizable(condition.includes));
+    }
     if (!condition.present && !observation.elementsComplete)
       throw new CuError('unavailable', 'This backend returns a partial element tree and cannot verify element absence.');
     // 后端没有报告的值或状态一律不满足条件。
@@ -628,31 +700,40 @@ export class Runtime implements RpcService {
   }
   // pixels 为 false 时每次轮询只取元素，不抓截图；条件只看元素和标题，用不到图像。
   // 满足条件的那次观察会原样交给调用方，所以后续要用到像素的调用方必须让轮询带截图。
-  private async waitFor(
-    session: Session,
-    condition: Condition,
-    timeout: number,
-    signal?: AbortSignal,
-    pixels = true,
-  ): Promise<BackendObservation> {
+  // 文字条件要识别截图，所以总是带截图轮询。
+  private async waitFor(session: Session, condition: Condition, timeout: number, signal?: AbortSignal, pixels = true): Promise<Found> {
+    const reading = condition.type === 'text';
+    if (reading) this.requireTextRecognition();
     const deadline = this.now() + timeout;
+    let covered = false;
     do {
       if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
       try {
-        const observed = await bounded(this.observeBackend(session, !pixels), Math.max(1, deadline - this.now()), signal);
+        const observed = await bounded(this.observeBackend(session, !(pixels || reading)), Math.max(1, deadline - this.now()), signal);
         if (signal?.aborted || !this.sessions.has(session.id) || this.stopped) throw new CuError('cancelled', 'Wait cancelled.');
-        if (this.satisfies(observed, condition)) return observed;
+        covered ||= observed.screenshotMayBeStale === true;
+        const text = reading ? await bounded(this.recognize(observed, signal), Math.max(1, deadline - this.now()), signal) : undefined;
+        if (this.satisfies(observed, condition, text)) return { observation: observed, text };
       } catch (error) {
         // A changing page is an expected waiting state, not a reason to retry input.
-        if (!(error instanceof CuError) || error.code !== 'stale_snapshot') throw error;
+        if (!(error instanceof CuError) || error.code !== 'stale_snapshot') {
+          if (error instanceof CuError && error.code === 'timeout' && reading && covered) break;
+          throw error;
+        }
       }
       try {
-        await delay(Math.min(150, Math.max(1, deadline - this.now())), undefined, signal ? { signal } : {});
+        await delay(Math.min(reading ? TEXT_POLL_MS : 150, Math.max(1, deadline - this.now())), undefined, signal ? { signal } : {});
       } catch {
         // 只有 signal 中止会让 delay 拒绝；统一报告为取消，而不是内部错误。
         throw new CuError('cancelled', 'Wait cancelled.');
       }
     } while (this.now() < deadline);
+    // 被完全挡住的网页窗口可能不再重绘：截图一直不变时文字条件永远等不到。
+    if (covered)
+      throw new CuError(
+        'timeout',
+        'The requested text did not appear. The window was covered by other windows and shows web content, so its screenshots may not have updated; ask the user to keep it visible.',
+      );
     throw new CuError('timeout', 'The requested observable condition was not satisfied.');
   }
   private async act(client: Client, params: unknown): Promise<unknown> {
@@ -680,6 +761,7 @@ export class Runtime implements RpcService {
     const snapshot = this.snapshots.get(p.snapshotId);
     if (!snapshot || snapshot.sessionId !== session.id || this.now() - snapshot.createdAt > SNAPSHOT_TTL)
       throw this.staleSnapshot(p.snapshotId, snapshot, session.id);
+    if (p.verify?.type === 'text' || followUp?.text) this.requireTextRecognition();
     const action = p.action;
     const points = action.type === 'drag' ? action.path : 'point' in action && action.point ? [action.point] : [];
     if (!snapshot.pixels && (action.type === 'scroll' || points.length > 0))
@@ -735,7 +817,7 @@ export class Runtime implements RpcService {
     const submittedAt = this.now();
     work.promise = this.queue.then(async () => {
       let timer: NodeJS.Timeout | undefined;
-      let verified: BackendObservation | undefined;
+      let verified: Found | undefined;
       try {
         await work.admitted;
         if (controller.signal.aborted) throw new CuError('cancelled', 'Action cancelled before execution.');
@@ -844,13 +926,16 @@ export class Runtime implements RpcService {
   private async observeAfter(
     session: Session,
     publish: PublishOptions,
-    verified: BackendObservation | undefined,
+    verified: Found | undefined,
     startedAt: number,
   ): Promise<{ observation: unknown } | { observationError: { code: string; message: string } }> {
     try {
       if (this.stopped) throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
       // 验证条件刚刚满足的那次观察就是动作后的最新状态，直接发布，不再重复抓取。
-      if (verified) return { observation: this.publishObservation(session, verified, publish) };
+      if (verified) {
+        const text = publish.text ? (verified.text ?? (await this.recognize(verified.observation))) : undefined;
+        return { observation: this.publishObservation(session, verified.observation, publish, text) };
+      }
       const remaining = startedAt + ACT_RESPONSE_MS - this.now();
       if (remaining < MIN_OBSERVE_MS) throw new CuError('timeout', 'No time remained to observe after the action; call observe.');
       return { observation: await this.observe(session, publish, Math.min(OBSERVE_MS, remaining)) };
@@ -900,6 +985,9 @@ export class Runtime implements RpcService {
             elementsOnly: true,
             changesSince: true,
             observeAfterAct: true,
+            // 截图文字识别（observe 的 text、wait 与 verify 的文字条件）是否可用。
+            text: this.options.recognizeText !== undefined,
+            covered: true,
           },
           sessionTtlMs: SESSION_TTL,
           snapshotTtlMs: SNAPSHOT_TTL,
@@ -935,9 +1023,12 @@ export class Runtime implements RpcService {
       case 'wait': {
         const p = schemas.wait.parse(parsed.data);
         const session = this.getSession(client, p.sessionId);
-        const observed = await this.waitFor(session, p.condition, p.timeoutMs, undefined, !p.elementsOnly);
-        const options: PublishOptions = p.elementsOnly ? { screenshot: false, elements: true, elementsOnly: true } : FULL;
-        return { state: 'verified', observation: this.publishObservation(session, observed, options) };
+        const reading = p.text || p.condition.type === 'text';
+        const options = publishOptions({ screenshot: p.screenshot, elements: true, elementsOnly: p.elementsOnly, text: reading });
+        if (reading) this.requireTextRecognition();
+        const found = await this.waitFor(session, p.condition, p.timeoutMs, undefined, !p.elementsOnly);
+        const text = reading ? (found.text ?? (await this.recognize(found.observation))) : undefined;
+        return { state: 'verified', observation: this.publishObservation(session, found.observation, options, text) };
       }
       case 'action_status':
       case 'cancel': {

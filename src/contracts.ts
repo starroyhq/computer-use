@@ -34,6 +34,10 @@ export type BackendObservation = {
   imageHeight?: number;
   elements: Element[];
   elementsComplete?: boolean;
+  /** 观察时窗口被前面的其他窗口完全挡住（按窗口层级和边界估算）。 */
+  covered?: boolean;
+  /** 窗口被完全挡住且显示网页内容：网页视图被挡住时可能不再重绘，截图可能是旧画面。 */
+  screenshotMayBeStale?: boolean;
   /** 只取元素的观察（ObserveOptions.pixels 为 false）不带截图：元素没有像素位置，坐标动作不可用。 */
   screenshot?: Screenshot;
   // Opaque backend state is never returned to clients.
@@ -80,6 +84,8 @@ export type BackendExecution = {
 };
 /** 派发时的执行条件。budgetMs：距离动作时限还剩的毫秒数，后端可据此在分段之间提前停下。 */
 export type ActContext = { budgetMs?: number };
+/** 文字识别结果的一行；bounds 是截图像素坐标，与该快照的坐标空间一致。 */
+export type TextLine = { text: string; bounds: Bounds };
 export interface Backend {
   readonly kind: 'desktop' | 'browser';
   /**
