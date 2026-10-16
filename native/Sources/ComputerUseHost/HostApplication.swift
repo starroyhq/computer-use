@@ -411,6 +411,9 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         try outgoing.fileHandleForWriting.close()
         input = incoming.fileHandleForWriting
         output = outgoing.fileHandleForReading
+        // 先声明本宿主能显示的新审批弹窗：运行时只向声明过的宿主发送这些事件，开始读控制命令时第一条就是它。
+        // 写入失败说明运行时已经退出，由退出处理停止服务。
+        try? input?.write(contentsOf: HostControl.encode("host_features", features: HostControl.features))
         guard setStatus(tr(.statusStartingRuntime), state: .starting) else { return }
         let handle = outgoing.fileHandleForReading
         readerQueue.async { [weak self] in
@@ -474,7 +477,7 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
             }
             clients = snapshot
             stateChanged()
-        case "pair_request", "foreground_request":
+        case "pair_request", "foreground_request", "grant_request":
             approvals.enqueue(event)
             presentNextAlert()
         case "decision_finished":
@@ -519,6 +522,13 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
                   event.foreground == false ? tr(.approvalNotAllowed) : tr(.approvalForegroundAllowed))
     }
 
+    /// Agent 发起的全应用授权请求：显示客户端名称、与客户端页一致的短标识和现有范围。
+    static func grantRequestMessage(_ event: HostEvent) -> String {
+        let apps = (event.appIds ?? []).joined(separator: "\n")
+        return tr(.approvalGrantBody, event.name ?? "", ClientRecord.shortID(event.clientId ?? ""),
+                  apps.isEmpty ? tr(.approvalNone) : apps)
+    }
+
     private func showApproval(_ event: HostEvent, token: UUID) {
         defer {
             alertActive = false
@@ -528,13 +538,18 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         }
         guard generation == token, !stopping, !approvals.activeWithdrawn else { return }
         let alert = NSAlert()
-        if event.event == "pair_request" {
+        switch event.event {
+        case "pair_request":
             alert.messageText = tr(.approvalPairTitle)
             alert.informativeText = Self.pairingMessage(event)
-        } else {
+        case "grant_request":
+            alert.messageText = tr(.approvalGrantTitle)
+            alert.informativeText = Self.grantRequestMessage(event)
+        default:
             alert.messageText = tr(.approvalForegroundTitle)
             alert.informativeText = tr(.approvalForegroundBody, event.clientName ?? "", event.targetTitle ?? "", event.sessionId ?? "")
         }
+        // 第一个按钮是默认按钮（回车）：默认拒绝，批准必须明确点击。
         alert.addButton(withTitle: tr(.approvalDeny))
         alert.addButton(withTitle: tr(.approvalAllow))
         activeAlert = alert
@@ -542,6 +557,11 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         let allowed = alert.runModal() == .alertSecondButtonReturn
         // 弹窗被撤回（请求已过期或已处理）时，运行时不再接受决定。
         guard generation == token, !stopping, !approvals.activeWithdrawn else { return }
+        if event.event == "grant_request" {
+            // 批准沿用客户端页的 grant_all_apps 命令；requestId 让运行时把结果交回发起请求的 Agent。
+            send(allowed ? "grant_all_apps" : "grant_deny", clientID: event.clientId, requestID: event.requestId)
+            return
+        }
         let prefix = event.event == "pair_request" ? "pair" : "foreground"
         // 确认宿主已展示全应用范围，避免忽略新字段的旧宿主误批扩大授权。
         let allApps: Bool? = allowed && event.event == "pair_request" && event.allApps == true ? true : nil
@@ -554,10 +574,10 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
         if let alert = activeAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
     }
 
-    @discardableResult private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil) -> Bool {
+    @discardableResult private func send(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil, features: [String]? = nil) -> Bool {
         guard let input else { return false }
         do {
-            try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps, requestID: requestID))
+            try input.write(contentsOf: HostControl.encode(command, clientID: clientID, sessionID: sessionID, pid: pid, allApps: allApps, requestID: requestID, features: features))
             return true
         } catch { if !stopping { fail(tr(.failureSendControl)) }; return false }
     }

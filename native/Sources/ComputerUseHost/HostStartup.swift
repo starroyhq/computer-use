@@ -5,6 +5,8 @@ import Security
 
 enum HostLaunchMode: Equatable {
     case normal, background, ensureRunning, recoverFault
+    /// 运行时调用的辅助模式：截图文字识别、一次粘贴的剪贴板会话。
+    case recognizeText, pasteSession
 
     static func parse(_ arguments: [String]) -> HostLaunchMode? {
         switch arguments {
@@ -12,6 +14,8 @@ enum HostLaunchMode: Equatable {
         case ["--background"]: return .background
         case ["--ensure-running"]: return .ensureRunning
         case ["--recover-fault"]: return .recoverFault
+        case ["--recognize-text"]: return .recognizeText
+        case ["--paste-session"]: return .pasteSession
         default: return nil
         }
     }

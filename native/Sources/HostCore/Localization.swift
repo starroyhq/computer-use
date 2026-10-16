@@ -36,6 +36,7 @@ public enum L10nKey: String, CaseIterable {
     // 审批
     case approvalPairTitle, approvalPairBody, approvalAllApps, approvalForegroundAllowed, approvalNone, approvalAllowed, approvalNotAllowed
     case approvalForegroundTitle, approvalForegroundBody, approvalDeny, approvalAllow
+    case approvalGrantTitle, approvalGrantBody
     case commonOK, commonCancel
     // 设置窗口
     case settingsTitle, paneGeneral, paneStatus, paneClients, paneConnect, paneUpdates, paneAbout
@@ -48,7 +49,7 @@ public enum L10nKey: String, CaseIterable {
     case statusService, statusAccessibility, statusScreenRecording, statusGranted, statusDenied, statusOpenSystemSettings
     case statusRequestPermissions, statusPermissionsHint, statusControl, permissionsTitle, permissionsBody
     // 客户端
-    case clientsName, clientsApps, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
+    case clientsName, clientsID, clientsApps, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
     case clientsEmpty, clientsNotRunning, clientsHint, clientsRevokeTitle, clientsRevokeBody
     case clientsGrantAllApps, clientsGrantAlready, clientsGrantTitle, clientsGrantBody, clientsGrantConfirm
     case clientsGrantPending, clientsGrantSucceeded, clientsGrantUnconfirmed, clientsGrantFailed, clientsGrantUnavailable, clientsGrantBrowserOnly
@@ -139,6 +140,8 @@ public enum L10n {
         .approvalForegroundBody: "客户端：%@\n目标：%@\n会话：%@\n\n此操作可能切换焦点并移动鼠标。授权仅适用于此会话及目标应用。",
         .approvalDeny: "拒绝",
         .approvalAllow: "允许",
+        .approvalGrantTitle: "允许客户端访问所有应用？",
+        .approvalGrantBody: "客户端：%@\n标识：%@\n现有桌面应用范围：\n%@\n\n这是 Agent 发起的请求。批准后，该客户端可以访问当前和之后打开或安装的所有桌面应用及窗口，并可在前台使用鼠标和键盘；会话仍默认后台执行，独立浏览器权限不变。如果不是你让 Agent 申请的，请拒绝。可随时在设置的“客户端”中撤销。",
         .commonOK: "好",
         .commonCancel: "取消",
 
@@ -182,6 +185,7 @@ public enum L10n {
         .permissionsBody: "请在系统设置中允许 Computer Use 使用辅助功能和屏幕录制。授权发生变化后，请完全退出并重新打开本 App，以刷新系统缓存。CLI doctor 检查权限归属；截图是否可用还需通过 observe 验证。",
 
         .clientsName: "名称",
+        .clientsID: "标识",
         .clientsApps: "应用",
         .clientsAllApps: "所有应用",
         .clientsBrowser: "受控浏览器",
@@ -353,6 +357,8 @@ public enum L10n {
         .approvalForegroundBody: "Client: %@\nTarget: %@\nSession: %@\n\nThis may switch focus and move the pointer. The permission applies only to this session and target app.",
         .approvalDeny: "Deny",
         .approvalAllow: "Allow",
+        .approvalGrantTitle: "Allow this client to access all apps?",
+        .approvalGrantBody: "Client: %@\nID: %@\nCurrent desktop app scope:\n%@\n\nThe agent sent this request. If you allow it, this client can access all current and future desktop apps and windows, including apps installed later, and may use the mouse and keyboard in the foreground. Sessions still default to background; isolated browser access stays unchanged. Deny it if you did not ask the agent for this. You can revoke the client under Settings > Clients at any time.",
         .commonOK: "OK",
         .commonCancel: "Cancel",
 
@@ -396,6 +402,7 @@ public enum L10n {
         .permissionsBody: "Allow Computer Use under Accessibility and Screen Recording in System Settings. After a change, quit and reopen this app to refresh the system cache. computer-use doctor checks which app holds the permissions; observe confirms that screenshots work.",
 
         .clientsName: "Name",
+        .clientsID: "ID",
         .clientsApps: "Apps",
         .clientsAllApps: "All apps",
         .clientsBrowser: "Browser",

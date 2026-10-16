@@ -137,7 +137,8 @@ final class StatusPane: PaneController, SettingsPaneView {
 
 final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource, NSTableViewDelegate {
     private enum Column: String, CaseIterable {
-        case name, apps, browser, foreground
+        // id 是客户端标识的前 8 位，与 Agent 在 preflight/doctor 里看到的 shortId 相同，用来区分同名客户端。
+        case name, id, apps, browser, foreground
     }
 
     private let table = NSTableView()
@@ -151,12 +152,14 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
         for column in Column.allCases {
             let item = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
             switch column {
-            case .name: item.title = tr(.clientsName); item.width = 130
-            case .apps: item.title = tr(.clientsApps); item.width = 170
+            // 合计约等于表格可用宽度；受控浏览器和前台操作两列的标题不能被截断。
+            case .name: item.title = tr(.clientsName); item.width = 110
+            case .id: item.title = tr(.clientsID); item.width = 70
+            case .apps: item.title = tr(.clientsApps); item.width = 135
             case .browser: item.title = tr(.clientsBrowser); item.width = 80
-            case .foreground: item.title = tr(.clientsForeground); item.width = 100
+            case .foreground: item.title = tr(.clientsForeground); item.width = 95
             }
-            item.minWidth = column == .foreground ? 95 : 50
+            item.minWidth = column == .foreground ? 95 : column == .browser ? 80 : 50
             table.addTableColumn(item)
         }
         table.dataSource = self
@@ -235,6 +238,7 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
         let text: String
         switch column {
         case .name: text = client.name
+        case .id: text = client.shortID
         case .apps: text = client.allApps == true ? tr(.clientsAllApps) : (client.appIds ?? []).isEmpty ? tr(.clientsNo) : (client.appIds ?? []).joined(separator: ", ")
         case .browser: text = client.browser == true ? tr(.clientsYes) : tr(.clientsNo)
         case .foreground: text = client.foreground == true ? tr(.clientsYes) : tr(.clientsNo)
@@ -244,6 +248,7 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
             cell.identifier = identifier
             let field = NSTextField(labelWithString: "")
             field.lineBreakMode = .byTruncatingTail
+            if column == .id { field.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular) }
             field.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(field)
             cell.textField = field
@@ -255,7 +260,8 @@ final class ClientsPane: PaneController, SettingsPaneView, NSTableViewDataSource
             return cell
         }()
         cell.textField?.stringValue = text
-        cell.toolTip = column == .apps ? text : nil
+        // 名称和应用列可能被截断，悬停时显示全文；标识列悬停显示完整标识。
+        cell.toolTip = column == .apps || column == .name ? text : column == .id ? client.id : nil
         return cell
     }
 

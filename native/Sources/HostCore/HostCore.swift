@@ -92,6 +92,10 @@ public struct ClientRecord: Decodable, Equatable {
     public let browser: Bool?
     public let foreground: Bool?
 
+    /// 与 Agent 在 preflight/doctor 里看到的 client.shortId 相同，用来对应同名客户端；不是凭据。
+    public var shortID: String { Self.shortID(id) }
+    public static func shortID(_ id: String) -> String { String(id.prefix(8)) }
+
     public var hasDesktopAccess: Bool { allApps == true || !(appIds ?? []).isEmpty }
     public var hasAllAppsAccess: Bool { allApps == true && foreground == true }
     public var canGrantAllApps: Bool { hasDesktopAccess && !hasAllAppsAccess }
@@ -133,6 +137,10 @@ public struct HostEvent: Decodable {
         case "foreground_request":
             guard let id = item.sessionId, !id.isEmpty, item.clientName != nil,
                   item.targetTitle != nil else { throw HostFailure.invalidEvent }
+        case "grant_request":
+            // Agent 请求把已配对的客户端升级为全应用授权；弹窗必须能展示是谁、现有范围是什么。
+            guard let request = item.requestId, UUID(uuidString: request) != nil, let id = item.clientId, !id.isEmpty,
+                  item.name != nil, item.appIds != nil, item.browser != nil else { throw HostFailure.invalidEvent }
         case "clients":
             guard item.clients != nil else { throw HostFailure.invalidEvent }
             if let operation = item.operation { try operation.validate() }
@@ -184,13 +192,18 @@ public struct LineFramer {
 }
 
 public enum HostControl {
-    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil) throws -> Data {
+    /// 本宿主支持、需要运行时知道的功能。运行时只向声明过的宿主发送相应的新事件，
+    /// 因为 HostEvent.parse 遇到不认识的事件会让宿主停止服务。
+    public static let features = ["grant_request"]
+
+    public static func encode(_ command: String, clientID: String? = nil, sessionID: String? = nil, pid: Int? = nil, allApps: Bool? = nil, requestID: String? = nil, features: [String]? = nil) throws -> Data {
         var object: [String: Any] = ["command": command]
         if let clientID { object["clientId"] = clientID }
         if let sessionID { object["sessionId"] = sessionID }
         if let pid { object["pid"] = pid }
         if let allApps { object["allApps"] = allApps }
         if let requestID { object["requestId"] = requestID }
+        if let features { object["features"] = features }
         var result = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         result.append(10)
         return result
@@ -231,7 +244,11 @@ public struct ApprovalQueue {
     public init() {}
 
     public static func requestID(of event: HostEvent) -> String? {
-        event.event == "pair_request" ? event.clientId : event.sessionId
+        switch event.event {
+        case "pair_request": return event.clientId
+        case "grant_request": return event.requestId
+        default: return event.sessionId
+        }
     }
 
     public mutating func enqueue(_ event: HostEvent) {

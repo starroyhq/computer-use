@@ -195,6 +195,40 @@ final class HostCoreTests: XCTestCase {
         }
     }
 
+    func testGrantRequestsNeedARequestIdentityAndTheCurrentScope() throws {
+        let id = "6f1c2a9e-3b4d-4c5e-8f70-112233445566"
+        let event = try HostEvent.parse(Data(#"{"event":"grant_request","requestId":"\#(id)","clientId":"c1d2e3f4-0000-4000-8000-000000000001","name":"Agent","appIds":["com.apple.TextEdit"],"browser":false}"#.utf8))
+        XCTAssertEqual(ApprovalQueue.requestID(of: event), id, "decision_finished names the request, not the client")
+        XCTAssertEqual(ClientRecord.shortID(event.clientId!), "c1d2e3f4")
+        for invalid in [
+            #"{"event":"grant_request","clientId":"c","name":"Agent","appIds":[],"browser":false}"#,
+            #"{"event":"grant_request","requestId":"not-a-uuid","clientId":"c","name":"Agent","appIds":[],"browser":false}"#,
+            #"{"event":"grant_request","requestId":"\#(id)","name":"Agent","appIds":[],"browser":false}"#,
+            #"{"event":"grant_request","requestId":"\#(id)","clientId":"c","appIds":[],"browser":false}"#,
+            #"{"event":"grant_request","requestId":"\#(id)","clientId":"c","name":"Agent","browser":false}"#,
+            #"{"event":"grant_request","requestId":"\#(id)","clientId":"c","name":"Agent","appIds":[]}"#,
+        ] {
+            XCTAssertThrowsError(try HostEvent.parse(Data(invalid.utf8)), invalid)
+        }
+        var queue = ApprovalQueue()
+        queue.enqueue(event)
+        XCTAssertEqual(queue.activateNext()?.requestId, id)
+        XCTAssertTrue(queue.finish(id))
+        XCTAssertTrue(queue.activeWithdrawn)
+    }
+
+    func testHostFeaturesAndGrantAnswersAreSingleFrames() throws {
+        let features = try HostControl.encode("host_features", features: HostControl.features)
+        let declared = try XCTUnwrap(JSONSerialization.jsonObject(with: features) as? [String: Any])
+        XCTAssertEqual(declared["command"] as? String, "host_features")
+        XCTAssertEqual(declared["features"] as? [String], ["grant_request"])
+        XCTAssertEqual(declared.count, 2)
+        let deny = try HostControl.encode("grant_deny", clientID: "c", requestID: "r")
+        XCTAssertEqual(deny.filter { $0 == 10 }.count, 1)
+        let answer = try XCTUnwrap(JSONSerialization.jsonObject(with: deny) as? [String: String])
+        XCTAssertEqual(answer, ["command": "grant_deny", "clientId": "c", "requestId": "r"])
+    }
+
     func testApprovalQueueWithdrawsQueuedAndShownRequestsOnceTheRuntimeFinishesThem() throws {
         func request(_ id: String) throws -> HostEvent {
             try HostEvent.parse(Data(#"{"event":"pair_request","clientId":"\#(id)","name":"Agent","appIds":[],"browser":true}"#.utf8))

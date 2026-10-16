@@ -237,6 +237,37 @@ final class SettingsLayoutTests: XCTestCase {
         }
     }
 
+    func testGrantRequestMessageShowsTheShortIdentityAndCurrentScope() throws {
+        let event = try HostEvent.parse(Data(#"{"event":"grant_request","requestId":"6f1c2a9e-3b4d-4c5e-8f70-112233445566","clientId":"c1d2e3f4-0000-4000-8000-000000000001","name":"Codex","appIds":["com.apple.TextEdit"],"browser":true}"#.utf8))
+        let empty = try HostEvent.parse(Data(#"{"event":"grant_request","requestId":"6f1c2a9e-3b4d-4c5e-8f70-112233445566","clientId":"c1d2e3f4-0000-4000-8000-000000000001","name":"Codex","appIds":[],"browser":true}"#.utf8))
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let message = HostApplication.grantRequestMessage(event)
+            XCTAssertTrue(message.contains("Codex"))
+            XCTAssertTrue(message.contains("c1d2e3f4"))
+            XCTAssertFalse(message.contains("c1d2e3f4-0000"), "The dialog shows the same short ID as the Clients page")
+            XCTAssertTrue(message.contains("com.apple.TextEdit"))
+            XCTAssertTrue(HostApplication.grantRequestMessage(empty).contains(tr(.approvalNone)))
+        }
+    }
+
+    func testClientIDColumnShowsTheShortIdentity() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext.states()[1].1
+            context.clients[0] = ClientRecord(id: "c1d2e3f4-0000-4000-8000-000000000001", name: "Codex", appIds: [], allApps: true, browser: false, foreground: true)
+            let pane = ClientsPane(context: context)
+            _ = pane.view
+            pane.refresh()
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("id"))
+            let cell = try XCTUnwrap(pane.tableView(NSTableView(), viewFor: column, row: 0) as? NSTableCellView)
+            XCTAssertEqual(cell.textField?.stringValue, "c1d2e3f4")
+            XCTAssertEqual(cell.toolTip, "c1d2e3f4-0000-4000-8000-000000000001")
+            let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
+            XCTAssertEqual(table.tableColumns.map(\.identifier.rawValue), ["name", "id", "apps", "browser", "foreground"])
+        }
+    }
+
     func testClientScopeCellsShowAllAppsRestrictedAppsAndBrowserOnly() throws {
         for language in HostLanguage.allCases {
             HostLanguage.current = language
