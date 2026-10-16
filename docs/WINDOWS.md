@@ -10,7 +10,7 @@
 
 ## 安装与卸载
 
-从 [v0.8.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.8.0) 下载对应架构的 `computer-use-0.8.0-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.8.0-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
+从 [v0.9.0 Release](https://github.com/starroyhq/computer-use/releases/tag/v0.9.0) 下载对应架构的 `computer-use-0.9.0-windows-<arm64|x64>-setup.exe`。如需便携版，下载 `computer-use-0.9.0-windows-<arm64|x64>.zip`，完整解压后从目录中运行 `ComputerUse.WindowsHost.exe`；不要只复制单个 EXE。安装程序和 ZIP 各附 `.sha256` 校验文件，每个平台另附 JSON 元数据。
 
 v0.6.0 开始提供安装程序，v0.5.0 及更早版本只提供便携包。本地 ARM64 覆盖安装已验收，但从真实发布下载到完成安装版升级的完整流程、原生 x64 安装和 SmartScreen 表现仍待验证，见[验证记录](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10)。
 
