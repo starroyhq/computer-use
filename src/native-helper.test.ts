@@ -81,4 +81,23 @@ process.stdin.on('end', () => {
     await expect(mac.recognizeText(image)).resolves.toEqual([]);
     expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['warm', 'image']);
   });
+
+  it('drives a paste session line by line and maps a denied read', async () => {
+    const script = `
+const lines = require('node:readline').createInterface({ input: process.stdin });
+lines.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.op === 'stage') process.stdout.write(JSON.stringify(request.text === 'deny' ? { ok: false, code: 'read_denied' } : { ok: true, complete: false }) + '\\n');
+  else process.stdout.write(JSON.stringify({ ok: true, restored: request.delayMs === 5 }) + '\\n');
+});`;
+    const native = createNativeHelper(await helper(script));
+    const session = await native.openPasteSession();
+    await expect(session.stage('echo hi', true)).resolves.toEqual({ complete: false });
+    await expect(session.finish(5)).resolves.toEqual({ restored: true });
+    const denied = await native.openPasteSession();
+    await expect(denied.stage('deny', true)).rejects.toMatchObject({
+      code: 'permission_denied',
+      message: expect.stringContaining('restoreClipboard: false'),
+    });
+  });
 });

@@ -240,6 +240,16 @@ describe('isolated Chromium backend', () => {
     expect(await read('Size')).toMatchObject({ value: 'Small' });
   });
 
+  it('pastes plain text without touching the clipboard and drops trailing line breaks', async () => {
+    await act(await backend.observe(target), { type: 'navigate', url: `${url}/form` });
+    const observation = await backend.observe(target);
+    await act(observation, { type: 'paste', text: '粘贴\r\n', elementId: element(observation, 'Notes'), restoreClipboard: true });
+    const updated = await backend.observe(target);
+    // 与输入一样插入到光标处（聚焦后光标位于开头）；末尾换行没有进入文本框。
+    expect(updated.elements.find(item => item.label === 'Notes')).toMatchObject({ value: '粘贴第一行\n第二行' });
+    await expect(act(updated, { type: 'paste', text: '\n', restoreClipboard: true })).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
   it('rejects old references after DOM replacement and navigation', async () => {
     const observation = await backend.observe(target);
     await act(observation, { type: 'click', elementId: element(observation, 'Replace') });

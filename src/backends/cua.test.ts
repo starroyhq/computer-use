@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ToolResult, WindowStateOutput } from '@trycua/cua-driver';
 import { CuaBackend, type CuaConnection } from './cua.js';
 import type { Target } from '../contracts.js';
-import type { NativeHelper } from '../native-helper.js';
+import type { NativeHelper, PasteSession } from '../native-helper.js';
 
 const target: Target = { id: 'desktop:42:19', kind: 'desktop', appId: 'test.fixture', title: 'Fixture', pid: 42, windowId: 19 };
 const bounds = { x: 10, y: 20, width: 300, height: 200 };
@@ -1776,19 +1776,56 @@ describe('Cua socket adapter', () => {
     });
   });
 
-  describe('native helpers: user activity', () => {
+  describe('native helpers: user activity and paste', () => {
     const signal = () => new AbortController().signal;
-    function helper(idle: Array<number | undefined> = []) {
+    function helper(idle: Array<number | undefined> = [], session?: PasteSession) {
       const values = [...idle];
       return {
         recognizeText: vi.fn(async () => []),
         warmUp: vi.fn(),
+        openPasteSession: vi.fn(async () => {
+          if (!session) throw new Error('no session');
+          return session;
+        }),
         inputIdleMs: vi.fn(async () => (values.length > 0 ? values.shift() : 60_000)),
       } satisfies NativeHelper;
     }
-    function withHelper(native: NativeHelper) {
+    // 菜单栏：Apple 菜单在前，后面是给定的菜单与菜单项（未展开的菜单项没有位置）。默认带标准的 Edit > Paste。
+    function withHelper(
+      native: NativeHelper,
+      menus: Array<{ title: string; items: string[] }> = [{ title: 'Edit', items: ['Copy', 'Paste'] }],
+    ) {
       const value = fixture();
+      let index = 100n;
+      const add = (role: string, label: string, parentIndex?: bigint) => {
+        const elementIndex = index++;
+        value.state.elements!.push({
+          elementIndex,
+          role,
+          depth: 1,
+          label,
+          elementToken: `s1:${elementIndex}`,
+          ...(parentIndex ? { parentIndex } : {}),
+        });
+        return elementIndex;
+      };
+      if (menus.length > 0) {
+        const bar = add('AXMenuBar', '');
+        add('AXMenuBarItem', 'Apple', bar);
+        for (const { title, items } of menus) {
+          const menu = add('AXMenu', '', add('AXMenuBarItem', title, bar));
+          for (const item of items) add('AXMenuItem', item, menu);
+        }
+      }
       return { ...value, backend: new CuaBackend('/test/driver.sock', value.connector, 'darwin', undefined, native) };
+    }
+    function pasteSession(overrides: Partial<PasteSession> = {}) {
+      return {
+        stage: vi.fn(async () => ({ complete: true })),
+        finish: vi.fn(async () => ({ restored: true })),
+        abort: vi.fn(),
+        ...overrides,
+      } satisfies PasteSession;
     }
 
     it('sends nothing in the foreground while the user is using the mouse or keyboard', async () => {
@@ -1852,6 +1889,238 @@ describe('Cua socket adapter', () => {
         }),
       ).resolves.toMatchObject({ progress: { delivered: 64, total: 100 }, warning: { code: 'partial_input' } });
       expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('pastes through a saved and restored clipboard without trailing line breaks', async () => {
+      const session = pasteSession();
+      const native = helper([], session);
+      const { client, backend } = withHelper(native);
+      const order: string[] = [];
+      session.stage.mockImplementation(async () => {
+        order.push('stage');
+        return { complete: true };
+      });
+      client.callTool.mockImplementation(async () => {
+        order.push('paste');
+        return success();
+      });
+      session.finish.mockImplementation(async () => {
+        order.push('restore');
+        return { restored: true };
+      });
+      await expect(
+        backend.act(
+          await backend.observe(target),
+          { type: 'paste', text: 'docker ps\r\n\n', restoreClipboard: true },
+          'background',
+          signal(),
+        ),
+      ).resolves.toEqual({ effect: 'confirmed' });
+      expect(order).toEqual(['stage', 'paste', 'restore']);
+      expect(session.stage).toHaveBeenCalledWith('docker ps', true);
+      expect(session.finish).toHaveBeenCalledWith(800);
+      // 实测：后台 ⌘V 到不了 WebKit 页面，通过辅助功能调用应用的“粘贴”菜单命令可以。
+      expect(client.callTool.mock.calls[0]![0]).toBe('invoke_menu');
+      const args = JSON.parse(client.callTool.mock.calls[0]![1]);
+      expect(args).toMatchObject({ path: ['Edit', 'Paste'] });
+      expect(args).not.toHaveProperty('delivery_mode');
+      expect(session.abort).not.toHaveBeenCalled();
+    });
+
+    it('finds the Paste command in localized menus by its exact name', async () => {
+      const { client, backend } = withHelper(helper([], pasteSession()), [
+        { title: 'Format', items: ['Paste'] },
+        { title: '编辑', items: ['拷贝', '粘贴并匹配样式', '粘贴'] },
+      ]);
+      await backend.act(await backend.observe(target), { type: 'paste', text: 'ls', restoreClipboard: true }, 'background', signal());
+      expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ path: ['编辑', '粘贴'] });
+      const other = withHelper(helper([], pasteSession()), [{ title: 'Terminal', items: ['Paste and Match Style', 'Paste'] }]);
+      await other.backend.act(
+        await other.backend.observe(target),
+        { type: 'paste', text: 'ls', restoreClipboard: true },
+        'background',
+        signal(),
+      );
+      expect(JSON.parse(other.client.callTool.mock.calls[0]![1])).toMatchObject({ path: ['Terminal', 'Paste'] });
+    });
+
+    it('sends the paste shortcut to an element only in the foreground', async () => {
+      const session = pasteSession();
+      const native = helper([], session);
+      const background = withHelper(native);
+      await expect(
+        background.backend.act(
+          await background.backend.observe(target),
+          { type: 'paste', text: 'ls', elementId: 's1:1', restoreClipboard: true },
+          'background',
+          signal(),
+        ),
+      ).rejects.toMatchObject({ code: 'background_unavailable', message: expect.stringContaining('without elementId') });
+      expect(native.openPasteSession).not.toHaveBeenCalled();
+      expect(background.client.callTool).not.toHaveBeenCalled();
+      const foreground = withHelper(native);
+      await foreground.backend.act(
+        await foreground.backend.observe(target),
+        { type: 'paste', text: 'ls', elementId: 's1:1', restoreClipboard: true },
+        'foreground',
+        signal(),
+      );
+      expect(foreground.client.callTool.mock.calls[0]![0]).toBe('hotkey');
+      expect(JSON.parse(foreground.client.callTool.mock.calls[0]![1])).toMatchObject({
+        keys: ['cmd', 'v'],
+        element_token: 's1:1',
+        delivery_mode: 'foreground',
+      });
+    });
+
+    it('tries the Paste name of the Edit menu’s language when an inactive app does not list the item', async () => {
+      // 实测：未激活应用的“编辑”菜单在辅助功能树里只列出系统附加的项，剪切、拷贝、粘贴不在其中。
+      const { client, backend } = withHelper(helper([], pasteSession()), [{ title: '編集', items: ['自動入力', '絵文字と記号'] }]);
+      client.callTool
+        .mockResolvedValueOnce({
+          ...success(),
+          isError: true,
+          errorCode: 'menu_path_unavailable',
+          text: 'invoke_menu: path segment 1 was not found',
+        })
+        .mockResolvedValueOnce(success());
+      await expect(
+        backend.act(await backend.observe(target), { type: 'paste', text: 'ls', restoreClipboard: true }, 'background', signal()),
+      ).resolves.toMatchObject({ effect: 'confirmed' });
+      expect(client.callTool.mock.calls.map(([tool, json]) => [tool, JSON.parse(json).path])).toEqual([
+        ['invoke_menu', ['編集', 'ペースト']],
+        ['invoke_menu', ['編集', '貼り付け']],
+      ]);
+    });
+
+    it('cannot paste in the background without a Paste menu command', async () => {
+      const native = helper([], pasteSession());
+      const bare = withHelper(native, []);
+      await expect(
+        bare.backend.act(await bare.backend.observe(target), { type: 'paste', text: 'ls', restoreClipboard: true }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'background_unavailable', message: expect.stringContaining('no Paste menu command') });
+      expect(native.openPasteSession).not.toHaveBeenCalled();
+      // 每个名称都找不到：没有按下任何菜单项，剪贴板立即换回。
+      const session = pasteSession();
+      const missing = withHelper(helper([], session), [{ title: 'Edit', items: ['AutoFill'] }]);
+      missing.client.callTool.mockResolvedValue({ ...success(), isError: true, errorCode: 'menu_path_unavailable', text: 'not found' });
+      await expect(
+        missing.backend.act(
+          await missing.backend.observe(target),
+          { type: 'paste', text: 'ls', restoreClipboard: true },
+          'background',
+          signal(),
+        ),
+      ).rejects.toMatchObject({ code: 'background_unavailable', settled: true });
+      expect(missing.client.callTool).toHaveBeenCalledTimes(1);
+      expect(session.abort).toHaveBeenCalled();
+      expect(session.finish).not.toHaveBeenCalled();
+      const foreground = withHelper(native, []);
+      await foreground.backend.act(
+        await foreground.backend.observe(target),
+        { type: 'paste', text: 'ls', restoreClipboard: true },
+        'foreground',
+        signal(),
+      );
+      expect(JSON.parse(foreground.client.callTool.mock.calls[0]![1])).toMatchObject({ keys: ['cmd', 'v'], delivery_mode: 'foreground' });
+    });
+
+    it('warns when the clipboard could not be restored or saved completely', async () => {
+      const notRestored = pasteSession({ finish: vi.fn(async () => ({ restored: false })) });
+      const first = withHelper(helper([], notRestored));
+      await expect(
+        first.backend.act(
+          await first.backend.observe(target),
+          { type: 'paste', text: 'x', restoreClipboard: true },
+          'background',
+          signal(),
+        ),
+      ).resolves.toMatchObject({ warning: { code: 'clipboard_not_restored' } });
+      const partial = pasteSession({ stage: vi.fn(async () => ({ complete: false })) });
+      const second = withHelper(helper([], partial));
+      await expect(
+        second.backend.act(
+          await second.backend.observe(target),
+          { type: 'paste', text: 'x', restoreClipboard: true },
+          'background',
+          signal(),
+        ),
+      ).resolves.toMatchObject({ warning: { code: 'clipboard_partial' } });
+    });
+
+    it('neither reads nor restores the clipboard when asked not to', async () => {
+      const session = pasteSession();
+      const { backend } = withHelper(helper([], session));
+      await backend.act(await backend.observe(target), { type: 'paste', text: 'x', restoreClipboard: false }, 'background', signal());
+      expect(session.stage).toHaveBeenCalledWith('x', false);
+      expect(session.finish).not.toHaveBeenCalled();
+      expect(session.abort).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing when staging fails, and puts the clipboard back when cancelled after staging', async () => {
+      const failing = pasteSession({ stage: vi.fn(async () => Promise.reject(new Error('denied'))) });
+      const first = withHelper(helper([], failing));
+      const dispatched = vi.fn();
+      await expect(
+        first.backend.act(
+          await first.backend.observe(target),
+          { type: 'paste', text: 'x', restoreClipboard: true },
+          'background',
+          signal(),
+          dispatched,
+        ),
+      ).rejects.toBeDefined();
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(first.client.callTool).not.toHaveBeenCalled();
+      expect(failing.abort).toHaveBeenCalled();
+      const controller = new AbortController();
+      const staged = pasteSession({
+        stage: vi.fn(async () => {
+          controller.abort();
+          return { complete: true };
+        }),
+      });
+      const second = withHelper(helper([], staged));
+      await expect(
+        second.backend.act(
+          await second.backend.observe(target),
+          { type: 'paste', text: 'x', restoreClipboard: true },
+          'background',
+          controller.signal,
+        ),
+      ).rejects.toMatchObject({ code: 'cancelled' });
+      expect(second.client.callTool).not.toHaveBeenCalled();
+      expect(staged.abort).toHaveBeenCalled();
+    });
+
+    it('rejects empty text and installations without the helper, and uses ctrl+v on Windows', async () => {
+      const { backend, client } = fixture();
+      const observation = await backend.observe(target);
+      await expect(
+        backend.act(observation, { type: 'paste', text: '\n\n', restoreClipboard: true }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(
+        backend.act(observation, { type: 'paste', text: 'x', restoreClipboard: true }, 'background', signal()),
+      ).rejects.toMatchObject({ code: 'unavailable' });
+      expect(client.callTool).not.toHaveBeenCalled();
+      const windows = fixture();
+      const session = pasteSession();
+      const windowsBackend = new CuaBackend(
+        'C:\\Computer Use\\cua-driver.exe',
+        async () => windows.client,
+        'win32',
+        async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+        helper([], session),
+      );
+      windows.client.listApps.mockResolvedValue({ apps: [{ pid: 42, name: 'Fixture', running: true, active: false }] });
+      const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+      await windowsBackend.act(
+        await windowsBackend.observe(windowsTarget),
+        { type: 'paste', text: 'dir', restoreClipboard: true },
+        'background',
+        signal(),
+      );
+      expect(JSON.parse(windows.client.callTool.mock.calls[0]![1])).toMatchObject({ keys: ['ctrl', 'v'] });
     });
   });
 

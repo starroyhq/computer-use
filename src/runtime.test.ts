@@ -1646,7 +1646,7 @@ describe('Runtime authorization and execution', () => {
       const first = await observation(token, sessionId);
       await expect(act(token, sessionId, first.snapshotId, { type: 'type', text: 'x' }, { timeoutMs: 30_000 })).rejects.toMatchObject({
         code: 'invalid_request',
-        message: expect.stringContaining('Split it into shorter parts'),
+        message: expect.stringContaining('Split it into shorter parts or use paste'),
       });
       backend.estimateMs = vi.fn(() => 20_000);
       await expect(act(token, sessionId, first.snapshotId, { type: 'type', text: 'x' }, { timeoutMs: 15_000 })).rejects.toMatchObject({

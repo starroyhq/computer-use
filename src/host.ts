@@ -36,7 +36,7 @@ if (
 const emit = (event: HostEvent): void => {
   process.stdout.write(JSON.stringify(event) + '\n');
 };
-// 截图文字识别和输入空闲时间由同包宿主的辅助模式提供。只信任已校验的完整包布局；
+// 截图文字识别、剪贴板会话和输入空闲时间由同包宿主的辅助模式提供。只信任已校验的完整包布局；
 // 源码运行或布局不符时这些功能报告不可用，其余功能不受影响。
 async function locateNativeHelper(): Promise<NativeHelper | undefined> {
   try {

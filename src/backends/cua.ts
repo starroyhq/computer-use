@@ -25,7 +25,7 @@ import {
   type Target,
 } from '../contracts.js';
 import { windowsAppId } from '../app-identity.js';
-import type { NativeHelper } from '../native-helper.js';
+import type { NativeHelper, PasteSession } from '../native-helper.js';
 
 export type CuaConnection = Pick<
   CuaDriverLike,
@@ -51,6 +51,10 @@ const FOREGROUND_CHUNK = 64;
 const CHUNK_SETTLE_MS = 450;
 // 前台动作前，用户需要至少这么久没有动键盘鼠标；自己刚发出的输入也会刷新这个时间，先等它过去。
 const USER_QUIET_MS = 1_000;
+// 粘贴快捷键发出后，等目标应用读完剪贴板再恢复。
+const PASTE_RESTORE_DELAY_MS = 800;
+const NO_PASTE_MENU =
+  'This app has no Paste menu command a background session can use; nothing was sent. Use a foreground session, or type the text.';
 const READBACK_WARNING: ExecutionWarning = {
   code: 'readback_mismatch',
   message:
@@ -177,7 +181,7 @@ function budgetRefusal(result: ToolResult): CuError | undefined {
   const max = typeof info?.max_chunk_chars === 'number' && info.max_chunk_chars > 0 ? Math.floor(info.max_chunk_chars) : undefined;
   return new CuError(
     'invalid_request',
-    `The driver refused to type this much text in one call; nothing was sent. Split it into parts of${max ? ` at most ${max} characters` : ' fewer characters'}.`,
+    `The driver refused to type this much text in one call; nothing was sent. Split it into parts of${max ? ` at most ${max} characters` : ' fewer characters'} or use paste.`,
   );
 }
 
@@ -267,6 +271,72 @@ function withoutHiddenMenus(elements: WindowElement[]): WindowElement[] {
     if (excluded.has(element.parentIndex) || !element.frame) excluded.add(element.elementIndex);
   }
   return elements.filter(element => !excluded.has(element.elementIndex));
+}
+
+// 应用“编辑”菜单的常见名称，以及同一语言里“粘贴”命令的名称：系统各语言的标准菜单，以及 Electron、Tauri 的默认菜单。
+const PASTE_BY_EDIT: Record<string, string[]> = {
+  edit: ['Paste'],
+  编辑: ['粘贴'],
+  編輯: ['貼上'],
+  編集: ['ペースト', '貼り付け'],
+  편집: ['붙여넣기'],
+  bearbeiten: ['Einsetzen', 'Einfügen'],
+  édition: ['Coller'],
+  edición: ['Pegar'],
+  modifica: ['Incolla'],
+  editar: ['Colar', 'Pegar'],
+  правка: ['Вставить'],
+  редагування: ['Вставити'],
+  wijzig: ['Plak'],
+  bewerken: ['Plakken', 'Plak'],
+  redigera: ['Klistra in'],
+  rediger: ['Indsæt', 'Lim inn'],
+  muokkaa: ['Sijoita', 'Liitä'],
+  edycja: ['Wklej'],
+  düzen: ['Yapıştır'],
+  úpravy: ['Vložit', 'Vložiť'],
+  تحرير: ['لصق'],
+  עריכה: ['הדבק'],
+  แก้ไข: ['วาง'],
+  sửa: ['Dán'],
+  szerkesztés: ['Beillesztés'],
+  επεξεργασία: ['Επικόλληση'],
+};
+const PASTE_TITLES = new Set(Object.values(PASTE_BY_EDIT).flatMap(names => names.map(name => name.toLowerCase())));
+
+// 后台粘贴要调用的菜单路径，按尝试顺序排列。未激活的应用不处理 ⌘V 这类菜单快捷键（实测 WebKit 页面收不到粘贴），
+// 通过辅助功能调用应用的“粘贴”菜单命令则可以送达该应用当前焦点所在的输入框。
+// 快照里有“粘贴”项时直接用它（只做完整匹配，不会选中“粘贴并匹配样式”）。未激活应用的编辑菜单常常只列出系统附加的项，
+// 这时按“编辑”菜单的语言给出该语言的“粘贴”名称逐个尝试；路径不存在时驱动在按下任何菜单项之前就报错。
+function pasteMenuPaths(elements: WindowElement[]): string[][] {
+  const children = (parent: WindowElement, role: string) =>
+    elements
+      .filter(element => element.parentIndex === parent.elementIndex && element.role === role)
+      .sort((a, b) => (a.elementIndex < b.elementIndex ? -1 : 1));
+  const listed: string[][] = [];
+  const guessed: string[][] = [];
+  // 第一项是 Apple 菜单。
+  for (const bar of elements.filter(element => element.role === 'AXMenuBar'))
+    for (const top of children(bar, 'AXMenuBarItem').slice(1)) {
+      const title = (top.label ?? '').trim();
+      if (!title) continue;
+      const names = PASTE_BY_EDIT[title.toLowerCase()];
+      for (const menu of children(top, 'AXMenu'))
+        for (const item of children(menu, 'AXMenuItem')) {
+          const label = (item.label ?? '').trim();
+          if (!PASTE_TITLES.has(label.toLowerCase())) continue;
+          if (names) listed.unshift([title, label]);
+          else listed.push([title, label]);
+        }
+      if (names) guessed.push(...names.map(name => [title, name]));
+    }
+  const seen = new Set<string>();
+  return [...listed, ...guessed].filter(path => {
+    const key = path.join('\u0000');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // 每个菜单栏的第一项是系统级 Apple 菜单（见上）：它不在观察里，调用菜单也不得绕过去。
@@ -427,7 +497,7 @@ export class CuaBackend implements Backend {
     private readonly connector: (socketPath: string) => Promise<CuaConnection> = connect,
     private readonly platform: NodeJS.Platform = process.platform,
     private readonly processPaths: (pids: number[]) => Promise<Map<number, string>> = pids => windowsProcessPaths(socketPath, pids),
-    // 同包宿主提供的用户输入空闲时间；没有时前台动作不做让行检查。
+    // 同包宿主提供的剪贴板会话和用户输入空闲时间；没有时粘贴不可用，前台动作不做让行检查。
     private readonly native: NativeHelper | undefined = undefined,
   ) {}
 
@@ -900,9 +970,12 @@ export class CuaBackend implements Backend {
     };
     let tool: string;
     let textClickPoint = false;
-    // 文字输入的附加信息：目标是否网页内容、是否分段。
+    // 文字输入的附加信息：目标是否网页内容、是否分段；粘贴时要写入剪贴板的文字。
     let web = false;
     let typedInParts: string | undefined;
+    let paste: { text: string; restore: boolean } | undefined;
+    // 后台粘贴依次尝试的菜单路径。
+    let menuPaths: string[][] | undefined;
     switch (action.type) {
       case 'click': {
         if (Boolean(action.elementId) === Boolean(action.point))
@@ -997,6 +1070,30 @@ export class CuaBackend implements Backend {
         if (this.platform === 'darwin' && mode === 'foreground' && Array.from(action.text).length > FOREGROUND_CHUNK)
           typedInParts = action.text;
         break;
+      case 'paste': {
+        // 末尾换行在终端里等于回车：去掉，回车由 Agent 核对整行后单独发送。
+        const text = action.text.replace(/[\r\n]+$/u, '');
+        if (!text) throw new CuError('invalid_request', 'Nothing to paste after removing trailing line breaks.');
+        if (!this.native) throw new CuError('unavailable', 'Paste is not available in this installation.');
+        if (this.platform === 'darwin' && mode === 'background') {
+          // 后台不能用 ⌘V，改为调用应用的“粘贴”菜单命令：它送到应用当前焦点所在的输入框，不能指定元素。
+          if (action.elementId)
+            throw new CuError(
+              'background_unavailable',
+              'In a background session paste goes through the app’s Paste menu command to the field that has focus, so it cannot target an element: click the field first if it is not focused, then paste without elementId.',
+            );
+          menuPaths = pasteMenuPaths(state.snapshot.elements ?? []);
+          if (menuPaths.length === 0) throw new CuError('background_unavailable', NO_PASTE_MENU);
+          tool = 'invoke_menu';
+          delete args.delivery_mode;
+        } else {
+          tool = 'hotkey';
+          args.keys = this.platform === 'win32' ? ['ctrl', 'v'] : ['cmd', 'v'];
+          if (action.elementId) args.element_token = element(action.elementId);
+        }
+        paste = { text, restore: action.restoreClipboard };
+        break;
+      }
       case 'key':
         if (action.keys.length === 0) throw new CuError('invalid_request', 'At least one key is required.');
         tool = 'hotkey';
@@ -1070,6 +1167,8 @@ export class CuaBackend implements Backend {
     const combined = AbortSignal.any([signal, controller.signal]);
     this.active.add(controller);
     let dispatched = false;
+    let pasteSession: PasteSession | undefined;
+    let clipboardComplete = true;
     try {
       const client = await this.client();
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
@@ -1104,19 +1203,65 @@ export class CuaBackend implements Backend {
       // set_value 与 invoke_menu 不动用键盘鼠标，不需要让行。
       const foreground = args.delivery_mode === 'foreground';
       if (foreground) await this.ensureUserQuiet(combined);
+      if (paste) {
+        pasteSession = await this.native!.openPasteSession();
+        if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
+        const staged = await pasteSession.stage(paste.text, paste.restore);
+        clipboardComplete = staged.complete;
+      }
       // 从这里到 callTool 之间没有 await：通过此处检查后不会再被中止打断，回调与派发处于同一时刻。
       if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled before dispatch.');
       onDispatch?.();
       state.consumed = true;
       dispatched = true;
       if (typedInParts !== undefined) return await this.typeInParts(client, args, typedInParts, web, combined, context?.budgetMs);
-      const result = await client.callTool(tool, JSON.stringify(args), { signal: combined });
+      let result: ToolResult;
+      if (menuPaths) {
+        // 路径不存在（menu_path_unavailable）时驱动没有按下任何菜单项，可以换下一个名称；其他结果照常处理。
+        let index = 0;
+        do {
+          if (combined.aborted) throw new CuError('cancelled', 'Desktop action cancelled.', { settled: true });
+          result = await client.callTool(tool, JSON.stringify({ ...args, path: menuPaths[index] }), { signal: combined });
+        } while (result.isError && result.errorCode === 'menu_path_unavailable' && ++index < menuPaths.length);
+        if (result.isError && result.errorCode === 'menu_path_unavailable')
+          throw new CuError('background_unavailable', NO_PASTE_MENU, { settled: true });
+      } else result = await client.callTool(tool, JSON.stringify(args), { signal: combined });
       if (foreground) this.lastForegroundInput = Date.now();
-      return tool === 'type_text' ? this.typeOutcome(result, web) : checkResult(result, true);
+      const execution = tool === 'type_text' ? this.typeOutcome(result, web) : checkResult(result, true);
+      if (pasteSession && paste) {
+        const session = pasteSession;
+        pasteSession = undefined;
+        // 不恢复时只需结束辅助进程；它不会读取或改回剪贴板。
+        if (!paste.restore) {
+          session.abort();
+          return execution;
+        }
+        const { restored } = await session.finish(PASTE_RESTORE_DELAY_MS).catch(() => ({ restored: false }));
+        if (!restored)
+          return {
+            ...execution,
+            warning: {
+              code: 'clipboard_not_restored',
+              message:
+                'The clipboard was not restored: the user copied something else meanwhile, or restoring failed. Tell the user their clipboard may hold the pasted text.',
+            },
+          };
+        if (!clipboardComplete)
+          return {
+            ...execution,
+            warning: {
+              code: 'clipboard_partial',
+              message: 'Some clipboard formats could not be saved, so the restored clipboard may lack them. Tell the user.',
+            },
+          };
+      }
+      return execution;
     } catch (error) {
       if (error instanceof CuError) throw error;
       throw failure(record(record(error)?.inner)?.errorCode, dispatched);
     } finally {
+      // 粘贴没有正常结束（取消、错误）：立即请辅助进程把剪贴板换回去。
+      pasteSession?.abort();
       // Native spawn_blocking gestures may outlive cancellation of the SDK
       // future. Do not admit a second gesture until the host replaces its daemon.
       if (dispatched && combined.aborted) this.interrupted = true;

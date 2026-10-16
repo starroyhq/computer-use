@@ -373,6 +373,18 @@ export class BrowserBackend implements Backend {
         }
         case 'menu':
           throw new CuError('invalid_request', 'Browser pages have no application menu.');
+        case 'paste': {
+          // 隔离浏览器不碰用户的剪贴板：直接插入文字，效果与粘贴纯文本相同（页面收到 input 事件，不是 paste 事件）。
+          const text = action.text.replace(/[\r\n]+$/u, '');
+          if (!text) throw new CuError('invalid_request', 'Nothing to paste after removing trailing line breaks.');
+          if (action.elementId) {
+            const element = state.elements.get(action.elementId);
+            if (!element) throw new CuError('stale_snapshot', 'Unknown snapshot element.');
+            await element.handle.focus();
+          }
+          await page.keyboard.insertText(text);
+          break;
+        }
         case 'key':
           await page.keyboard.press(action.keys.map(normalizeKey).join('+'));
           break;

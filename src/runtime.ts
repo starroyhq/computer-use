@@ -784,8 +784,8 @@ export class Runtime implements RpcService {
       throw new CuError(
         'invalid_request',
         estimate > 30_000
-          ? `This input needs about ${seconds} seconds, longer than one action can take (30 seconds); nothing was sent. Split it into shorter parts.`
-          : `This input needs about ${seconds} seconds, longer than timeoutMs (${p.timeoutMs} ms); nothing was sent. Raise timeoutMs to ${Math.min(30_000, seconds * 1000)} or split the text.`,
+          ? `This input needs about ${seconds} seconds, longer than one action can take (30 seconds); nothing was sent. Split it into shorter parts or use paste.`
+          : `This input needs about ${seconds} seconds, longer than timeoutMs (${p.timeoutMs} ms); nothing was sent. Raise timeoutMs to ${Math.min(30_000, seconds * 1000)}, split the text or use paste.`,
       );
     }
     const record: ActionRecord = {

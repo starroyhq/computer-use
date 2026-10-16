@@ -1,26 +1,40 @@
 import { execFile, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { CuError, type Screenshot, type TextLine } from './contracts.js';
 
 const execFileAsync = promisify(execFile);
-// 辅助模式的输出都很小；超过上限说明输出异常，直接放弃。
+// 识别结果和剪贴板会话的回复都很小；超过上限说明输出异常，直接放弃。
 const OUTPUT_LIMIT = 4 * 1024 * 1024;
 const RECOGNIZE_MS = 15_000;
 // 一台 Mac 第一次识别文字时，系统要先准备识别模型（实测约 50 秒），之后每次只要几百毫秒。
 // 调用方超时后让识别进程继续运行到这个上限，中途结束会让下一次从头准备。
 const RECOGNIZE_LIMIT_MS = 120_000;
+const STAGE_MS = 20_000;
+const FINISH_MS = 10_000;
 const IDLE_MS = 5_000;
 const RECOGNIZE_TIMEOUT =
   'Text recognition did not finish in time. The first use on a computer can take about a minute while the system prepares its text model; try again shortly, or read the screenshot instead.';
 const RECOGNIZE_BUSY =
   'Text recognition is still finishing an earlier request (the first use on a computer can take about a minute); try again shortly, or read the screenshot instead.';
 
-/** 由同包宿主进程提供的本机能力：截图文字识别、用户最近一次输入距今的时间。 */
+/** 一次粘贴的剪贴板会话：先暂存用户的剪贴板并写入要粘贴的文字，粘贴后再恢复。 */
+export interface PasteSession {
+  /** 暂存剪贴板（restore 为 false 时不读取）并写入文字。失败时剪贴板保持原样。 */
+  stage(text: string, restore: boolean): Promise<{ complete: boolean }>;
+  /** 等待 delayMs 后恢复剪贴板；期间用户复制了新内容时保留新内容。 */
+  finish(delayMs: number): Promise<{ restored: boolean }>;
+  /** 立即结束：已写入的文字尽量换回用户原来的内容。 */
+  abort(): void;
+}
+
+/** 由同包宿主进程提供的本机能力：截图文字识别、剪贴板会话、用户最近一次输入距今的时间。 */
 export interface NativeHelper {
   recognizeText(image: Screenshot, signal?: AbortSignal): Promise<TextLine[]>;
   /** 在后台识别一张内置示例图，提前完成系统第一次识别时的模型准备。不需要时什么也不做。 */
   warmUp(): void;
+  openPasteSession(): Promise<PasteSession>;
   /** 距离用户最近一次键盘或鼠标输入的毫秒数；读不到时为 undefined。 */
   inputIdleMs(): Promise<number | undefined>;
 }
@@ -33,7 +47,20 @@ const lineSchema = z.object({
   height: z.number().finite().nonnegative(),
 });
 const recognizedSchema = z.object({ lines: z.array(lineSchema).max(10_000) });
+const replySchema = z.object({
+  ok: z.boolean(),
+  code: z.string().max(64).optional(),
+  complete: z.boolean().optional(),
+  restored: z.boolean().optional(),
+});
 const idleSchema = z.object({ idleMs: z.number().finite().nonnegative() });
+
+// 宿主辅助模式的固定错误码换成可读的说明；不转述辅助进程自己的文字。
+const stageMessages: Record<string, string> = {
+  read_denied:
+    'Computer Use could not read the clipboard (the user or the system declined), so it could not keep what the user copied; nothing was pasted. Tell the user, or pass restoreClipboard: false after telling them their clipboard will be overwritten.',
+  write_failed: 'The clipboard could not be written; nothing was pasted.',
+};
 
 type RunOptions = {
   input?: Buffer | undefined;
@@ -89,6 +116,65 @@ function run(binary: string, args: string[], options: RunOptions): { result: Pro
     child.stdin.end(options.input);
   });
   return { result, exited };
+}
+
+class HelperPasteSession implements PasteSession {
+  private readonly replies: Array<(value: unknown) => void> = [];
+  private ended = false;
+  constructor(private readonly child: ReturnType<typeof spawn>) {
+    const lines = createInterface({ input: child.stdout! });
+    lines.on('line', line => {
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        value = undefined;
+      }
+      this.replies.shift()?.(value);
+    });
+    child.on('close', () => {
+      this.ended = true;
+      for (const reply of this.replies.splice(0)) reply(undefined);
+    });
+    child.on('error', () => {});
+    child.stdin!.on('error', () => {});
+  }
+  private request(message: object, milliseconds: number): Promise<z.infer<typeof replySchema>> {
+    if (this.ended) return Promise.reject(new CuError('unavailable', 'The clipboard helper is not running.'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.abort();
+        reject(new CuError('unavailable', 'The clipboard helper did not answer in time.'));
+      }, milliseconds);
+      this.replies.push(value => {
+        clearTimeout(timer);
+        const parsed = replySchema.safeParse(value);
+        if (parsed.success) resolve(parsed.data);
+        else reject(new CuError('unavailable', 'The clipboard helper stopped unexpectedly.'));
+      });
+      this.child.stdin!.write(`${JSON.stringify(message)}\n`);
+    });
+  }
+  async stage(text: string, restore: boolean): Promise<{ complete: boolean }> {
+    const reply = await this.request({ op: 'stage', text, restore }, STAGE_MS);
+    if (!reply.ok) {
+      this.abort();
+      throw new CuError(
+        reply.code === 'read_denied' ? 'permission_denied' : 'unavailable',
+        stageMessages[reply.code ?? ''] ?? 'The clipboard could not be prepared; nothing was pasted.',
+      );
+    }
+    return { complete: reply.complete !== false };
+  }
+  async finish(delayMs: number): Promise<{ restored: boolean }> {
+    const reply = await this.request({ op: 'finish', delayMs }, delayMs + FINISH_MS);
+    this.child.stdin!.end();
+    return { restored: reply.ok && reply.restored === true };
+  }
+  abort(): void {
+    // 关闭输入即请求辅助进程立刻恢复并退出。
+    if (!this.ended) this.child.stdin!.end();
+  }
 }
 
 /** 用同包宿主可执行文件的辅助模式提供本机能力。路径必须来自已校验的完整包布局。 */
@@ -159,6 +245,10 @@ export function createNativeHelper(
       const { result, exited } = run(hostBinary, ['--recognize-text'], { milliseconds: RECOGNIZE_LIMIT_MS });
       result.catch(() => {});
       linger(exited);
+    },
+    async openPasteSession() {
+      const child = spawn(hostBinary, ['--paste-session'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      return new HelperPasteSession(child);
     },
     async inputIdleMs() {
       try {

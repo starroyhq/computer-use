@@ -71,9 +71,10 @@ export type Doctor = { available: boolean; checks: Array<{ name: string; ok: boo
  * 动作已派发、但有需要 Agent 知道的情况。只用固定代码和固定文案，不含输入内容或界面文字。
  * - readback_mismatch：网页输入框（如终端）每次输入后自行清空，读回对不上；文字通常已完整送达。
  * - partial_input：分段输入中途停下，progress 给出已完整送达的字符数。
+ * - clipboard_not_restored / clipboard_partial：粘贴后剪贴板未能（完整）恢复。
  */
 export type ExecutionWarning = {
-  code: 'readback_mismatch' | 'partial_input';
+  code: 'readback_mismatch' | 'partial_input' | 'clipboard_not_restored' | 'clipboard_partial';
   message: string;
 };
 export type BackendExecution = {
