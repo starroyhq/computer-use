@@ -26,7 +26,13 @@ export type PreflightResult = {
   paths: LocalPaths;
   host: { state: string };
   profiles: string[];
-  profile: { name: string; state: ProfileState; authorization?: z.infer<typeof authorizationSchema> };
+  // client：本地凭据对应的客户端。短 ID 与 App 客户端页显示的一致，名称来自在线核对；两者都不是凭据。
+  profile: {
+    name: string;
+    state: ProfileState;
+    client?: { id: string; shortId: string; name?: string };
+    authorization?: z.infer<typeof authorizationSchema>;
+  };
 };
 
 export function validateProfile(profile: string): void {
@@ -167,6 +173,7 @@ export async function preflight(options: PreflightOptions): Promise<PreflightRes
     if (!info.isFile() || info.size > 64 * 1024) throw new Error('Invalid credential file');
     credential = credentialSchema.parse(JSON.parse(await readFile(path, 'utf8')));
     result.profile.state = 'unverified';
+    result.profile.client = { id: credential.clientId, shortId: credential.clientId.slice(0, 8) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.profile.state = 'invalid';
   }
@@ -181,9 +188,12 @@ export async function preflight(options: PreflightOptions): Promise<PreflightRes
     if (!credential) return result;
     // Direct IPC only: preflight must never call createRuntimeClient (which may launch a host).
     const capability = z
-      .object({ paused: z.boolean(), stopped: z.boolean(), authorization: z.unknown().optional() })
+      .object({ paused: z.boolean(), stopped: z.boolean(), authorization: z.unknown().optional(), client: z.unknown().optional() })
       .parse(await new IpcClient(socket, 1500).call(credential.token, 'capabilities', {}));
     result.profile.state = 'valid';
+    const identity = z.object({ id: z.string(), name: z.string().max(80) }).safeParse(capability.client);
+    if (identity.success && identity.data.id === credential.clientId)
+      result.profile.client = { id: credential.clientId, shortId: credential.clientId.slice(0, 8), name: identity.data.name };
     // Older hosts and malformed optional diagnostics leave scope unknown; credentials never establish it locally.
     const authorization = authorizationSchema.safeParse(capability.authorization);
     if (authorization.success) result.profile.authorization = authorization.data;

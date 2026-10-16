@@ -126,6 +126,7 @@ export const schemas = {
     .strict(),
   action_status: z.object({ requestId: z.uuid() }).strict(),
   cancel: z.object({ requestId: z.uuid() }).strict(),
+  request_all_apps: z.object({}).strict(),
 };
 export type Method = keyof typeof schemas;
 // 客户端名称会原样显示在本机审批框里：拒绝换行、方向控制等不可见字符，避免伪造提示内容。
@@ -145,6 +146,13 @@ export const hostCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.enum(['pair_allow', 'pair_deny']), clientId: id, allApps: z.boolean().optional() }).strict(),
   z.object({ command: z.literal('revoke'), clientId: id }).strict(),
   z.object({ command: z.literal('grant_all_apps'), clientId: id, requestId: z.uuid() }).strict(),
+  z.object({ command: z.literal('grant_deny'), clientId: id, requestId: z.uuid() }).strict(),
+  z
+    .object({
+      command: z.literal('host_features'),
+      features: z.array(z.string().min(1).max(40)).max(20),
+    })
+    .strict(),
   z.object({ command: z.enum(['foreground_allow', 'foreground_deny']), sessionId: id }).strict(),
   z.object({ command: z.enum(['pause', 'resume', 'stop', 'http_enable', 'http_disable']) }).strict(),
   z.object({ command: z.literal('control_ready'), pid: z.number().int().positive().max(2_147_483_647) }).strict(),
@@ -163,4 +171,6 @@ export const descriptions: Record<Method, string> = {
   wait: 'Wait for an explicit observable condition, with a bounded timeout. Element conditions match label, value or valueIncludes, optionally role, enabled and selected. A text condition waits until the recognized screenshot text includes a string, for terminals and other text the element tree does not show; matching ignores whitespace and treats full-width forms, dashes and quotes alike. elementsOnly: true polls and returns without capturing screenshots (faster; the returned snapshot supports element actions, typing and keys only). screenshot: false returns the observation without the image; text: true (implied by a text condition) adds the recognized text lines. No fixed sleep or implicit task planning.',
   action_status: 'Read the status of a previous request owned by this client, including uncertain outcomes after disconnects.',
   cancel: 'Cancel a queued or active request. Active cancellation may require a runtime restart to guarantee input has stopped.',
+  request_all_apps:
+    'Ask the local user to extend this client to all desktop applications and foreground control. The App shows a confirmation naming this client; the result arrives after the user answers (up to 60 seconds). Existing credentials, profile and browser permission stay unchanged.',
 };

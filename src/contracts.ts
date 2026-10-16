@@ -168,6 +168,8 @@ export type HostEvent =
       clients: Array<{ id: string; name: string; appIds: string[]; allApps?: boolean; browser: boolean; foreground: boolean }>;
       operation?: GrantOperation;
     }
+  // Agent 请求把已有客户端升级为全应用授权；由宿主弹窗请用户确认，批准后宿主回 grant_all_apps。
+  | { event: 'grant_request'; requestId: string; clientId: string; name: string; appIds: string[]; browser: boolean }
   | { event: 'ready' }
   | { event: 'control_begin' | 'control_end'; pid: number }
   | { event: 'rpc_response'; id: string; result?: unknown; error?: { code: ErrorCode; message: string } }
@@ -177,6 +179,9 @@ export type HostCommand =
   | { command: 'foreground_allow' | 'foreground_deny'; sessionId: string }
   | { command: 'revoke'; clientId: string }
   | { command: 'grant_all_apps'; clientId: string; requestId: string }
+  | { command: 'grant_deny'; clientId: string; requestId: string }
+  // 宿主启动后声明自己支持的新功能；旧宿主不发送，运行时据此不向它发出它不认识的事件。
+  | { command: 'host_features'; features: string[] }
   | { command: 'pause' | 'resume' | 'stop' | 'http_enable' | 'http_disable' }
   | { command: 'control_ready'; pid: number };
 export interface RpcService {

@@ -173,7 +173,7 @@ describe('local onboarding', () => {
       );
     });
     const result = await preflight({ ...options(), socket });
-    expect(result.profile).toEqual({ name: 'default', state: 'valid', authorization });
+    expect(result.profile).toEqual({ name: 'default', state: 'valid', client: { id: 'test-client', shortId: 'test-cli' }, authorization });
     expect(methods).toEqual(['capabilities']);
     expect(JSON.stringify(result)).not.toContain(token);
   });
@@ -189,8 +189,30 @@ describe('local onboarding', () => {
       peer.end(JSON.stringify({ id: request.id, result: { paused: false, stopped: false, authorization } }) + '\n'),
     );
     const result = await preflight({ ...options(), socket });
-    expect(result.profile).toEqual({ name: 'default', state: 'valid' });
+    expect(result.profile).toEqual({ name: 'default', state: 'valid', client: { id: 'test-client', shortId: 'test-cli' } });
     expect(result.host.state).toBe('ready');
+  });
+  it('names the verified client and shows the same short ID as the Clients page', async () => {
+    await credential();
+    for (const [client, expected] of [
+      [
+        { id: 'test-client', name: 'Field Agent' },
+        { id: 'test-client', shortId: 'test-cli', name: 'Field Agent' },
+      ],
+      // 名称只采用与本地凭据同一个客户端的回答。
+      [
+        { id: 'other-client', name: 'Someone else' },
+        { id: 'test-client', shortId: 'test-cli' },
+      ],
+      [undefined, { id: 'test-client', shortId: 'test-cli' }],
+    ] as const) {
+      const socket = await server((request, peer) =>
+        peer.end(JSON.stringify({ id: request.id, result: { paused: false, stopped: false, client } }) + '\n'),
+      );
+      const result = await preflight({ ...options(), socket });
+      expect(result.profile.client).toEqual(expected);
+      expect(JSON.stringify(result)).not.toContain(token);
+    }
   });
   it('keeps rejected credentials and reports unauthorized without re-pairing', async () => {
     await credential();

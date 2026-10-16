@@ -61,6 +61,7 @@ type ObserveRequest = {
 // 快照被移除的原因，只用于给出更明确的错误信息；按会话记录，不向其他会话透露。
 type RetireReason = 'replaced' | 'consumed' | 'expired' | 'closed';
 type Retired = { reason: RetireReason; sessionId: string; at: number };
+type PendingGrant = { clientId: string; resolve: (approved: boolean) => void };
 // waitFor 的结果：满足条件的那次观察，以及（文字条件时）从它识别出的文字。
 type Found = { observation: BackendObservation; text?: TextLine[] | undefined };
 type PublicElement = {
@@ -112,6 +113,7 @@ const RETIRED_LIMIT = 256;
 const RETIRED_MS = 10 * 60_000;
 // 文字条件每轮要截图并识别，轮询间隔放宽，避免持续占用 CPU。
 const TEXT_POLL_MS = 500;
+const GRANT_REQUEST_FEATURE = 'grant_request';
 
 function truncate(text: string, limit: number): string {
   if (text.length <= limit) return text;
@@ -218,6 +220,9 @@ export class Runtime implements RpcService {
   private readonly controlCounts = new Map<number, number>();
   private readonly controlReady = new Map<number, () => void>();
   private readonly retired = new Map<string, Retired>();
+  private readonly grantRequests = new Map<string, PendingGrant>();
+  // 宿主声明支持的新功能；旧宿主不声明，相应事件就不发出。
+  private hostFeatures = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
   // 公开元素 id 的全局序号：同一会话内沿用，不同会话之间不会重复。
   private elementSequence = 0;
@@ -420,14 +425,33 @@ export class Runtime implements RpcService {
       case 'foreground_deny':
         break; // 前台权限已在配对时授予；保留命令以兼容旧宿主。
       case 'grant_all_apps': {
+        // 宿主对 Agent 发起的请求也用这条命令批准；requestId 不对应待处理请求时就是客户端页的按钮。
+        const pending = this.grantRequests.get(command.requestId);
+        const answer = pending?.clientId === command.clientId ? pending : undefined;
         try {
           await this.clients.grantAllApps(command.clientId, () => !this.stopped);
-          this.emitClients({ ...command, ok: true });
+          this.emitClients({ command: 'grant_all_apps', clientId: command.clientId, requestId: command.requestId, ok: true });
+          answer?.resolve(true);
         } catch (error) {
-          this.emitClients({ ...command, ok: false, error: errorResult(error) });
+          this.emitClients({
+            command: 'grant_all_apps',
+            clientId: command.clientId,
+            requestId: command.requestId,
+            ok: false,
+            error: errorResult(error),
+          });
+          answer?.resolve(false);
         }
         break;
       }
+      case 'grant_deny': {
+        const pending = this.grantRequests.get(command.requestId);
+        if (pending?.clientId === command.clientId) pending.resolve(false);
+        break;
+      }
+      case 'host_features':
+        this.hostFeatures = new Set(command.features);
+        break;
       case 'pause':
         this.paused = true;
         break;
@@ -438,12 +462,14 @@ export class Runtime implements RpcService {
         this.stopped = true;
         this.paused = true;
         for (const pair of this.pairs.values()) pair.resolve(false);
+        for (const request of this.grantRequests.values()) request.resolve(false);
         for (const item of this.work.values()) item.controller.abort();
         for (const id of this.sessions.keys()) this.removeSession(id);
         await Promise.allSettled(this.options.backends.map(b => b.cancel()));
         break;
       case 'revoke': {
         const saved = this.clients.revoke(command.clientId);
+        for (const request of this.grantRequests.values()) if (request.clientId === command.clientId) request.resolve(false);
         for (const session of this.sessions.values()) if (session.clientId === command.clientId) this.removeSession(session.id);
         await saved;
         this.emitClients();
@@ -537,7 +563,7 @@ export class Runtime implements RpcService {
     if (p.mode === 'foreground' && client.grant.foreground !== true)
       throw new CuError(
         'permission_denied',
-        'This client does not have foreground access. Review Clients > Allow all apps in the local app; keep the existing profile.',
+        'This client does not have foreground access. Call request_all_apps to ask the user, or have them choose Allow all apps for this client on the Clients page; keep the existing profile.',
       );
     const session: Session = {
       id: randomUUID(),
@@ -966,6 +992,7 @@ export class Runtime implements RpcService {
       case 'capabilities':
         return {
           protocolVersion: 1,
+          client: this.clientInfo(client),
           authorization: this.authorization(client),
           methods: descriptions,
           desktop: {
@@ -989,6 +1016,8 @@ export class Runtime implements RpcService {
             text: this.options.recognizeText !== undefined,
             covered: true,
           },
+          // 能否由 Agent 发起全应用授权请求（需要支持确认弹窗的宿主）。
+          grantRequests: this.hostFeatures.has(GRANT_REQUEST_FEATURE),
           sessionTtlMs: SESSION_TTL,
           snapshotTtlMs: SNAPSHOT_TTL,
           paused: this.paused,
@@ -997,6 +1026,7 @@ export class Runtime implements RpcService {
         };
       case 'doctor':
         return {
+          client: this.clientInfo(client),
           authorization: this.authorization(client),
           paused: this.paused,
           stopped: this.stopped,
@@ -1030,6 +1060,8 @@ export class Runtime implements RpcService {
         const text = reading ? (found.text ?? (await this.recognize(found.observation))) : undefined;
         return { state: 'verified', observation: this.publishObservation(session, found.observation, options, text) };
       }
+      case 'request_all_apps':
+        return this.requestAllApps(client);
       case 'action_status':
       case 'cancel': {
         const p = schemas.action_status.parse(parsed.data);
@@ -1047,9 +1079,54 @@ export class Runtime implements RpcService {
       }
     }
   }
+  // 名称是配对时 Agent 自己给的，短 ID 是客户端 ID 的前 8 位，与 App 客户端页显示的一致。两者都不是凭据。
+  private clientInfo(client: Client): { id: string; shortId: string; name: string } {
+    return { id: client.id, shortId: client.id.slice(0, 8), name: client.name };
+  }
+  // Agent 发起、本机用户在弹窗里确认的全应用授权：与配对同一个信任模型，默认按钮是拒绝。
+  private async requestAllApps(client: Client): Promise<unknown> {
+    if (this.stopped) throw new CuError('unavailable', 'Runtime stopped; restart it from the local app.');
+    if (client.grant.allApps === true && client.grant.foreground === true && client.grant.appIds.length === 0)
+      return { granted: true, alreadyGranted: true, authorization: this.authorization(client) };
+    if (client.grant.allApps !== true && client.grant.appIds.length === 0)
+      throw new CuError('permission_denied', 'A browser-only client cannot request desktop access; pair a desktop client instead.');
+    if (!this.hostFeatures.has(GRANT_REQUEST_FEATURE))
+      throw new CuError(
+        'unavailable',
+        'This App version cannot show the request. Ask the user to choose Allow all apps for this client on the Clients page.',
+      );
+    if ([...this.grantRequests.values()].some(request => request.clientId === client.id))
+      throw new CuError('busy', 'A request for this client is already waiting for the user.');
+    if (this.grantRequests.size >= 3) throw new CuError('busy', 'Too many pending authorization requests.');
+    const requestId = randomUUID();
+    let approved = false;
+    try {
+      approved = await this.requestDecision(
+        resolve => {
+          this.grantRequests.set(requestId, { clientId: client.id, resolve });
+          this.options.emit({
+            event: 'grant_request',
+            requestId,
+            clientId: client.id,
+            name: client.name,
+            appIds: [...client.grant.appIds],
+            browser: client.grant.browser,
+          });
+        },
+        () => this.grantRequests.delete(requestId),
+      );
+    } finally {
+      this.options.emit({ event: 'decision_finished', requestId, approved });
+    }
+    const current = this.clients.clients.get(client.id);
+    if (!current) throw new CuError('unauthorized', 'Client revoked.');
+    if (!approved) throw new CuError('permission_denied', 'The user did not allow all applications, or the request expired.');
+    return { granted: true, authorization: this.authorization(current) };
+  }
   async close(): Promise<void> {
     clearInterval(this.reaper);
     for (const pair of this.pairs.values()) pair.resolve(false);
+    for (const request of this.grantRequests.values()) request.resolve(false);
     await this.control({ command: 'stop' });
     await Promise.allSettled(this.options.backends.map(b => b.close()));
     // EOF 可以紧跟撤销命令。先停止输入，再等待客户端保存，避免正常退出丢失撤销。

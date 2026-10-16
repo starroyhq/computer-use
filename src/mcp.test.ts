@@ -20,6 +20,7 @@ const toolNames = [
   'wait',
   'action_status',
   'cancel',
+  'request_all_apps',
 ];
 let server: Awaited<ReturnType<typeof listenHttp>>;
 let token: string;
@@ -113,7 +114,7 @@ it('extracts nested screenshots once and maps content indexes without duplicatin
 });
 
 describe('MCP Streamable HTTP', () => {
-  it('performs real initialize/list/call with the official v2 client and exposes all ten schemas', async () => {
+  it('performs real initialize/list/call with the official v2 client and exposes all eleven schemas', async () => {
     const client = await connectedClient();
     const listing = await client.listTools();
     expect(listing.tools.map(tool => tool.name).sort()).toEqual([...toolNames].sort());
@@ -161,7 +162,7 @@ describe('MCP Streamable HTTP', () => {
     expect(JSON.parse(initialized.body).result.instructions).toContain('fresh snapshotId');
     const listing = await rawHttp({ body: rpc('tools/list', {}, 2) });
     expect(listing.status).toBe(200);
-    expect(JSON.parse(listing.body).result.tools).toHaveLength(10);
+    expect(JSON.parse(listing.body).result.tools).toHaveLength(11);
     const called = await rawHttp({ body: rpc('tools/call', { name: 'doctor', arguments: {} }, 3) });
     expect(called.status).toBe(200);
     expect(JSON.parse(called.body).result.structuredContent).toEqual({ method: 'doctor', state: 'ready' });

@@ -1708,6 +1708,13 @@ describe('Runtime authorization and execution', () => {
       });
     });
 
+    it('identifies the client in capabilities and doctor without exposing its credential', async () => {
+      const { token, clientId } = await pair('Field Agent');
+      for (const method of ['capabilities', 'doctor'])
+        expect(await call(token, method)).toMatchObject({ client: { id: clientId, shortId: clientId.slice(0, 8), name: 'Field Agent' } });
+      expect(JSON.stringify(await call(token, 'capabilities'))).not.toContain(token);
+    });
+
     describe('text recognition', () => {
       let recognize: ReturnType<typeof vi.fn>;
       beforeEach(async () => {
@@ -1854,6 +1861,69 @@ describe('Runtime authorization and execution', () => {
       ).rejects.toMatchObject({ code: 'unavailable' });
       expect(backend.act).not.toHaveBeenCalled();
       expect(await call(token, 'capabilities')).toMatchObject({ observation: { text: false } });
+    });
+
+    describe('agent-initiated authorization requests', () => {
+      const limited = { appIds: [target.appId], browser: false };
+      const lastRequest = () => {
+        const request = events.findLast(event => event.event === 'grant_request');
+        if (request?.event !== 'grant_request') throw new Error('Missing grant request');
+        return request;
+      };
+
+      it('needs a host that can show the request', async () => {
+        const { token } = await pair('Limited', true, limited);
+        await expect(call(token, 'request_all_apps')).rejects.toMatchObject({
+          code: 'unavailable',
+          message: expect.stringContaining('Clients page'),
+        });
+        expect(events.some(event => event.event === 'grant_request')).toBe(false);
+        expect(await call(token, 'capabilities')).toMatchObject({ grantRequests: false });
+      });
+
+      it('asks the local user and upgrades the same client once approved', async () => {
+        await runtime.control({ command: 'host_features', features: ['grant_request'] });
+        const { token, clientId } = await pair('Limited', true, limited);
+        expect(await call(token, 'capabilities')).toMatchObject({ grantRequests: true });
+        const pending = call(token, 'request_all_apps');
+        await vi.waitFor(() => lastRequest());
+        const request = lastRequest();
+        expect(request).toMatchObject({ clientId, name: 'Limited', appIds: [target.appId], browser: false });
+        await expect(call(token, 'request_all_apps')).rejects.toMatchObject({ code: 'busy' });
+        await runtime.control({ command: 'grant_all_apps', clientId, requestId: request.requestId });
+        await expect(pending).resolves.toMatchObject({
+          granted: true,
+          authorization: { allApps: true, appIds: [], browser: false, foreground: true },
+        });
+        expect(events.findLast(event => event.event === 'decision_finished')).toMatchObject({
+          requestId: request.requestId,
+          approved: true,
+        });
+        // 已有全应用授权时不再询问。
+        await expect(call(token, 'request_all_apps')).resolves.toMatchObject({ granted: true, alreadyGranted: true });
+        expect(events.filter(event => event.event === 'grant_request')).toHaveLength(1);
+      });
+
+      it('reports a denial, an expired request, a revoked client and a browser-only client', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        await runtime.control({ command: 'host_features', features: ['grant_request'] });
+        const { token, clientId } = await pair('Limited', true, limited);
+        const denied = expect(call(token, 'request_all_apps')).rejects.toMatchObject({ code: 'permission_denied' });
+        await vi.waitFor(() => lastRequest());
+        await runtime.control({ command: 'grant_deny', clientId, requestId: lastRequest().requestId });
+        await denied;
+        const expired = call(token, 'request_all_apps');
+        const expectation = expect(expired).rejects.toMatchObject({ code: 'permission_denied' });
+        await vi.advanceTimersByTimeAsync(60_000);
+        await expectation;
+        const revoked = expect(call(token, 'request_all_apps')).rejects.toMatchObject({ code: 'unauthorized' });
+        await vi.waitFor(() => expect(events.filter(event => event.event === 'grant_request')).toHaveLength(3));
+        await runtime.control({ command: 'revoke', clientId });
+        await revoked;
+        vi.useRealTimers();
+        const browser = await pair('Browser only', true, { appIds: [], browser: true, allApps: false });
+        await expect(call(browser.token, 'request_all_apps')).rejects.toMatchObject({ code: 'permission_denied' });
+      });
     });
   });
 });
