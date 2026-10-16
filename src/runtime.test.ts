@@ -1605,6 +1605,40 @@ describe('Runtime authorization and execution', () => {
       );
     const key = { type: 'key', keys: ['tab'] };
 
+    it('explains why a snapshot can no longer be used', async () => {
+      const { token } = await pair(),
+        { sessionId } = await session(token);
+      const replaced = await observation(token, sessionId);
+      const latest = await observation(token, sessionId);
+      await expect(act(token, sessionId, replaced.snapshotId, key)).rejects.toMatchObject({
+        code: 'stale_snapshot',
+        message: expect.stringContaining('newer observation'),
+      });
+      expect(await act(token, sessionId, latest.snapshotId, key)).toMatchObject({ state: 'executed' });
+      await expect(act(token, sessionId, latest.snapshotId, key)).rejects.toMatchObject({
+        message: expect.stringContaining('already used this snapshot'),
+      });
+      const old = await observation(token, sessionId);
+      clock += 31_000;
+      await expect(act(token, sessionId, old.snapshotId, key)).rejects.toMatchObject({ message: expect.stringContaining('expired') });
+      const closing = await observation(token, sessionId);
+      await call(token, 'session_close', { sessionId });
+      const fresh = await session(token);
+      await expect(act(token, fresh.sessionId, closing.snapshotId, key)).rejects.toMatchObject({
+        message: expect.stringContaining('Unknown snapshot'),
+      });
+      await expect(act(token, fresh.sessionId, 'no-such-snapshot', key)).rejects.toMatchObject({
+        message: expect.stringContaining('Unknown snapshot'),
+      });
+      // 另一个客户端的快照只报告为未知，不透露它是否存在。
+      const other = await pair('Other agent');
+      const foreign = await session(other.token);
+      const theirs = await observation(other.token, foreign.sessionId);
+      await expect(act(token, fresh.sessionId, theirs.snapshotId, key)).rejects.toMatchObject({
+        message: expect.stringContaining('Unknown snapshot'),
+      });
+    });
+
     it('refuses input that cannot finish within its deadline before queueing it', async () => {
       const { token } = await pair(),
         { sessionId } = await session(token);

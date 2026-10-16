@@ -50,6 +50,9 @@ type ElementView = { snapshotId: string; shown: boolean; entries: ViewEntry[] };
 type PublishOptions = { screenshot: boolean; elements: boolean; elementsOnly?: boolean; since?: string | undefined };
 // observe 与 act.observe 的原始参数；screenshot 缺省时由 elementsOnly 决定。
 type ObserveRequest = { screenshot?: boolean | undefined; elements: boolean; elementsOnly: boolean; since?: string | undefined };
+// 快照被移除的原因，只用于给出更明确的错误信息；按会话记录，不向其他会话透露。
+type RetireReason = 'replaced' | 'consumed' | 'expired' | 'closed';
+type Retired = { reason: RetireReason; sessionId: string; at: number };
 type PublicElement = {
   id: string;
   role: string;
@@ -90,6 +93,9 @@ const MIN_OBSERVE_MS = 1_000;
 // 观察结果中单个元素值的长度上限；条件判断仍使用后端读到的完整值。
 const VALUE_LIMIT = 2_000;
 const FULL: PublishOptions = { screenshot: true, elements: true };
+// 已移除快照的原因只保留有限的数量和时长。
+const RETIRED_LIMIT = 256;
+const RETIRED_MS = 10 * 60_000;
 
 function truncate(text: string, limit: number): string {
   if (text.length <= limit) return text;
@@ -170,6 +176,7 @@ export class Runtime implements RpcService {
   private readonly work = new Map<string, Work>();
   private readonly controlCounts = new Map<number, number>();
   private readonly controlReady = new Map<number, () => void>();
+  private readonly retired = new Map<string, Retired>();
   private queue: Promise<unknown> = Promise.resolve();
   // 公开元素 id 的全局序号：同一会话内沿用，不同会话之间不会重复。
   private elementSequence = 0;
@@ -247,7 +254,36 @@ export class Runtime implements RpcService {
     const now = this.now();
     for (const [id, session] of this.sessions)
       if (session.expiresAt < now && ![...this.work.values()].some(w => w.sessionId === id)) this.removeSession(id);
-    for (const [id, snapshot] of this.snapshots) if (now - snapshot.createdAt > SNAPSHOT_TTL) this.snapshots.delete(id);
+    for (const [id, snapshot] of this.snapshots)
+      if (now - snapshot.createdAt > SNAPSHOT_TTL) {
+        this.snapshots.delete(id);
+        this.retire(id, snapshot.sessionId, 'expired');
+      }
+    for (const [id, retired] of this.retired) if (now - retired.at > RETIRED_MS) this.retired.delete(id);
+  }
+  private retire(id: string, sessionId: string, reason: RetireReason): void {
+    this.retired.delete(id);
+    this.retired.set(id, { reason, sessionId, at: this.now() });
+    if (this.retired.size > RETIRED_LIMIT) {
+      const oldest = this.retired.keys().next().value;
+      if (oldest !== undefined) this.retired.delete(oldest);
+    }
+  }
+  // 说明快照为什么不能用；其他会话的快照一律按未知处理，不透露它是否存在。
+  private staleSnapshot(id: string, snapshot: Snapshot | undefined, sessionId: string): CuError {
+    if (snapshot?.sessionId === sessionId)
+      return new CuError('stale_snapshot', 'This snapshot expired after 30 seconds; observe again before acting.');
+    const retired = snapshot ? undefined : this.retired.get(id);
+    if (retired?.sessionId === sessionId && this.now() - retired.at <= RETIRED_MS) {
+      const messages: Record<RetireReason, string> = {
+        replaced: 'A newer observation in this session replaced this snapshot; act on the latest snapshotId or observe again.',
+        consumed: 'An earlier action already used this snapshot; observe again, or pass observe to act, before the next action.',
+        expired: 'This snapshot expired after 30 seconds; observe again before acting.',
+        closed: 'The session that owned this snapshot was closed; open a session and observe again.',
+      };
+      return new CuError('stale_snapshot', messages[retired.reason]);
+    }
+    return new CuError('stale_snapshot', 'Unknown snapshot; observe this target again before acting.');
   }
   private authorization(client: Client): Authorization {
     return {
@@ -309,7 +345,11 @@ export class Runtime implements RpcService {
     if (!session) return;
     this.sessions.delete(id);
     this.releaseControl(session.target);
-    for (const [key, value] of this.snapshots) if (value.sessionId === id) this.snapshots.delete(key);
+    for (const [key, value] of this.snapshots)
+      if (value.sessionId === id) {
+        this.snapshots.delete(key);
+        this.retire(key, id, 'closed');
+      }
     for (const [requestId, work] of this.work)
       if (work.sessionId === id) {
         work.controller.abort();
@@ -503,7 +543,11 @@ export class Runtime implements RpcService {
     if (!client) throw new CuError('unauthorized', 'Client revoked during observation.');
     this.getSession(client, session.id);
     // Keep one snapshot per session to bound memory and make stale references explicit.
-    for (const [id, snap] of this.snapshots) if (snap.sessionId === session.id) this.snapshots.delete(id);
+    for (const [id, snap] of this.snapshots)
+      if (snap.sessionId === session.id) {
+        this.snapshots.delete(id);
+        this.retire(id, session.id, 'replaced');
+      }
     // 后端没按要求给出截图时同样视为没有像素，而不是把残缺的几何交给客户端。
     const pixels = options.elementsOnly !== true && hasPixels(observation);
     const snapshot: Snapshot = {
@@ -635,7 +679,7 @@ export class Runtime implements RpcService {
     if (this.work.size >= 32) throw new CuError('busy', 'Action queue is full.');
     const snapshot = this.snapshots.get(p.snapshotId);
     if (!snapshot || snapshot.sessionId !== session.id || this.now() - snapshot.createdAt > SNAPSHOT_TTL)
-      throw new CuError('stale_snapshot', 'Observe this target again before acting.');
+      throw this.staleSnapshot(p.snapshotId, snapshot, session.id);
     const action = p.action;
     const points = action.type === 'drag' ? action.path : 'point' in action && action.point ? [action.point] : [];
     if (!snapshot.pixels && (action.type === 'scroll' || points.length > 0))
@@ -674,6 +718,7 @@ export class Runtime implements RpcService {
     this.actions.records.set(record.requestId, record);
     // Consume immediately: two queued actions cannot both rely on one pre-action snapshot.
     this.snapshots.delete(p.snapshotId);
+    this.retire(p.snapshotId, session.id, 'consumed');
     const controller = new AbortController();
     const work: Work = {
       controller,
@@ -701,10 +746,9 @@ export class Runtime implements RpcService {
         this.getSession(client, session.id);
         this.checkLease(session);
         const backend = this.backend(session.target.kind);
-        if (
-          this.now() - snapshot.createdAt > SNAPSHOT_TTL ||
-          !(await bounded(backend.validate(snapshot.observation), Math.min(VALIDATE_MS, p.timeoutMs), controller.signal))
-        )
+        if (this.now() - snapshot.createdAt > SNAPSHOT_TTL)
+          throw new CuError('stale_snapshot', 'The snapshot expired while the action waited in the queue; observe again.');
+        if (!(await bounded(backend.validate(snapshot.observation), Math.min(VALIDATE_MS, p.timeoutMs), controller.signal)))
           throw new CuError('stale_snapshot', 'Target changed; observe it again.');
         record.state = 'running';
         await this.persistActions();
