@@ -42,6 +42,7 @@ internal static class Program
         var screenshots = args.Length == 2 && args[0] == "--screenshots" ? args[1] : null;
         CheckTranslations();
         CheckHelpers();
+        CheckNativeHelpers();
         CheckPackageCommand();
         CheckStandardHandleInheritance();
         CheckStartupState();
@@ -730,6 +731,41 @@ internal static class Program
                 Check(HostRuntime.Commands.Last() == "pair_allow:browser-only" && HostRuntime.AllAppsAcknowledgments.Last() is null,
                     "legacy limited-scope approval does not send an all-app acknowledgment");
                 Finish(host, "browser-only", false);
+
+                // Agent 发起的全应用授权：按请求标识撤回，显示短标识和现有范围，默认拒绝，批准沿用 grant_all_apps。
+                var grantId = Guid.NewGuid().ToString();
+                object Grant(string requestId) => new
+                {
+                    @event = "grant_request", requestId, clientId = "c1d2e3f4-0000-4000-8000-000000000001", name = "Scoped agent",
+                    appIds = new[] { @"win32:c:\apps\fixture.exe" }, browser = false
+                };
+                Event(host, Grant(grantId));
+                dialog = Dialog(host)!;
+                text = dialog.ExplanationText;
+                Check(dialog.RequestId == grantId && text.Contains("c1d2e3f4") && !text.Contains("c1d2e3f4-0000")
+                    && text.Contains(@"c:\apps\fixture.exe") && !text.Contains("win32:")
+                    && text.Contains(L10n.T(Msg.ApprovalGrantOrigin)) && text.Contains(L10n.T(Msg.ApprovalAllAppsDetail)),
+                    "agent grant request shows the short client ID, the current paths and that the agent asked");
+                Check(dialog.AcceptButton == dialog.DenyButton && dialog.CancelButton == dialog.DenyButton, "agent grant request defaults to denial");
+                CheckApprovalLayout(dialog, language ? "zh-grant-request" : "en-grant-request");
+                ClickAllow(host);
+                Check(HostRuntime.Commands.Last() == "grant_all_apps:c1d2e3f4-0000-4000-8000-000000000001"
+                    && HostRuntime.RequestIds.Last() == grantId && Status(host) == L10n.T(Msg.StatusDecisionSent),
+                    "approving an agent grant request sends the correlated grant command and waits for confirmation");
+                Finish(host, grantId, true);
+                Check(Status(host) == L10n.T(Msg.StatusApproved), "runtime confirmation completes the agent grant request");
+                var denied = Guid.NewGuid().ToString();
+                Event(host, Grant(denied));
+                Dialog(host)!.Close();
+                Pump();
+                Check(HostRuntime.Commands.Last() == "grant_deny:c1d2e3f4-0000-4000-8000-000000000001" && HostRuntime.RequestIds.Last() == denied,
+                    "closing an agent grant request denies it");
+                Finish(host, denied, false);
+                var expired = Guid.NewGuid().ToString();
+                var sent = HostRuntime.Commands.Count;
+                Event(host, Grant(expired));
+                Finish(host, expired, false);
+                Check(Dialog(host) is null && HostRuntime.Commands.Count == sent, "an expired agent grant request is withdrawn without a decision");
             }
         }
         finally { L10n.Chinese = chinese; }
@@ -764,15 +800,17 @@ internal static class Program
         };
         Event(host, new { @event = "clients", clients });
         var items = window.ClientList.Items.Cast<ListViewItem>().ToArray();
-        Check(items.Length == 4 && window.ClientList.Columns.Count == 4, "client list shows every paired client with the four scope columns");
-        Check(items[0].SubItems[1].Text == @"c:\apps\fixture&tool.exe" && items[0].SubItems[3].Text == L10n.T(Msg.ClientsYes),
+        Check(items.Length == 4 && window.ClientList.Columns.Count == 5, "client list shows every paired client with its ID and the four scope columns");
+        Check(items.Select(item => item.SubItems[1].Text).SequenceEqual(new[] { "a", "b", "c", "d" }),
+            "the ID column shows the same short ID the agent sees");
+        Check(items[0].SubItems[2].Text == @"c:\apps\fixture&tool.exe" && items[0].SubItems[4].Text == L10n.T(Msg.ClientsYes),
             "client list shows the authorized paths without the internal prefix");
-        Check(items[1].SubItems[1].Text == L10n.T(Msg.ClientsNo), "older runtimes without grant fields still list the client");
+        Check(items[1].SubItems[2].Text == L10n.T(Msg.ClientsNo), "older runtimes without grant fields still list the client");
         Check(host.Clients.Select(client => client.AllApps).SequenceEqual(new[] { false, false, true, false }),
             "only an explicit allApps grant is parsed as all desktop apps");
-        Check(items[2].SubItems[1].Text == L10n.T(Msg.ClientsAllApps) && items[2].SubItems[2].Text == L10n.T(Msg.ClientsNo),
+        Check(items[2].SubItems[2].Text == L10n.T(Msg.ClientsAllApps) && items[2].SubItems[3].Text == L10n.T(Msg.ClientsNo),
             "client list shows all desktop apps without granting browser access");
-        Check(items[3].SubItems[1].Text == L10n.T(Msg.ClientsNo) && items[3].SubItems[2].Text == L10n.T(Msg.ClientsYes),
+        Check(items[3].SubItems[2].Text == L10n.T(Msg.ClientsNo) && items[3].SubItems[3].Text == L10n.T(Msg.ClientsYes),
             "browser-only clients still have no desktop apps");
         items[0].Selected = true;
         Pump();
@@ -784,7 +822,7 @@ internal static class Program
         Check(revoke.Enabled, "selecting one client enables revocation");
         clients[2] = new { id = "c", name = "All apps", appIds = Array.Empty<string>(), allApps = false, browser = false, foreground = true };
         Event(host, new { @event = "clients", clients });
-        Check(window.ClientList.Items[2].SubItems[1].Text == L10n.T(Msg.ClientsNo), "scope-only changes refresh the client list");
+        Check(window.ClientList.Items[2].SubItems[2].Text == L10n.T(Msg.ClientsNo), "scope-only changes refresh the client list");
         Check(window.ClientList.SelectedItems.Count == 1 && (string?)window.ClientList.SelectedItems[0].Tag == "c" && revoke.Enabled,
             "scope refresh preserves the selected client identity");
         Event(host, new { @event = "clients", clients = clients.Where((_, index) => index != 2).ToArray() });
@@ -1146,6 +1184,89 @@ internal static class Program
         }
         Check(L10n.Zh.Count == Enum.GetValues<Msg>().Length && L10n.En.Count == L10n.Zh.Count, "no stray translations");
         Console.WriteLine("PASS: Windows translations");
+    }
+
+    /// <summary>内存剪贴板：模拟被占用、写入失败和期间被别人改写。不接触真实剪贴板。</summary>
+    private sealed class FakeClipboard : NativeHelpers.IClipboardStore
+    {
+        // 记录相等比较数组引用：所有实例共用同一组原始条目，恢复后可以直接逐项比较。
+        internal static readonly IReadOnlyList<NativeHelpers.ClipboardEntry> Initial =
+            [new(13, "user text"u8.ToArray(), false), new(8, [1, 2, 3], false)];
+        internal List<NativeHelpers.ClipboardEntry> Contents = Initial.ToList();
+        internal bool Busy, FailWrite;
+        internal int Reads, Restores;
+        public uint Sequence { get; set; } = 1;
+        public (List<NativeHelpers.ClipboardEntry> Entries, bool Complete)? Read()
+        {
+            Reads++;
+            return Busy ? null : (Contents.ToList(), true);
+        }
+        public uint? Write(string text)
+        {
+            Sequence++;
+            Contents = FailWrite ? [] : [new(13, System.Text.Encoding.Unicode.GetBytes(text), false)];
+            return FailWrite ? null : Sequence;
+        }
+        public bool Restore(IReadOnlyList<NativeHelpers.ClipboardEntry> entries)
+        {
+            Restores++;
+            Sequence++;
+            Contents = entries.ToList();
+            return true;
+        }
+    }
+
+    private static void CheckNativeHelpers()
+    {
+        Check(NativeHelpers.JoinWords(new[] { "你", "好", "ls", "-la", "世界" }) == "你好 ls -la 世界",
+            "recognized CJK characters are joined without spaces while other words keep them");
+        var english = new NativeHelpers.RecognizedLine[] { new("% ls -la", 10, 10, 400, 20), new("1$] Ш#", 10, 50, 400, 20), new("drwxr-xr-x", 10, 92, 120, 18) };
+        var profile = new NativeHelpers.RecognizedLine[] { new("% 1s -1a", 10, 10, 400, 20), new("你好，世界", 10, 50, 400, 20),
+            new("5 kouzen", 160, 84, 200, 32), new("标题", 600, 300, 100, 20) };
+        Check(NativeHelpers.Merge(english, profile).Select(line => line.Text).SequenceEqual(new[] { "% ls -la", "你好，世界", "drwxr-xr-x", "标题" }),
+            "two-pass recognition keeps English results except where the user's language read non-ASCII letters");
+        Check(NativeHelpers.Ordered(new NativeHelpers.RecognizedLine[] { new("5 kouzen", 160, 84, 200, 32), new("drwxr-xr-x", 10, 92, 120, 18) })
+            .Select(line => line.Text).SequenceEqual(new[] { "drwxr-xr-x", "5 kouzen" }), "segments of one visual row read left to right");
+        var original = FakeClipboard.Initial;
+        var board = new FakeClipboard();
+        var slept = new List<int>();
+        var session = new NativeHelpers.ClipboardSession(board, slept.Add);
+        Check(session.Handle("""{"op":"stage","text":"echo 你好","restore":true}""") == """{"ok":true,"complete":true}""", "stage saves and writes");
+        Check(session.Handle("""{"op":"finish","delayMs":800}""") == """{"ok":true,"restored":true}""" && slept.SequenceEqual(new[] { 800 }),
+            "finish waits, then restores");
+        Check(board.Contents.SequenceEqual(original), "every saved format is restored");
+        session.EndOfInput();
+        Check(board.Restores == 1, "closing after finish does not restore twice");
+
+        board = new FakeClipboard();
+        session = new NativeHelpers.ClipboardSession(board, _ => board.Sequence++);
+        session.Handle("""{"op":"stage","text":"ls"}""");
+        Check(session.Handle("""{"op":"finish","delayMs":800}""") == """{"ok":true,"restored":false}""" && board.Restores == 0,
+            "a clipboard the user changed meanwhile is kept");
+
+        board = new FakeClipboard { Busy = true };
+        session = new NativeHelpers.ClipboardSession(board, _ => { });
+        Check(session.Handle("""{"op":"stage","text":"ls","restore":false}""") == """{"ok":true,"complete":true}""" && board.Reads == 0,
+            "restoreClipboard false never reads the clipboard");
+        board = new FakeClipboard { Busy = true };
+        session = new NativeHelpers.ClipboardSession(board, _ => { });
+        Check(session.Handle("""{"op":"stage","text":"ls"}""") == """{"ok":false,"code":"busy"}""" && board.Contents.SequenceEqual(original),
+            "an unavailable clipboard is reported and left untouched");
+        board = new FakeClipboard { FailWrite = true };
+        session = new NativeHelpers.ClipboardSession(board, _ => { });
+        Check(session.Handle("""{"op":"stage","text":"ls"}""") == """{"ok":false,"code":"write_failed"}""" && board.Contents.SequenceEqual(original),
+            "a failed write puts the saved clipboard back");
+
+        board = new FakeClipboard();
+        session = new NativeHelpers.ClipboardSession(board, _ => throw new Exception("cancellation must not wait"));
+        session.Handle("""{"op":"stage","text":"ls"}""");
+        session.EndOfInput();
+        Check(board.Contents.SequenceEqual(original) && session.Finished && session.Handle("""{"op":"finish"}""") is null,
+            "end of input restores immediately and ends the session");
+        session = new NativeHelpers.ClipboardSession(new FakeClipboard(), _ => { });
+        foreach (var invalid in new[] { "not json", """{"op":"finish"}""", """{"op":"stage","text":""}""", """{"op":"read"}""", "[]" })
+            Check(session.Handle(invalid) is null, $"invalid helper request is rejected: {invalid}");
+        Console.WriteLine("PASS: native helper protocol and clipboard session");
     }
 
     private static void CheckHelpers()

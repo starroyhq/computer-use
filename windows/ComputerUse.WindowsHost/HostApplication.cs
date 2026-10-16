@@ -268,7 +268,8 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 break;
             case "pair_request":
             case "foreground_request":
-                _pendingDecisions.Add(String(message, String(message, "event") == "pair_request" ? "clientId" : "sessionId"));
+            case "grant_request":
+                _pendingDecisions.Add(RequestKey(message));
                 _alerts.Enqueue(message);
                 PresentNextAlert();
                 break;
@@ -304,21 +305,47 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
         return result;
     }
 
+    /// <summary>decision_finished 用来标识请求的字段：配对用客户端标识，前台用会话标识，全应用授权请求用请求标识。</summary>
+    private static string RequestKey(JsonElement request) => String(request, String(request, "event") switch
+    {
+        "pair_request" => "clientId",
+        "grant_request" => "requestId",
+        _ => "sessionId",
+    });
+
+    /// <summary>与客户端页和 Agent 看到的 shortId 相同：客户端标识的前 8 位。不是凭据。</summary>
+    internal static string ShortId(string clientId) => clientId.Length <= 8 ? clientId : clientId[..8];
+
     private void PresentNextAlert()
     {
         if (_approvalDialog is not null || _runtime is null || !_running) return;
         // Requests can expire while another dialog is being displayed.
-        while (_alerts.TryPeek(out var queued) && !_pendingDecisions.Contains(String(queued,
-            String(queued, "event") == "pair_request" ? "clientId" : "sessionId"))) _alerts.Dequeue();
+        while (_alerts.TryPeek(out var queued) && !_pendingDecisions.Contains(RequestKey(queued))) _alerts.Dequeue();
         if (_alerts.Count == 0) return;
         var request = _alerts.Dequeue();
         var source = _runtime;
         var kind = String(request, "event");
         var isPair = kind == "pair_request";
-        var identifier = String(request, isPair ? "clientId" : "sessionId");
-        if (identifier.Length == 0) { _ = FailAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
+        var isGrant = kind == "grant_request";
+        var identifier = RequestKey(request);
+        var grantClient = String(request, "clientId");
+        if (identifier.Length == 0 || (isGrant && grantClient.Length == 0)) { _ = FailAsync(L10n.T(Msg.StatusMissingIdentifier)); return; }
         ApprovalDetails details;
-        if (isPair)
+        if (isGrant)
+        {
+            // Agent 发起的升级：显示与客户端页一致的短标识、现有范围和申请的范围，默认拒绝。
+            var paths = request.TryGetProperty("appIds", out var current) && current.ValueKind == JsonValueKind.Array
+                ? current.EnumerateArray().Select(value => SettingsForm.DisplayAppId(value.GetString() ?? "")).ToArray() : Array.Empty<string>();
+            details = new ApprovalDetails(L10n.T(Msg.ApprovalGrantTitle), String(request, "name"),
+                L10n.T(Msg.ApprovalClientId), ShortId(grantClient), new[]
+                {
+                    new ApprovalSection(L10n.T(Msg.ApprovalGrantCurrent), paths.Length == 0 ? L10n.T(Msg.ApprovalNone) : string.Join("\n", paths)),
+                    new ApprovalSection(L10n.T(Msg.ApprovalDesktopScope), L10n.T(Msg.ClientsAllApps), L10n.T(Msg.ApprovalAllAppsDetail)),
+                    new ApprovalSection(L10n.T(Msg.ApprovalForeground), L10n.T(Msg.ApprovalForegroundAllowed)),
+                    new ApprovalSection(L10n.T(Msg.ApprovalBehavior), L10n.T(Msg.ApprovalGrantOrigin)),
+                });
+        }
+        else if (isPair)
         {
             // 全应用权限单独说明；受限授权列出全部路径，由授权窗口换行和滚动展示。
             var allApps = Flag(request, "allApps");
@@ -357,10 +384,14 @@ internal sealed class HostApplication : ApplicationContext, ISettingsHost
                 SetStatus(L10n.T(Msg.StatusDecisionSent));
                 try
                 {
-                    // 明确确认已展示全应用范围；旧宿主不会发送此字段，运行时据此拒绝扩权。
-                    await source.SendControlAsync(isPair ? (allow ? "pair_allow" : "pair_deny") : (allow ? "foreground_allow" : "foreground_deny"),
-                        clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier,
-                        allApps: isPair && allow && Flag(request, "allApps") ? true : null);
+                    if (isGrant)
+                        // 批准沿用客户端页的 grant_all_apps；requestId 让运行时把结果交回发起请求的 Agent。
+                        await source.SendControlAsync(allow ? "grant_all_apps" : "grant_deny", clientId: grantClient, requestId: identifier);
+                    else
+                        // 明确确认已展示全应用范围；旧宿主不会发送此字段，运行时据此拒绝扩权。
+                        await source.SendControlAsync(isPair ? (allow ? "pair_allow" : "pair_deny") : (allow ? "foreground_allow" : "foreground_deny"),
+                            clientId: isPair ? identifier : null, sessionId: isPair ? null : identifier,
+                            allApps: isPair && allow && Flag(request, "allApps") ? true : null);
                 }
                 catch { if (ReferenceEquals(_runtime, source)) await FailAsync(L10n.T(Msg.StatusSendDecisionFailed)); }
             }

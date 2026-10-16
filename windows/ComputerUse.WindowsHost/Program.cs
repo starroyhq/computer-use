@@ -23,6 +23,10 @@ internal static class Program
             PrintProcessPaths(args[1]);
             return 0;
         }
+        // 运行时调用的辅助模式：截图文字识别、粘贴时的剪贴板会话、用户最近一次输入距今的时间。
+        if (args.Length == 1 && args[0] == NativeHelpers.RecognizeArgument) return NativeHelpers.RecognizeText();
+        if (args.Length == 1 && args[0] == NativeHelpers.PasteArgument) return NativeHelpers.PasteSession();
+        if (args.Length == 1 && args[0] == NativeHelpers.IdleArgument) return NativeHelpers.InputIdle();
         // 安装与卸载程序用：请当前会话里正在运行的托盘程序停止服务后退出，并等它退出。
         if (args.Length == 1 && args[0] == QuitArgument) return QuitRunningInstance();
         if (args.Length == 1 && args[0] is HostStartup.EnsureArgument or HostStartup.RecoverArgument)

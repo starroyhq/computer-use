@@ -77,6 +77,9 @@ internal sealed class HostRuntime : IAsyncDisposable
             await _process.StandardInput.WriteLineAsync("computer-use-start");
             await _process.StandardInput.FlushAsync();
             await _ready.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            // 先声明本宿主能显示的新审批弹窗，再开放命名管道：运行时只向声明过的宿主发送这些事件，
+            // 而 Agent 的请求都经由这个管道，所以第一条请求到达前运行时已经知道。
+            await SendControlAsync("host_features", features: Features);
             _listener = AcceptConnectionsAsync(_pipesCancellation.Token);
             PrivateData.WriteDiscovery(PipeName);
         }
@@ -124,13 +127,18 @@ internal sealed class HostRuntime : IAsyncDisposable
         }
     }
 
-    internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null, string? requestId = null)
+    /// <summary>本宿主支持、需要运行时知道的功能（Agent 发起的全应用授权请求）。</summary>
+    internal static readonly IReadOnlyList<string> Features = new[] { "grant_request" };
+
+    internal Task SendControlAsync(string command, string? clientId = null, string? sessionId = null, bool? allApps = null, string? requestId = null,
+        IReadOnlyList<string>? features = null)
     {
         var message = new Dictionary<string, object> { ["command"] = command };
         if (clientId is not null) message["clientId"] = clientId;
         if (sessionId is not null) message["sessionId"] = sessionId;
         if (allApps is not null) message["allApps"] = allApps.Value;
         if (requestId is not null) message["requestId"] = requestId;
+        if (features is not null) message["features"] = features;
         return WriteWorkerAsync(JsonSerializer.Serialize(message));
     }
 

@@ -22,5 +22,6 @@
     <Compile Include="../../../windows/ComputerUse.WindowsHost/PrivateData.cs" Link="PrivateData.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostStartup.cs" Link="HostStartup.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/RuntimeProcessGroup.cs" Link="RuntimeProcessGroup.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/NativeHelpers.cs" Link="NativeHelpers.cs" />
   </ItemGroup>
 </Project>

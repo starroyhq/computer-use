@@ -331,7 +331,8 @@ internal sealed class SettingsForm : Form
 
     private Control BuildClients()
     {
-        foreach (var (title, share) in new[] { (Msg.ClientsName, 0.24), (Msg.ClientsApps, 0.34), (Msg.ClientsBrowser, 0.21), (Msg.ClientsForeground, 0.21) })
+        // 标识列是客户端标识的前 8 位，与 Agent 在 preflight/doctor 里看到的 shortId 相同，用来区分同名客户端。
+        foreach (var (title, share) in new[] { (Msg.ClientsName, 0.20), (Msg.ClientsId, 0.15), (Msg.ClientsApps, 0.29), (Msg.ClientsBrowser, 0.17), (Msg.ClientsForeground, 0.19) })
             _clients.Columns.Add(new ColumnHeader { Text = L10n.T(title), Tag = share });
         _clients.HandleCreated += (_, _) => FitColumns();
         _clients.Resize += (_, _) => FitColumns();
@@ -610,7 +611,7 @@ internal sealed class SettingsForm : Form
             {
                 var apps = client.AllApps ? L10n.T(Msg.ClientsAllApps)
                     : client.AppIds.Count == 0 ? L10n.T(Msg.ClientsNo) : string.Join("; ", client.AppIds.Select(DisplayAppId));
-                var item = new ListViewItem(new[] { client.Name, apps, Mark(client.Browser), Mark(client.Foreground) })
+                var item = new ListViewItem(new[] { client.Name, HostApplication.ShortId(client.Id), apps, Mark(client.Browser), Mark(client.Foreground) })
                 {
                     Tag = client.Id, ToolTipText = apps
                 };
