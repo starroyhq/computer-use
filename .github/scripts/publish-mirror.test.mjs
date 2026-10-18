@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { compareVersions, mirrorBase, platforms, prepareMirror, releaseNames, validateManifest } from './release-manifest.mjs';
-import { promoteMirror, uploadMirror, verifyGitHubRelease, verifyPublicAsset } from './publish-mirror.mjs';
+import { createCosStore, promoteMirror, uploadMirror, verifyGitHubRelease, verifyPublicAsset, verifyUpload } from './publish-mirror.mjs';
 import { inspectRelease, runReleaseCommand, verifyReleaseAssets } from './verify-release.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -39,7 +39,16 @@ test('COS CLI reports progress and propagates network failures without exposing 
         if (!this.objects.has(Key)) throw Object.assign(new Error('not found'), { statusCode: 404 });
         return { Body: this.objects.get(Key) };
       }
-      async putObject({ Key, Body }) { this.fail('PUT'); this.objects.set(Key, Body); }
+      putObject({ Key, Body, onTaskReady }, callback) {
+        onTaskReady('fixture-task');
+        (async () => {
+          this.fail('PUT');
+          const chunks = [];
+          for await (const chunk of Body) chunks.push(chunk);
+          this.objects.set(Key, Buffer.concat(chunks));
+        })().then(() => callback(null, {}), callback);
+      }
+      cancelTask() {}
     };
   `);
   for (const [operation, code] of [['', ''], ['GET', 'ESOCKETTIMEDOUT'], ['PUT', 'ECONNRESET'], ['GET', 'private-test-secret']]) {
@@ -63,6 +72,103 @@ test('COS CLI reports progress and propagates network failures without exposing 
       assert.match(output, /upload: v0.7.1 verified\./);
     }
   }
+});
+
+function transportFixture({ put, get } = {}) {
+  const objects = new Map();
+  const streams = [];
+  const events = [];
+  const logs = [];
+  const client = {
+    async getObject({ Key }) {
+      events.push(`GET ${Key}`);
+      if (get) await get(Key, objects);
+      if (!objects.has(Key)) throw Object.assign(new Error('not found'), { statusCode: 404 });
+      return { Body: objects.get(Key) };
+    },
+    putObject(params, callback) {
+      streams.push(params.Body);
+      events.push(`PUT ${params.Key}`);
+      params.onTaskReady(`task-${streams.length}`);
+      (async () => {
+        const chunks = [];
+        for await (const chunk of params.Body) chunks.push(chunk);
+        const bytes = Buffer.concat(chunks);
+        if (put) await put(params.Key, bytes, streams.length, objects);
+        else objects.set(params.Key, bytes);
+      })().then(() => callback(null, {}), callback);
+    },
+    cancelTask() {},
+  };
+  const storage = createCosStore(client, { log: value => logs.push(value), wait: async () => {} });
+  return { storage, objects, streams, events, logs };
+}
+
+test('transient PUT retries use fresh byte streams only after an authenticated missing-object check', async () => {
+  const key = 'computer-use/releases/v0.7.1/fixture.zip';
+  const expected = Buffer.alloc(200_000, 71);
+  const f = transportFixture({ put(target, bytes, attempt, objects) {
+    assert.deepEqual(bytes, expected);
+    if (attempt < 3) throw Object.assign(new Error('private signed request'), { code: 'ECONNRESET' });
+    objects.set(target, bytes);
+  } });
+  await f.storage.put(key, expected, 'immutable');
+  assert.deepEqual(f.events, [`PUT ${key}`, `GET ${key}`, `PUT ${key}`, `GET ${key}`, `PUT ${key}`]);
+  assert.equal(new Set(f.streams).size, 3);
+  assert.ok(f.streams.every(stream => stream.destroyed));
+  assert.deepEqual(f.objects.get(key), expected);
+  assert.doesNotMatch(f.logs.join('\n'), /private signed request/);
+});
+
+test('a committed PUT with a lost response is verified instead of replayed', async () => {
+  const key = 'computer-use/releases/v0.7.1/fixture.zip';
+  const expected = Buffer.from('complete bytes');
+  const f = transportFixture({ put(target, bytes, _attempt, objects) {
+    objects.set(target, bytes);
+    throw Object.assign(new Error('lost response'), { code: 'ESOCKETTIMEDOUT' });
+  } });
+  await f.storage.put(key, expected, 'immutable');
+  assert.deepEqual(f.events, [`PUT ${key}`, `GET ${key}`]);
+});
+
+for (const mode of ['different bytes', 'read denied', 'write denied', 'cancelled', 'index']) {
+  test(`PUT ${mode} does not trigger another write`, async () => {
+    const key = mode === 'index' ? latestKey : 'computer-use/releases/v0.7.1/fixture.zip';
+    const f = transportFixture({
+      put(target, _bytes, _attempt, objects) {
+        if (mode === 'different bytes') objects.set(target, Buffer.from('conflict'));
+        throw Object.assign(new Error('private signed request'), mode === 'write denied' ? { statusCode: 403 } :
+          { code: mode === 'cancelled' ? 'UPLOAD_ABORTED' : 'ECONNRESET' });
+      },
+      get() { if (mode === 'read denied') throw Object.assign(new Error('private signed request'), { statusCode: 403 }); },
+    });
+    await assert.rejects(f.storage.put(key, Buffer.from('verified bytes'), 'cache'), /Refusing to overwrite|COS (read|upload) failed/);
+    assert.equal(f.streams.length, 1);
+    assert.doesNotMatch(f.logs.join('\n'), /private signed request/);
+  });
+}
+
+test('real-upload verification uses the largest published asset in a separate unique prefix and never changes latest', async t => {
+  const f = await fixture(t);
+  const manifest = await f.prepare();
+  const storage = store();
+  const checks = [];
+  await verifyUpload(f.output, '12345-1', storage,
+    async value => checks.push(value.tag),
+    async (url, asset) => {
+      assert.equal(asset.bytes, Math.max(...manifest.assets.map(item => item.bytes)));
+      assert.equal(url, `${mirrorBase}/verification/uploads/12345-1/${asset.name}`);
+      checks.push(asset.name);
+    });
+  assert.equal(checks[0], manifest.tag);
+  const writes = storage.events.filter(event => event.type === 'put');
+  assert.equal(writes.length, 1);
+  assert.match(writes[0].key, /^computer-use\/verification\/uploads\/12345-1\//);
+  assert.ok(!storage.objects.has(latestKey));
+  await assert.rejects(verifyUpload(f.output, '12345-1', storage, async () => {}, async () => {}), /already exists/);
+  await assert.rejects(verifyUpload(f.output, '../releases', storage, async () => {}, async () => {}), /run ID/);
+  await assert.rejects(verifyUpload(f.output, '12345-2', storage, async () => { throw new Error('draft'); }, async () => {}), /draft/);
+  assert.equal(storage.events.filter(event => event.type === 'put').length, 1);
 });
 
 async function fixture(t, version = '0.7.1') {

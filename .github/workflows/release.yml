@@ -17,10 +17,16 @@ on:
         description: Original publishing run holding verified-release-assets (only for recovering a partial draft)
         required: false
         type: string
+      verify_mirror_upload:
+        description: Verify a real large COS upload even when this release is already mirrored
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: official-release-publish
   cancel-in-progress: false
+  queue: max
 
 jobs:
   source:
@@ -50,7 +56,7 @@ jobs:
         with:
           node-version: 24.21.0
       - name: Test release artifact preparation
-        run: node --test .github/scripts/prepare-release.test.mjs .github/scripts/publish-mirror.test.mjs .github/scripts/select-release-ci.test.mjs
+        run: node --test .github/scripts/prepare-release.test.mjs .github/scripts/publish-mirror.test.mjs .github/scripts/cos-upload.test.mjs .github/scripts/select-release-ci.test.mjs .github/scripts/release-mirror-trigger.test.mjs
       - name: Require a successful CI run for this tag
         id: source
         shell: bash
@@ -239,3 +245,27 @@ jobs:
         run: |
           set -euo pipefail
           node .github/scripts/verify-release.mjs publish "$RELEASE_TAG"
+
+  dispatch_mirror:
+    name: Queue the published release mirror
+    needs: [source, publish]
+    if: always() && needs.source.result == 'success' && needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v${{ needs.source.outputs.version }}
+      VERIFY_UPLOAD: ${{ inputs.verify_mirror_upload && 'true' || 'false' }}
+    steps:
+      # GITHUB_TOKEN release events do not trigger another workflow. Explicit dispatch does.
+      # Do not wait: the mirror needs this workflow's official-release-publish lock.
+      - name: Dispatch the exact published tag without waiting
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo 'Invalid release tag'; exit 1; }
+          [[ "$VERIFY_UPLOAD" == true || "$VERIFY_UPLOAD" == false ]] || { echo 'Invalid upload verification flag'; exit 1; }
+          gh workflow run mirror-release.yml --repo "$GITHUB_REPOSITORY" --ref main -f "tag=$RELEASE_TAG" -f "verify_upload=$VERIFY_UPLOAD"
+          printf 'Queued Mirror published Release for %s. Follow its separate Actions run for upload and verification.\n' "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

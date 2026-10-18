@@ -3,6 +3,8 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+import { uploadOnce } from './cos-upload.mjs';
 import { compareVersions, mirrorBase, validateManifest } from './release-manifest.mjs';
 import { githubReleases, inspectRelease } from './verify-release.mjs';
 
@@ -57,7 +59,8 @@ export async function promoteMirror(directory, store, verifyPublished, verifyPub
   return manifest;
 }
 export async function verifyPublicAsset(url, asset) {
-  if (!url.startsWith(`${mirrorBase}/releases/`)) throw new Error('Unexpected public mirror path.');
+  if (!url.startsWith(`${mirrorBase}/releases/`) && !url.startsWith(`${mirrorBase}/verification/uploads/`))
+    throw new Error('Unexpected public mirror path.');
   const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20 * 60_000) });
   if (!response.ok || !response.body) throw new Error(`Public mirror read failed: HTTP ${response.status}`);
   let bytes = 0;
@@ -84,31 +87,43 @@ export async function verifyGitHubRelease(manifest, { list = githubReleases, res
       throw new Error(`GitHub release asset mismatch: ${asset.name}`);
   }
 }
-function cosStore() {
-  if (!process.env.COS_SECRET_ID || !process.env.COS_SECRET_KEY || !process.env.COS_SDK_DIRECTORY)
-    throw new Error('Missing COS publishing secrets or SDK directory.');
-  // CI-only official SDK; no cloud SDK or credentials are bundled in the App or npm launcher.
-  const require = createRequire(join(resolve(process.env.COS_SDK_DIRECTORY), 'package.json'));
-  const COS = require('cos-nodejs-sdk-v5');
-  // This is a connection/socket idle timeout, not a limit on a progressing large transfer.
-  // The pinned SDK retries network failures itself; MaxRetryTimes is not a supported option.
-  const client = new COS({ SecretId: process.env.COS_SECRET_ID, SecretKey: process.env.COS_SECRET_KEY,
-    ...(process.env.COS_SECURITY_TOKEN ? { SecurityToken: process.env.COS_SECURITY_TOKEN } : {}),
-    Protocol: 'https:', Timeout: 60_000 });
+// Existing release objects are deliberately skipped. An explicit operator check
+// uses one unique key containing public release bytes, never overwrites a release.
+export async function verifyUpload(directory, probeId, store, verifyPublished, verifyPublic) {
+  if (!/^[1-9][0-9]{0,19}-[1-9][0-9]{0,5}$/.test(probeId ?? '')) throw new Error('Invalid upload verification run ID.');
+  const manifest = validateManifest(JSON.parse(await readFile(join(directory, 'manifest.json'))));
+  await verifyPublished(manifest);
+  const asset = manifest.assets.reduce((largest, item) => item.bytes > largest.bytes ? item : largest);
+  const bytes = await readFile(join(directory, asset.name));
+  if (bytes.length !== asset.bytes || sha256(bytes) !== asset.sha256) throw new Error('Upload verification source changed.');
+  const key = `${prefix}/verification/uploads/${probeId}/${asset.name}`;
+  if (await store.get(key)) throw new Error('Upload verification key already exists; use a new workflow attempt.');
+  await store.put(key, bytes, 'public, max-age=31536000, immutable');
+  const uploaded = await store.get(key);
+  if (!uploaded || uploaded.length !== asset.bytes || sha256(uploaded) !== asset.sha256)
+    throw new Error('Upload verification readback failed.');
+  await verifyPublic(`${mirrorBase}/verification/uploads/${probeId}/${asset.name}`, asset);
+  console.log(`Upload verification retained public release bytes at ${key}; ${asset.bytes} bytes, SHA-256 ${asset.sha256}.`);
+  return manifest;
+}
+
+const retryable = error => [408, 429, 500, 502, 503, 504].includes(error.statusCode) ||
+  ['ESOCKETTIMEDOUT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN', 'UPLOAD_DEADLINE'].includes(error.code);
+const failure = error => {
+  // SDK errors may contain signed requests. Never log the raw error or its cause.
+  const status = Number.isInteger(error.statusCode) ? error.statusCode : 'unknown';
+  const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,48}$/.test(error.code) ? error.code : 'UNKNOWN';
+  return `HTTP ${status}, ${code}`;
+};
+
+export function createCosStore(client, { signal, timeoutMs, heartbeatMs, wait = delay, log = console.log } = {}) {
   const common = { Bucket: 'computer-use-download-1308799022', Region: 'ap-guangzhou' };
   const progress = (method, key) => {
     const started = Date.now();
-    console.log(`COS ${method} ${key}: started`);
-    return result => console.log(`COS ${method} ${key}: ${result} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
+    log(`COS ${method} ${key}: started`);
+    return result => log(`COS ${method} ${key}: ${result} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
   };
-  const failure = error => {
-    // SDK errors may contain signed requests. Only report bounded codes, never the raw error.
-    const status = Number.isInteger(error.statusCode) ? error.statusCode : 'unknown';
-    const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,48}$/.test(error.code) ? error.code : 'UNKNOWN';
-    return `HTTP ${status}, ${code}`;
-  };
-  console.log(`Mirror runtime: ${process.version} (${process.execPath})`);
-  return {
+  const storage = {
     async get(Key) {
       const report = progress('GET', Key);
       try {
@@ -123,34 +138,75 @@ function cosStore() {
     },
     async put(Key, Body, CacheControl) {
       const report = progress('PUT', Key);
-      let lastProgressAt = 0;
-      try {
-        await client.putObject({ ...common, Key, Body, ContentLength: Body.length, CacheControl,
-          ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream',
-          onProgress({ loaded, total }) {
-            const now = Date.now();
-            if (now - lastProgressAt >= 15_000 || loaded === total) {
-              report(`transferred ${loaded}/${total} bytes`);
-              lastProgressAt = now;
-            }
-          },
-        });
-        report(`${Body.length} bytes`);
-      } catch (error) {
-        report(`failed (${failure(error)})`);
-        throw new Error(`COS upload failed for ${Key} (${failure(error)}).`);
+      // Index writes can have an uncertain outcome. Do not replay them inside the
+      // transport: retrying the release must first recheck the monotonic index.
+      const attempts = Key === `${prefix}/latest.json` ? 1 : 3;
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        if (signal?.aborted) throw new Error('COS upload interrupted (UPLOAD_ABORTED).');
+        report(`attempt ${attempt}/${attempts}`);
+        try {
+          await uploadOnce(client, { ...common, Key, Body, ContentLength: Body.length, CacheControl,
+            ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+          }, { timeoutMs, heartbeatMs, signal, report });
+          report(`${Body.length} bytes`);
+          return;
+        } catch (error) {
+          report(`attempt ${attempt} failed (${failure(error)})`);
+          if (signal?.aborted || error.code === 'UPLOAD_ABORTED' || attempt === attempts || !retryable(error))
+            throw new Error(`COS upload failed for ${Key} (${failure(error)}).`);
+          // A timed-out PUT may already be committed. Only an authenticated 404
+          // permits another PUT; equal bytes are success, any other bytes stop.
+          const existing = await storage.get(Key);
+          if (signal?.aborted) throw new Error('COS upload interrupted (UPLOAD_ABORTED).');
+          if (existing) {
+            if (existing.length !== Body.length || sha256(existing) !== sha256(Body))
+              throw new Error(`Refusing to overwrite immutable release file after uncertain upload: ${Key}`);
+            report('confirmed committed bytes after uncertain upload');
+            return;
+          }
+          await wait(1000 * 2 ** (attempt - 1), undefined, { signal });
+        }
       }
     },
   };
+  return storage;
+}
+
+function cosStore(signal) {
+  if (!process.env.COS_SECRET_ID || !process.env.COS_SECRET_KEY || !process.env.COS_SDK_DIRECTORY)
+    throw new Error('Missing COS publishing secrets or SDK directory.');
+  // CI-only official SDK; no cloud SDK or credentials are bundled in the App or npm launcher.
+  const require = createRequire(join(resolve(process.env.COS_SDK_DIRECTORY), 'package.json'));
+  const COS = require('cos-nodejs-sdk-v5');
+  // Read operations retain SDK retries. Streamed PUTs have explicit retries and
+  // a cancellable total deadline in addition to this socket idle timeout.
+  const client = new COS({ SecretId: process.env.COS_SECRET_ID, SecretKey: process.env.COS_SECRET_KEY,
+    ...(process.env.COS_SECURITY_TOKEN ? { SecurityToken: process.env.COS_SECURITY_TOKEN } : {}),
+    Protocol: 'https:', Timeout: 60_000 });
+  console.log(`Mirror runtime: ${process.version} (${process.execPath})`);
+  return createCosStore(client, { signal });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, directory] = process.argv.slice(2);
-  if (!['upload', 'promote'].includes(command) || !directory || process.argv.length !== 4)
-    throw new Error('Usage: publish-mirror.mjs upload|promote DIRECTORY');
+  if (!['upload', 'promote', 'verify-upload'].includes(command) || !directory || process.argv.length !== 4)
+    throw new Error('Usage: publish-mirror.mjs upload|promote|verify-upload DIRECTORY');
+  const abort = new AbortController();
+  const interrupted = () => {
+    abort.abort();
+    console.error('Mirror interrupted. Retry the same release to check any uncertain writes.');
+    process.exit(130);
+  };
+  process.once('SIGINT', interrupted);
+  process.once('SIGTERM', interrupted);
   const run = async () => {
-    const store = cosStore();
-    const m = command === 'upload' ? await uploadMirror(directory, store) : await promoteMirror(directory, store, verifyGitHubRelease, verifyPublicAsset);
+    const store = cosStore(abort.signal);
+    const m = command === 'upload' ? await uploadMirror(directory, store) : command === 'promote'
+      ? await promoteMirror(directory, store, verifyGitHubRelease, verifyPublicAsset)
+      : await verifyUpload(directory, process.env.MIRROR_UPLOAD_PROBE_ID, store, verifyGitHubRelease, verifyPublicAsset);
     console.log(`${command}: ${m.tag} verified.`);
   };
-  run().catch(error => { console.error(error.message); process.exitCode = 1; });
+  run().catch(error => { console.error(error.message); process.exitCode = 1; }).finally(() => {
+    process.removeListener('SIGINT', interrupted);
+    process.removeListener('SIGTERM', interrupted);
+  });
 }

@@ -1,17 +1,24 @@
 name: Mirror published Release
+run-name: Mirror ${{ inputs.tag }} to COS
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing published stable tag to mirror, for example v0.7.1
+        description: Existing published stable tag to mirror, for example v0.9.0
         required: true
         type: string
+      verify_upload:
+        description: Also verify a real large upload under an isolated verification key
+        required: false
+        default: false
+        type: boolean
 
 # Shared with release.yml: a backfill and a fresh release must never race latest.json.
 concurrency:
   group: official-release-publish
   cancel-in-progress: false
+  queue: max
 
 jobs:
   mirror:
@@ -38,7 +45,7 @@ jobs:
       - name: Install locked publishing SDK
         run: pnpm --dir .github/cos install --ignore-workspace --frozen-lockfile --ignore-scripts
       - name: Test immutable release publication
-        run: node --test .github/scripts/publish-mirror.test.mjs
+        run: node --test .github/scripts/publish-mirror.test.mjs .github/scripts/cos-upload.test.mjs .github/scripts/release-mirror-trigger.test.mjs
       - name: Validate the existing stable release and exact source commit
         id: source
         shell: bash
@@ -66,6 +73,14 @@ jobs:
           VERSION: ${{ steps.source.outputs.version }}
           SNAPSHOT_TIME: ${{ steps.source.outputs.snapshot_time }}
         run: node .github/scripts/release-manifest.mjs release-assets mirror-assets "$VERSION" "$SOURCE_SHA" "$SNAPSHOT_TIME"
+      - name: Verify a real large upload without replacing release files
+        if: inputs.verify_upload
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SDK_DIRECTORY: .github/cos
+          MIRROR_UPLOAD_PROBE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: node .github/scripts/publish-mirror.mjs verify-upload mirror-assets
       - name: Upload and verify the version directory
         env:
           COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
