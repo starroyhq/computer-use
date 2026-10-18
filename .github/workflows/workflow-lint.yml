@@ -30,4 +30,10 @@ jobs:
       - name: Install pinned actionlint
         run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Lint workflows and embedded shell scripts
-        run: actionlint -color
+        # GitHub supports concurrency.queue; pinned actionlint 1.7.12 does not yet.
+        # Ignore only this exact parser diagnostic, not other concurrency or lint errors.
+        # Remove when the pinned parser supports queue. Release tests require queue: max.
+        # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+        run: >-
+          actionlint -color
+          -ignore '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
