@@ -104,6 +104,38 @@ function transportFixture({ put, get } = {}) {
   return { storage, objects, streams, events, logs };
 }
 
+test('cancelled authenticated reads never start another request or count a late result as missing or successful', async () => {
+  for (const outcome of ['before', 'found', 'missing']) {
+    const abort = new AbortController();
+    let calls = 0;
+    const storage = createCosStore({ async getObject() {
+      calls++;
+      abort.abort();
+      if (outcome === 'missing') throw Object.assign(new Error('not found'), { statusCode: 404 });
+      return { Body: Buffer.from('late bytes') };
+    } }, { signal: abort.signal, log() {} });
+    if (outcome === 'before') abort.abort();
+    await assert.rejects(storage.get(latestKey), { name: 'AbortError' });
+    assert.equal(calls, outcome === 'before' ? 0 : 1);
+    await assert.rejects(storage.get(latestKey), { name: 'AbortError' });
+    assert.equal(calls, outcome === 'before' ? 0 : 1);
+  }
+});
+
+test('anonymous reads propagate cancellation and do not fetch when already cancelled', async t => {
+  const abort = new AbortController();
+  const mock = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const result = new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+    abort.abort();
+    return result;
+  });
+  const asset = { bytes: 0, sha256: hash(Buffer.alloc(0)) };
+  const url = `${mirrorBase}/releases/v0.9.0/fixture.zip`;
+  await assert.rejects(verifyPublicAsset(url, asset, { signal: abort.signal }), { name: 'AbortError' });
+  await assert.rejects(verifyPublicAsset(url, asset, { signal: abort.signal }), { name: 'AbortError' });
+  assert.equal(mock.mock.callCount(), 1);
+});
+
 test('transient PUT retries use fresh byte streams only after an authenticated missing-object check', async () => {
   const key = 'computer-use/releases/v0.7.1/fixture.zip';
   const expected = Buffer.alloc(200_000, 71);
@@ -129,6 +161,45 @@ test('a committed PUT with a lost response is verified instead of replayed', asy
   } });
   await f.storage.put(key, expected, 'immutable');
   assert.deepEqual(f.events, [`PUT ${key}`, `GET ${key}`]);
+});
+
+test('large files use multipart with exact metadata and verify an uncertain completion before retrying', async () => {
+  const key = 'computer-use/releases/v0.9.0/fixture.zip';
+  const bytes = Buffer.alloc(8 * 1024 * 1024, 42);
+  const calls = [];
+  const storage = createCosStore({
+    putObject() { assert.fail('Large objects must not use single-connection PUT'); },
+    async getObject({ Key }) { calls.push(`GET ${Key}`); return { Body: bytes }; },
+  }, {
+    log() {},
+    async multipart(params, options) {
+      calls.push(`MULTIPART ${params.Key}`);
+      assert.equal(params.Body, bytes);
+      assert.equal(params.ContentLength, bytes.length);
+      assert.equal(params.ServerSideEncryption, 'AES256');
+      assert.equal(params.CacheControl, 'immutable');
+      assert.equal(params.ContentType, 'application/octet-stream');
+      assert.equal(typeof options.report, 'function');
+      throw Object.assign(new Error('signed response must stay private'), { code: 'INVALID_MULTIPART_RESPONSE', completionAttempted: true });
+    },
+  });
+  await storage.put(key, bytes, 'immutable');
+  assert.deepEqual(calls, [`MULTIPART ${key}`, `GET ${key}`]);
+});
+
+test('an unconfirmed multipart completion never starts a second upload after readback is absent', async () => {
+  let uploads = 0;
+  const storage = createCosStore({
+    async getObject() { throw Object.assign(new Error('absent'), { statusCode: 404 }); },
+  }, {
+    log() {},
+    async multipart() {
+      uploads++;
+      throw Object.assign(new Error('private response'), { code: 'ECONNRESET', completionAttempted: true });
+    },
+  });
+  await assert.rejects(storage.put('computer-use/releases/v0.9.0/fixture.zip', Buffer.alloc(8 * 1024 * 1024), 'immutable'), /completion was not confirmed/);
+  assert.equal(uploads, 1);
 });
 
 for (const mode of ['different bytes', 'read denied', 'write denied', 'cancelled', 'index']) {

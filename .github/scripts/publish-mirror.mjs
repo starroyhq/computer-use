@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { uploadOnce } from './cos-upload.mjs';
+import { multipartUpload } from './cos-multipart-upload.mjs';
 import { compareVersions, mirrorBase, validateManifest } from './release-manifest.mjs';
 import { githubReleases, inspectRelease } from './verify-release.mjs';
 
@@ -58,10 +59,12 @@ export async function promoteMirror(directory, store, verifyPublished, verifyPub
     throw new Error('Mirror index readback failed; promotion outcome is uncertain. Retry this release to verify it; do not roll back the index.');
   return manifest;
 }
-export async function verifyPublicAsset(url, asset) {
+export async function verifyPublicAsset(url, asset, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!url.startsWith(`${mirrorBase}/releases/`) && !url.startsWith(`${mirrorBase}/verification/uploads/`))
     throw new Error('Unexpected public mirror path.');
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20 * 60_000) });
+  const deadline = AbortSignal.timeout(20 * 60_000);
+  const response = await fetch(url, { redirect: 'error', signal: signal ? AbortSignal.any([signal, deadline]) : deadline });
   if (!response.ok || !response.body) throw new Error(`Public mirror read failed: HTTP ${response.status}`);
   let bytes = 0;
   const hash = createHash('sha256');
@@ -116,7 +119,7 @@ const failure = error => {
   return `HTTP ${status}, ${code}`;
 };
 
-export function createCosStore(client, { signal, timeoutMs, heartbeatMs, wait = delay, log = console.log } = {}) {
+export function createCosStore(client, { signal, timeoutMs, heartbeatMs, multipart, wait = delay, log = console.log } = {}) {
   const common = { Bucket: 'computer-use-download-1308799022', Region: 'ap-guangzhou' };
   const progress = (method, key) => {
     const started = Date.now();
@@ -125,12 +128,15 @@ export function createCosStore(client, { signal, timeoutMs, heartbeatMs, wait = 
   };
   const storage = {
     async get(Key) {
+      signal?.throwIfAborted();
       const report = progress('GET', Key);
       try {
         const bytes = Buffer.from((await client.getObject({ ...common, Key })).Body);
+        signal?.throwIfAborted();
         report(`${bytes.length} bytes`);
         return bytes;
       } catch (error) {
+        signal?.throwIfAborted();
         if (error.statusCode === 404) { report('not found'); return null; }
         report(`failed (${failure(error)})`);
         throw new Error(`COS read failed for ${Key} (${failure(error)}).`);
@@ -145,14 +151,22 @@ export function createCosStore(client, { signal, timeoutMs, heartbeatMs, wait = 
         if (signal?.aborted) throw new Error('COS upload interrupted (UPLOAD_ABORTED).');
         report(`attempt ${attempt}/${attempts}`);
         try {
-          await uploadOnce(client, { ...common, Key, Body, ContentLength: Body.length, CacheControl,
+          const params = { ...common, Key, Body, ContentLength: Body.length, CacheControl,
             ServerSideEncryption: 'AES256', ContentType: Key.endsWith('.json') ? 'application/json' : 'application/octet-stream',
-          }, { timeoutMs, heartbeatMs, signal, report });
+          };
+          if (Body.length >= 8 * 1024 * 1024) {
+            if (!multipart) throw new Error('Large release uploads require the multipart transport.');
+            report('parallel multipart upload');
+            await multipart(params, { timeoutMs, heartbeatMs, signal, report });
+          } else {
+            await uploadOnce(client, params, { timeoutMs, heartbeatMs, signal, report });
+          }
           report(`${Body.length} bytes`);
           return;
         } catch (error) {
           report(`attempt ${attempt} failed (${failure(error)})`);
-          if (signal?.aborted || error.code === 'UPLOAD_ABORTED' || attempt === attempts || !retryable(error))
+          if (signal?.aborted || error.code === 'UPLOAD_ABORTED' ||
+              (!error.completionAttempted && (attempt === attempts || !retryable(error))))
             throw new Error(`COS upload failed for ${Key} (${failure(error)}).`);
           // A timed-out PUT may already be committed. Only an authenticated 404
           // permits another PUT; equal bytes are success, any other bytes stop.
@@ -164,6 +178,8 @@ export function createCosStore(client, { signal, timeoutMs, heartbeatMs, wait = 
             report('confirmed committed bytes after uncertain upload');
             return;
           }
+          if (error.completionAttempted)
+            throw new Error(`COS multipart completion was not confirmed for ${Key}; rerun the same release to verify it.`);
           await wait(1000 * 2 ** (attempt - 1), undefined, { signal });
         }
       }
@@ -184,28 +200,41 @@ function cosStore(signal) {
     ...(process.env.COS_SECURITY_TOKEN ? { SecurityToken: process.env.COS_SECURITY_TOKEN } : {}),
     Protocol: 'https:', Timeout: 60_000 });
   console.log(`Mirror runtime: ${process.version} (${process.execPath})`);
-  return createCosStore(client, { signal });
+  return createCosStore(client, { signal,
+    multipart: (params, options) => multipartUpload(params, {
+      authorize: request => COS.getAuthorization({ ...request,
+        SecretId: process.env.COS_SECRET_ID, SecretKey: process.env.COS_SECRET_KEY }),
+      securityToken: process.env.COS_SECURITY_TOKEN,
+      ...options,
+    }),
+  });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, directory] = process.argv.slice(2);
   if (!['upload', 'promote', 'verify-upload'].includes(command) || !directory || process.argv.length !== 4)
     throw new Error('Usage: publish-mirror.mjs upload|promote|verify-upload DIRECTORY');
   const abort = new AbortController();
+  let forcedExit;
   const interrupted = () => {
     abort.abort();
     console.error('Mirror interrupted. Retry the same release to check any uncertain writes.');
-    process.exit(130);
+    process.exitCode = 130;
+    // Allow up to 30 seconds for multipart cleanup, then close any SDK read
+    // sockets that do not expose a public cancellation handle.
+    forcedExit ??= setTimeout(() => process.exit(130), 35_000).unref();
   };
   process.once('SIGINT', interrupted);
   process.once('SIGTERM', interrupted);
   const run = async () => {
     const store = cosStore(abort.signal);
+    const verifyPublic = (url, asset) => verifyPublicAsset(url, asset, { signal: abort.signal });
     const m = command === 'upload' ? await uploadMirror(directory, store) : command === 'promote'
-      ? await promoteMirror(directory, store, verifyGitHubRelease, verifyPublicAsset)
-      : await verifyUpload(directory, process.env.MIRROR_UPLOAD_PROBE_ID, store, verifyGitHubRelease, verifyPublicAsset);
+      ? await promoteMirror(directory, store, verifyGitHubRelease, verifyPublic)
+      : await verifyUpload(directory, process.env.MIRROR_UPLOAD_PROBE_ID, store, verifyGitHubRelease, verifyPublic);
     console.log(`${command}: ${m.tag} verified.`);
   };
-  run().catch(error => { console.error(error.message); process.exitCode = 1; }).finally(() => {
+  run().catch(error => { console.error(error.message); process.exitCode = abort.signal.aborted ? 130 : 1; }).finally(() => {
+    clearTimeout(forcedExit);
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', interrupted);
   });

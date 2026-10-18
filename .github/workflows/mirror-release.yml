@@ -45,7 +45,7 @@ jobs:
       - name: Install locked publishing SDK
         run: pnpm --dir .github/cos install --ignore-workspace --frozen-lockfile --ignore-scripts
       - name: Test immutable release publication
-        run: node --test .github/scripts/publish-mirror.test.mjs .github/scripts/cos-upload.test.mjs .github/scripts/release-mirror-trigger.test.mjs
+        run: node --test .github/scripts/publish-mirror.test.mjs .github/scripts/cos-upload.test.mjs .github/scripts/cos-multipart-upload.test.mjs .github/scripts/release-mirror-trigger.test.mjs
       - name: Validate the existing stable release and exact source commit
         id: source
         shell: bash

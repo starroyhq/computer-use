@@ -2,7 +2,11 @@
   "version": "2.0",
   "statement": [{
     "effect": "allow",
-    "action": ["name/cos:GetObject", "name/cos:PutObject"],
+    "action": [
+      "name/cos:GetObject", "name/cos:PutObject",
+      "name/cos:InitiateMultipartUpload", "name/cos:UploadPart",
+      "name/cos:CompleteMultipartUpload", "name/cos:AbortMultipartUpload"
+    ],
     "resource": ["qcs::cos:ap-guangzhou:uid/1308799022:computer-use-download-1308799022/computer-use/*"]
   }]
 }
