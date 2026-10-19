@@ -225,14 +225,14 @@ internal static class Program
                 var profiles = ControlField<ComboBox>(window, "_profile");
                 var copy = ControlField<Button>(window, "_copySetupPrompt");
                 var status = ControlField<Label>(window, "_setupPromptStatus");
-                Check(profiles.Text == "default" && !profiles.Visible && !ControlField<Button>(window, "_copyPair").Visible
+                Check(profiles.Text == "" && !profiles.Visible && !ControlField<Button>(window, "_copyPair").Visible
                     && !ControlField<Button>(window, "_copyStdio").Visible && !ControlField<CheckBox>(window, "_http").Visible,
                     "first connection screen hides profile and manual connection choices by default");
                 Check(copy.Visible && copy.Text == L10n.T(Msg.ConnectCopySetupPrompt) && command.PreflightCalls == 0,
                     "first connection screen offers setup prompt without probing or requiring a profile decision");
                 copy.PerformClick(); AwaitUi(window.SetupPromptTask);
-                Check(copied.Single() == FakeAgentCommand.Prompt && command.PromptedProfiles.Single() == "default"
-                    && status.Text == L10n.T(Msg.ConnectSetupPromptCopied), "primary copy returns the CLI setup prompt with default profile");
+                Check(copied.Single() == FakeAgentCommand.Prompt && command.PromptedProfiles.Single() is null
+                    && status.Text == L10n.T(Msg.ConnectSetupPromptCopied), "primary copy returns the CLI setup prompt and lets the agent choose its profile");
 
                 var advanced = Descendants(window).OfType<Button>().Single(button => button.Text == L10n.T(Msg.ConnectAdvanced));
                 advanced.PerformClick(); AwaitUi(window.ProfileLoadTask);
@@ -292,7 +292,7 @@ internal static class Program
     private sealed class FakeAgentCommand : IAgentCommand
     {
         internal const string Prompt = "请安装 Computer Use Skill 并完成连接。 Use the bundled CLI and ask me to approve first-time pairing.\n";
-        internal readonly List<string> PromptedProfiles = [];
+        internal readonly List<string?> PromptedProfiles = [];
         internal TaskCompletionSource<string>? PromptGate;
         internal TaskCompletionSource<AgentPreflight>? PreflightGate;
         internal bool PromptError;
@@ -304,7 +304,7 @@ internal static class Program
             PreflightCalls++;
             return PreflightGate?.Task.WaitAsync(cancellation) ?? Task.FromResult(Result(profile));
         }
-        public Task<string> SetupPromptAsync(string profile, CancellationToken cancellation)
+        public Task<string> SetupPromptAsync(string? profile, CancellationToken cancellation)
         {
             PromptedProfiles.Add(profile);
             if (PromptError) throw new IOException("sensitive fixture error must not reach UI");
@@ -890,6 +890,10 @@ internal static class Program
         Check(host.HttpStatus == "Local MCP: http://127.0.0.1:47631/mcp" && host.ServiceStatus != host.HttpStatus,
             "HTTP listener status goes to the Connect page, not the service status");
         window.ShowPage(SettingsPage.Connect);
+        Check(ControlField<TextBox>(window, "_pairCommand").Text == L10n.T(Msg.ConnectProfileChooseToShow)
+            && ControlField<TextBox>(window, "_pairCommand").ReadOnly,
+            "Connect asks for an explicit profile before showing a pairing command");
+        ControlField<ComboBox>(window, "_profile").Text = "default";
         Check(ControlField<TextBox>(window, "_pairCommand").Text == SettingsForm.PairCommand(host.PackageRoot)
             && ControlField<TextBox>(window, "_pairCommand").ReadOnly,
             "Connect displays the generated pairing command as read-only text");

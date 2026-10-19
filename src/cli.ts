@@ -43,8 +43,8 @@ computer-use schema <method>
 computer-use preflight [--profile default]
 computer-use recover [--profile default]
 computer-use instructions
-computer-use skill export [--profile default] [--out SKILL.md]
-computer-use skill prompt [--profile default]
+computer-use skill export [--profile NAME] [--out SKILL.md]
+computer-use skill prompt [--profile NAME]
 computer-use mcp stdio [--profile default]
 computer-use config stdio
 computer-use config codex [--profile default]
@@ -57,6 +57,8 @@ computer-use update download --out DIR [--release X.Y.Z] [--installer] [--progre
 Methods: ${Object.keys(schemas).join(', ')}
 
 Global options: --socket PATH, --profile NAME
+Other commands use profile "default" when --profile is omitted. skill prompt and
+skill export without --profile let the current agent choose its own profile.
 Pairing without scope flags requests all desktop apps, including future apps and
 windows. --app keeps an explicit scope; --browser alone grants only the isolated
 browser. --all-apps can be combined with --browser, but not with --app.
@@ -76,7 +78,7 @@ function commandLine() {
       options: {
         help: { type: 'boolean', short: 'h' },
         socket: { type: 'string' },
-        profile: { type: 'string', default: 'default' },
+        profile: { type: 'string' },
         name: { type: 'string' },
         app: { type: 'string', multiple: true },
         'all-apps': { type: 'boolean' },
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
     process.stdout.write(help);
     return;
   }
-  const profile = values.profile!;
+  const profile = values.profile ?? 'default';
   validateProfile(profile);
   const credentialsPath = join(credentialDir, `${profile}.json`);
   const command = positionals[0]!;
@@ -118,16 +120,16 @@ async function main(): Promise<void> {
   if (command === 'skill') {
     if (positionals.length === 2 && positionals[1] === 'prompt') {
       if (values.out !== undefined) throw new CuError('invalid_request', 'Use skill prompt [--profile NAME] without --out.');
-      process.stdout.write(setupPrompt(profile, await localPaths()));
+      process.stdout.write(setupPrompt(values.profile, await localPaths()));
       return;
     }
     if (positionals.length !== 2 || positionals[1] !== 'export')
       throw new CuError('invalid_request', 'Use skill prompt [--profile NAME] or skill export [--profile NAME] [--out SKILL.md].');
-    const text = await exportSkill(profile, await localPaths());
+    const text = await exportSkill(values.profile, await localPaths());
     if (values.out !== undefined) {
       const path = resolve(values.out);
       await writeSkill(path, text);
-      process.stdout.write(JSON.stringify({ path, profile }) + '\n');
+      process.stdout.write(JSON.stringify(values.profile === undefined ? { path, profileSelection: 'agent' } : { path, profile }) + '\n');
     } else process.stdout.write(text);
     return;
   }

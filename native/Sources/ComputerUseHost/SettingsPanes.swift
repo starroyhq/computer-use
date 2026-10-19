@@ -166,7 +166,9 @@ final class ConnectPane: PaneController, SettingsPaneView, NSComboBoxDelegate {
         profile.delegate = self
         profile.isEditable = true
         profile.completes = false
-        profile.stringValue = access.selectedProfile
+        profile.stringValue = access.selectedProfile ?? ""
+        // 留空即“让 Agent 自行选择”，安装提示词不写死 profile。
+        profile.placeholderString = tr(.connectProfileAgentChoice)
         profile.setAccessibilityLabel(tr(.connectProfile))
         profile.identifier = NSUserInterfaceItemIdentifier("connect-profile")
         profile.translatesAutoresizingMaskIntoConstraints = false
@@ -247,14 +249,18 @@ final class ConnectPane: PaneController, SettingsPaneView, NSComboBoxDelegate {
         }
         profile.isEnabled = !access.isBusy
         refreshProfiles.isEnabled = !access.isBusy && profileIsValid
-        for button in [copyPair, copyMCP, copyPrompt] {
-            button.isEnabled = profileIsValid && !access.isBusy
+        let explicit = profileIsValid ? access.selectedProfile : nil
+        copyPrompt.isEnabled = profileIsValid && !access.isBusy
+        for button in [copyPair, copyMCP] {
+            button.isEnabled = explicit != nil && !access.isBusy
         }
-        (pairPreview.documentView as? NSTextView)?.string = profileIsValid
-            ? ConnectAccess.pairCommand(paths: context.paths, profile: access.selectedProfile) : ""
+        (pairPreview.documentView as? NSTextView)?.string = explicit.map {
+            ConnectAccess.pairCommand(paths: context.paths, profile: $0)
+        } ?? (profileIsValid ? tr(.connectProfileChooseToShow) : "")
         if !profileIsValid { profileStatus.stringValue = tr(.connectProfileInvalidName) }
         else if access.isBusy { profileStatus.stringValue = tr(.connectWorking) }
         else if let failure = access.failure { profileStatus.stringValue = Self.message(failure) }
+        else if explicit == nil { profileStatus.stringValue = tr(.connectProfileAgentChoiceStatus) }
         else {
             let key: L10nKey
             switch access.profileState {
@@ -287,8 +293,9 @@ final class ConnectPane: PaneController, SettingsPaneView, NSComboBoxDelegate {
     }
 
     private func updateSelection() {
-        profileIsValid = ConnectAccess.validProfile(profile.stringValue)
-        if profileIsValid { _ = access.selectProfile(profile.stringValue) }
+        let agentChoice = profile.stringValue.isEmpty
+        profileIsValid = agentChoice || ConnectAccess.validProfile(profile.stringValue)
+        if agentChoice { _ = access.selectAgentChoice() } else if profileIsValid { _ = access.selectProfile(profile.stringValue) }
         feedback.stringValue = ""
         renderAccess()
     }
@@ -310,12 +317,13 @@ final class ConnectPane: PaneController, SettingsPaneView, NSComboBoxDelegate {
     }
 
     @objc private func copyPairCommand() {
-        guard profileIsValid else { return }
-        copy(ConnectAccess.pairCommand(paths: context.paths, profile: access.selectedProfile))
+        guard profileIsValid, let selected = access.selectedProfile else { return }
+        copy(ConnectAccess.pairCommand(paths: context.paths, profile: selected))
     }
 
     @objc private func copyConfiguration() {
-        guard profileIsValid, let configuration = ConnectAccess.configuration(paths: context.paths, profile: access.selectedProfile) else { return }
+        guard profileIsValid, let selected = access.selectedProfile,
+              let configuration = ConnectAccess.configuration(paths: context.paths, profile: selected) else { return }
         copy(configuration)
     }
 

@@ -27,11 +27,16 @@ final class ConnectAccessTests: XCTestCase {
         }
         defaults.set("../invalid", forKey: ConnectAccess.selectionKey)
         let access = makeAccess { _, _ in XCTFail("Selecting a profile must not run the CLI") }
-        XCTAssertEqual(access.selectedProfile, "default")
+        XCTAssertNil(access.selectedProfile, "Without a saved explicit choice the agent chooses its own profile")
         XCTAssertTrue(access.selectProfile("work-agent"))
         XCTAssertFalse(access.selectProfile("bad name"))
         XCTAssertEqual(access.selectedProfile, "work-agent")
         XCTAssertEqual(makeAccess { _, _ in }.selectedProfile, "work-agent")
+        XCTAssertTrue(access.selectProfile("default"), "An explicit default profile still works")
+        XCTAssertEqual(makeAccess { _, _ in }.selectedProfile, "default")
+        XCTAssertTrue(access.selectAgentChoice())
+        XCTAssertNil(access.selectedProfile)
+        XCTAssertNil(makeAccess { _, _ in }.selectedProfile)
     }
 
     func testPeriodicRefreshLoadsOnceButExplicitRefreshRunsAgain() {
@@ -42,8 +47,8 @@ final class ConnectAccessTests: XCTestCase {
         }
         access.loadIfNeeded()
         access.loadIfNeeded()
-        XCTAssertEqual(calls, [["preflight", "--profile", "default"]])
-        XCTAssertEqual(access.profileState, .unverified)
+        XCTAssertEqual(calls, [["preflight", "--profile", "default"]], "Agent choice only borrows default to list profiles")
+        XCTAssertNil(access.profileState, "Listing never presents default as the agent's selection")
         XCTAssertEqual(access.profiles, ["default", "work"])
         access.reload()
         XCTAssertEqual(calls.count, 2)
@@ -61,8 +66,8 @@ final class ConnectAccessTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         try XCTUnwrap(finish)(.success(Self.preflight()))
         XCTAssertFalse(access.isBusy)
-        XCTAssertEqual(access.selectedProfile, "default")
-        XCTAssertEqual(access.profileState, .missing)
+        XCTAssertNil(access.selectedProfile)
+        XCTAssertNil(access.profileState)
         XCTAssertTrue(access.selectProfile("other"))
         XCTAssertNil(access.profileState)
     }
@@ -83,6 +88,7 @@ final class ConnectAccessTests: XCTestCase {
         }
         for state in ["missing", "invalid", "unverified", "valid", "unauthorized"] {
             let access = makeAccess { _, completion in completion(.success(Self.preflight(state: state))) }
+            XCTAssertTrue(access.selectProfile("default"))
             access.reload()
             XCTAssertNil(access.failure)
             XCTAssertEqual(access.profileState?.rawValue, state)
@@ -97,10 +103,10 @@ final class ConnectAccessTests: XCTestCase {
             completion(.success(Data(prompt.utf8)))
         }
         XCTAssertTrue(access.selectProfile("work-agent"))
-        let pair = ConnectAccess.pairCommand(paths: paths, profile: access.selectedProfile)
+        let pair = ConnectAccess.pairCommand(paths: paths, profile: "work-agent")
         XCTAssertTrue(pair.contains("App'\\''s $Resources"), "Shell paths must preserve quotes and dollar signs as literals")
         XCTAssertTrue(pair.hasSuffix("'pair' '--profile' 'work-agent' '--name' 'My Agent'"))
-        let config = try XCTUnwrap(ConnectAccess.configuration(paths: paths, profile: access.selectedProfile))
+        let config = try XCTUnwrap(ConnectAccess.configuration(paths: paths, profile: "work-agent"))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any])
         let servers = try XCTUnwrap(object["mcpServers"] as? [String: [String: Any]])
         let server = try XCTUnwrap(servers["computer-use"])
@@ -116,6 +122,18 @@ final class ConnectAccessTests: XCTestCase {
         XCTAssertEqual(received, prompt)
         XCTAssertEqual(calls, [["skill", "prompt", "--profile", "work-agent"]],
                        "Copying the installation prompt must not export files, pair, or start the host")
+    }
+
+    func testAgentChoiceInstallationPromptOmitsProfile() {
+        var calls = [[String]]()
+        let access = makeAccess { arguments, completion in
+            calls.append(arguments)
+            completion(.success(Data("Install and choose your own profile.\n".utf8)))
+        }
+        var received: String?
+        access.installationPrompt { if case .success(let text) = $0 { received = text } }
+        XCTAssertEqual(received, "Install and choose your own profile.\n")
+        XCTAssertEqual(calls, [["skill", "prompt"]], "Without an explicit choice the prompt must not name a profile")
     }
 
     func testInstallationPromptKeepsProfileStableUntilCompletion() throws {

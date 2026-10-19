@@ -51,7 +51,7 @@ internal sealed class SettingsForm : Form
     private bool _promptCancelledByUser;
     private CancellationTokenSource? _profileCancellation;
     private bool _profilesLoaded;
-    private readonly ComboBox _profile = new() { DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 64, Text = "default", Margin = new Padding(0, 0, 0, 12) };
+    private readonly ComboBox _profile = new() { DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 64, Text = "", Margin = new Padding(0, 0, 0, 12) };
     private readonly Label _profileStatus = MakeFeedback();
     private readonly Button _refreshProfiles = MakeButton(Msg.ConnectRefreshProfiles);
     private readonly Button _copySetupPrompt = MakeButton(Msg.ConnectCopySetupPrompt, ButtonTone.Primary);
@@ -321,7 +321,6 @@ internal sealed class SettingsForm : Form
 
     private Control BuildConnect()
     {
-        _profile.Items.Add("default");
         _profile.AccessibleName = L10n.T(Msg.ConnectProfile);
         _profile.TextChanged += (_, _) => { RefreshProfile(); _profileStatus.Visible = false; };
         _profile.SelectionChangeCommitted += (_, _) => ProfileLoadTask = LoadProfilesAsync();
@@ -329,7 +328,7 @@ internal sealed class SettingsForm : Form
         _copySetupPrompt.Click += (_, _) => SetupPromptTask = CopySetupPromptAsync();
         _cancelSetupPrompt.Click += (_, _) => { _promptCancelledByUser = true; _promptCancellation?.Cancel(); };
         _cancelSetupPrompt.Visible = false;
-        _pairCommand.Text = PairCommand(_host.PackageRoot, _profile.Text);
+        _pairCommand.Text = L10n.T(Msg.ConnectProfileChooseToShow);
         _pairCommand.AccessibleName = L10n.T(Msg.ConnectPairing);
         _copyPair.Click += (_, _) => CopyWithFeedback(_pairCommand.Text, _pairCopied);
         _copyStdio.Click += (_, _) => CopyWithFeedback(StdioConfiguration(_host.PackageRoot, _profile.Text), _copied);
@@ -349,19 +348,25 @@ internal sealed class SettingsForm : Form
 
     private void RefreshProfile()
     {
-        var valid = AgentCommand.ValidProfile(_profile.Text);
+        // 留空即“让 Agent 自行选择”：安装提示词不写死 profile，配对命令和 MCP 配置需要用户指定后才显示。
+        var agentChoice = _profile.Text.Length == 0;
+        var valid = agentChoice || AgentCommand.ValidProfile(_profile.Text);
         var busy = _promptCancellation is not null;
         _profile.Enabled = !busy;
-        _copyPair.Enabled = _copyStdio.Enabled = _copySetupPrompt.Enabled = valid && !busy;
+        _copySetupPrompt.Enabled = valid && !busy;
+        _copyPair.Enabled = _copyStdio.Enabled = valid && !agentChoice && !busy;
         _refreshProfiles.Enabled = valid && !busy && _profileCancellation is null;
         _cancelSetupPrompt.Visible = busy;
-        _pairCommand.Text = valid ? PairCommand(_host.PackageRoot, _profile.Text) : L10n.T(Msg.ConnectProfileInvalid);
+        _pairCommand.Text = !valid ? L10n.T(Msg.ConnectProfileInvalid)
+            : agentChoice ? L10n.T(Msg.ConnectProfileChooseToShow) : PairCommand(_host.PackageRoot, _profile.Text);
     }
 
     private async Task LoadProfilesAsync()
     {
-        if (IsDisposed || _profileCancellation is not null || !AgentCommand.ValidProfile(_profile.Text)) return;
-        var profile = _profile.Text;
+        var agentChoice = _profile.Text.Length == 0;
+        if (IsDisposed || _profileCancellation is not null || !(agentChoice || AgentCommand.ValidProfile(_profile.Text))) return;
+        // 未指定时只借用 default 列出已有 profile，不把它当作当前选择。
+        var profile = agentChoice ? "default" : _profile.Text;
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         _profileCancellation = cancellation;
         RefreshProfile();
@@ -372,10 +377,16 @@ internal sealed class SettingsForm : Form
             // A slow response must not change the profile currently being edited.
             var selected = _profile.Text;
             _profile.Items.Clear();
-            _profile.Items.AddRange(result.Profiles.Prepend("default").Distinct(StringComparer.Ordinal).Cast<object>().ToArray());
+            _profile.Items.AddRange(result.Profiles.Distinct(StringComparer.Ordinal).Cast<object>().ToArray());
             _profile.Text = selected;
             _profilesLoaded = true;
-            if (selected == profile)
+            if (agentChoice && selected.Length == 0)
+            {
+                _profileStatus.Text = L10n.T(Msg.ConnectProfileAgentChoiceStatus);
+                _profileStatus.ForeColor = UiStyle.Muted;
+                _profileStatus.Visible = true;
+            }
+            else if (!agentChoice && selected == profile)
             {
                 _profileStatus.Text = L10n.T(result.Profile.State switch
                 {
@@ -391,7 +402,7 @@ internal sealed class SettingsForm : Form
         }
         catch (Exception)
         {
-            if (!IsDisposed && _profile.Text == profile)
+            if (!IsDisposed && _profile.Text == (agentChoice ? "" : profile))
             {
                 _profileStatus.Text = L10n.T(Msg.ConnectProfileLoadFailed);
                 _profileStatus.ForeColor = UiStyle.Danger;
@@ -407,8 +418,8 @@ internal sealed class SettingsForm : Form
 
     private async Task CopySetupPromptAsync()
     {
-        if (_promptCancellation is not null || !AgentCommand.ValidProfile(_profile.Text)) return;
-        var profile = _profile.Text;
+        if (_promptCancellation is not null || !(_profile.Text.Length == 0 || AgentCommand.ValidProfile(_profile.Text))) return;
+        string? profile = _profile.Text.Length == 0 ? null : _profile.Text;
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         _promptCancellation = cancellation;
         _promptCancelledByUser = false;

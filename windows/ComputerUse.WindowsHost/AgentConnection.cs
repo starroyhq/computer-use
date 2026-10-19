@@ -10,7 +10,8 @@ internal sealed record AgentPreflight(int SchemaVersion, string Version, string 
 internal interface IAgentCommand
 {
     Task<AgentPreflight> PreflightAsync(string profile, CancellationToken cancellation);
-    Task<string> SetupPromptAsync(string profile, CancellationToken cancellation);
+    /// <summary>profile 为 null 时不写死名称，由当前 Agent 自行选择。</summary>
+    Task<string> SetupPromptAsync(string? profile, CancellationToken cancellation);
 }
 
 /// <summary>不读取凭据文件；由包内 CLI 验证 profile 并生成安装提示词。</summary>
@@ -30,10 +31,11 @@ internal sealed class AgentCommand(PackageCommand command) : IAgentCommand
         return result;
     }
 
-    public async Task<string> SetupPromptAsync(string profile, CancellationToken cancellation)
+    public async Task<string> SetupPromptAsync(string? profile, CancellationToken cancellation)
     {
-        ValidateProfile(profile);
-        var text = await command.RunAsync(["skill", "prompt", "--profile", profile], cancellation);
+        if (profile is not null) ValidateProfile(profile);
+        string[] arguments = profile is null ? ["skill", "prompt"] : ["skill", "prompt", "--profile", profile];
+        var text = await command.RunAsync(arguments, cancellation);
         if (string.IsNullOrWhiteSpace(text)) throw new UpdateFailure("output", "");
         return text;
     }

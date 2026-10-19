@@ -58,6 +58,7 @@ public enum L10nKey: String, CaseIterable {
     // 接入
     case connectHTTP, connectHTTPToggle, connectHTTPHint, connectHTTPAddress, connectCopyAddress
     case connectStdio, connectCopy, connectCopied, connectCopiedBody, connectCopyFailed, connectPairing, connectPairingHint
+    case connectProfileAgentChoice, connectProfileAgentChoiceStatus, connectProfileChooseToShow
     case connectProfile, connectProfileHint, connectProfileInvalidName, connectProfileUnchecked, connectProfileMissing
     case connectProfileInvalid, connectProfileUnverified, connectProfileValid, connectProfileUnauthorized, connectRefresh
     case connectCopyPair, connectPairingSteps, connectCopyPrompt, connectInstallHint, connectAdvanced
@@ -224,7 +225,10 @@ public enum L10n {
         .statusPausedPersistent: "操作已暂停。请在 App 中恢复。",
         .failureStartupState: "无法保存服务状态。请检查本机数据目录后重启服务。",
         .connectProfile: "配对配置：",
-        .connectProfileHint: "选择已有 profile，或输入新名称；安装提示词、配对命令和 MCP 配置共用此选择。",
+        .connectProfileHint: "留空时由 Agent 自行选择并记录自己的 profile（推荐）；如需指定，选择已有 profile 或输入新名称，安装提示词、配对命令和 MCP 配置将原样使用。",
+        .connectProfileAgentChoice: "让 Agent 自行选择（推荐）",
+        .connectProfileAgentChoiceStatus: "未指定 profile：安装提示词不写死名称，由 Agent 自行选择。",
+        .connectProfileChooseToShow: "指定 profile 后显示配对命令。",
         .connectProfileInvalidName: "名称需为 1–64 个英文字母、数字、下划线或连字符。",
         .connectProfileUnchecked: "尚未检查此 profile 的本地配对状态。",
         .connectProfileMissing: "尚未配对。请先运行配对命令，再在本机批准。",
@@ -449,7 +453,10 @@ public enum L10n {
         .statusPausedPersistent: "Actions are paused. Resume them in the app.",
         .failureStartupState: "Could not save the service state. Check the local data directory, then restart services.",
         .connectProfile: "Profile:",
-        .connectProfileHint: "Choose an existing profile or enter a new name. The installation prompt, pairing and MCP configuration use this selection.",
+        .connectProfileHint: "Leave empty to let the agent choose and record its own profile (recommended). To specify one, choose an existing profile or enter a new name; the installation prompt, pairing and MCP configuration use it as-is.",
+        .connectProfileAgentChoice: "Let the agent choose (recommended)",
+        .connectProfileAgentChoiceStatus: "No profile specified: the installation prompt names none and the agent chooses its own.",
+        .connectProfileChooseToShow: "Specify a profile to show the pairing command.",
         .connectProfileInvalidName: "Use 1–64 letters, numbers, underscores or hyphens.",
         .connectProfileUnchecked: "This profile's local pairing has not been checked.",
         .connectProfileMissing: "Not paired yet. Run the pairing command and approve it locally.",

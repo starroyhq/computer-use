@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { exportSkill, instructions, preflight, setupPrompt, writeSkill } from './skill.js';
 
 let directory: string;
+// Prompt/Skill 文本不得写死任何 IDE 或 Agent 产品名。
+// “cursor” 在指南中指文本光标，不作为产品名检查。
+const agentNames = /\b(kiro|claude|codex|copilot|windsurf|gemini|trae|cline|cursor ide)\b/i;
 const closers: Array<() => Promise<void>> = [];
 const token = 'test-credential-never-export-this-token';
 const paths = { node: "C:\\安装 $& $' quotes\\node.exe", cli: '/Applications/$`fence```/cli.js' };
@@ -81,6 +84,43 @@ describe('local onboarding', () => {
     expect(binding).toMatchObject({ schemaVersion: 1, profile: 'existing-agent', ...paths });
     expect(text).not.toContain('/`fence```/');
   });
+  it('leaves profile choice to the current agent without naming any IDE or agent when no profile is given', async () => {
+    await credential();
+    const prompt = setupPrompt(undefined, paths);
+    const text = await exportSkill(undefined, paths);
+    for (const output of [prompt, text]) {
+      expect(output).not.toContain('--profile default');
+      expect(output).not.toContain('"profile": "default"');
+      expect(output).not.toMatch(agentNames);
+      expect(output).not.toContain(token);
+      expect(JSON.parse(output.split('```json\n').at(-1)!.split('```')[0]!)).toMatchObject({ profileSelection: 'agent', ...paths });
+      expect(JSON.parse(output.split('```json\n').at(-1)!.split('```')[0]!)).not.toHaveProperty('profile');
+    }
+    expect(prompt).toContain('skill export --profile <你的 Agent profile>');
+    expect(prompt).toContain('profileDetails');
+    expect(prompt).toContain('归属无法判断时先问我');
+    expect(prompt).toContain('首次配对由我在本机批准');
+    expect(prompt).toContain('不自动删凭据重配');
+    expect(prompt).toContain('暂停、紧停和撤销仍由我在 App 内处理');
+    expect(prompt.length).toBeLessThan(2500);
+    expect(text).toContain('No profile was selected by the user');
+    const guide = await instructions();
+    for (const output of [text, guide]) {
+      expect(output).not.toMatch(agentNames);
+      expect(output).not.toContain('Default to profile `default`');
+      expect(output).not.toContain('default `default`');
+      expect(output).toContain('profileDetails');
+    }
+  });
+  it('embeds an explicitly chosen profile verbatim, including default', async () => {
+    for (const name of ['kiro-agent', 'default']) {
+      const prompt = setupPrompt(name, paths);
+      const text = await exportSkill(name, paths);
+      expect(prompt).toContain(`skill export --profile ${name}`);
+      for (const output of [prompt, text])
+        expect(JSON.parse(output.split('```json\n').at(-1)!.split('```')[0]!)).toMatchObject({ profile: name, profileSelection: 'user' });
+    }
+  });
   it('never overwrites an existing export', async () => {
     const destination = join(directory, 'SKILL.md');
     await writeSkill(destination, 'original');
@@ -119,6 +159,38 @@ describe('local onboarding', () => {
     const result = await preflight(options());
     expect(result.profile.state).toBe('invalid');
     expect(result.profiles).toEqual(['default']);
+  });
+  it('reports offline ownership of every profile without exposing secrets', async () => {
+    await writeFile(join(directory, 'default.json'), JSON.stringify({ clientId: 'aaaaaaaa-1111', token }));
+    await writeFile(join(directory, 'mine.json'), JSON.stringify({ clientId: 'bbbbbbbb-2222', token }));
+    await writeFile(join(directory, 'broken.json'), '{broken');
+    const data = join(directory, 'host-data');
+    await mkdir(data);
+    await writeFile(
+      join(data, 'clients.json'),
+      JSON.stringify([
+        { id: 'aaaaaaaa-1111', name: 'Other Agent', tokenHash: 'secret-hash-value' },
+        { id: 'bbbbbbbb-2222', name: 'My Own Agent', tokenHash: 'secret-hash-value' },
+      ]),
+    );
+    const result = await preflight({ ...options('mine'), data });
+    expect(result.profiles).toEqual(['broken', 'default', 'mine']);
+    expect(result.profileDetails).toEqual([
+      { name: 'broken', state: 'invalid' },
+      { name: 'default', state: 'present', client: { id: 'aaaaaaaa-1111', shortId: 'aaaaaaaa', name: 'Other Agent' } },
+      { name: 'mine', state: 'present', client: { id: 'bbbbbbbb-2222', shortId: 'bbbbbbbb', name: 'My Own Agent' } },
+    ]);
+    expect(result.profile).toEqual({
+      name: 'mine',
+      state: 'unverified',
+      client: { id: 'bbbbbbbb-2222', shortId: 'bbbbbbbb', name: 'My Own Agent' },
+    });
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain('secret-hash-value');
+    expect(JSON.stringify(result)).not.toContain('tokenHash');
+    await writeFile(join(data, 'clients.json'), '{malformed');
+    const fallback = await preflight({ ...options('mine'), data });
+    expect(fallback.profileDetails[2]).toEqual({ name: 'mine', state: 'present', client: { id: 'bbbbbbbb-2222', shortId: 'bbbbbbbb' } });
   });
   it.each(['paused', 'stopped'] as const)('reports persistent %s without starting or resuming anything', async reason => {
     await writeFile(join(directory, 'host-state.json'), JSON.stringify({ state: 'exited', autoStartBlocked: true, blockedReason: reason }));
@@ -275,6 +347,27 @@ describe('unpaired CLI integration on both platforms', () => {
     const output = join(directory, 'SKILL.md');
     expect((await cli(['skill', 'export', '--out', output])).code).toBe(0);
     expect((await cli(['skill', 'export', '--out', output])).code).not.toBe(0);
+  });
+  it('lets the current agent choose its profile when the CLI gets no --profile', async () => {
+    for (const args of [
+      ['skill', 'prompt'],
+      ['skill', 'export'],
+    ]) {
+      const result = await cli(args);
+      expect(result.code).toBe(0);
+      expect(result.stdout).not.toContain('--profile default');
+      expect(result.stdout).not.toContain('"profile": "default"');
+      expect(result.stdout).toContain('"profileSelection": "agent"');
+      expect(result.stdout).not.toMatch(agentNames);
+    }
+    expect((await cli(['skill', 'prompt'])).stdout).toContain('skill export --profile <你的 Agent profile>');
+    expect((await cli(['skill', 'prompt', '--profile', 'work'])).stdout).toContain('skill export --profile work');
+    expect((await cli(['skill', 'prompt', '--profile', 'default'])).stdout).toContain('skill export --profile default');
+    const output = join(directory, 'agent.md');
+    expect(JSON.parse((await cli(['skill', 'export', '--out', output])).stdout)).toEqual({ path: output, profileSelection: 'agent' });
+    const preflighted = JSON.parse((await cli(['preflight'])).stdout);
+    expect(preflighted.profileDetails).toEqual([]);
+    expect(preflighted.profile.name).toBe('default');
   });
   it('preflights without creating a profile and rejects unsafe profile names', async () => {
     const result = await cli(['preflight', '--profile', 'new-agent']);

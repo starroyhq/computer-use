@@ -39,8 +39,9 @@ final class ConnectAccess {
     private let defaults: UserDefaults
     private let runner: Runner
     private var loaded = false
-    private(set) var selectedProfile: String
-    private(set) var profiles = ["default"]
+    /// nil 表示用户未指定：安装提示词交给当前 Agent 自行选择 profile，不写死任何名称。
+    private(set) var selectedProfile: String?
+    private(set) var profiles: [String] = []
     private(set) var profileState: ConnectProfileState?
     private(set) var failure: ConnectFailure?
     private(set) var isBusy = false
@@ -48,8 +49,9 @@ final class ConnectAccess {
 
     init(paths: HostPaths, defaults: UserDefaults = .standard, runner: Runner? = nil) {
         self.defaults = defaults
-        let saved = defaults.string(forKey: Self.selectionKey) ?? "default"
-        selectedProfile = Self.validProfile(saved) ? saved : "default"
+        // 已保存的选择是用户的显式选择，原样保留；没有保存时默认让 Agent 自行选择。
+        let saved = defaults.string(forKey: Self.selectionKey)
+        selectedProfile = saved.flatMap { Self.validProfile($0) ? $0 : nil }
         self.runner = runner ?? { arguments, completion in
             ConnectCommand.run(paths: paths, arguments: arguments, completion: completion)
         }
@@ -63,12 +65,21 @@ final class ConnectAccess {
 
     @discardableResult
     func selectProfile(_ profile: String) -> Bool {
-        guard !isBusy, Self.validProfile(profile) else { return false }
+        guard Self.validProfile(profile) else { return false }
+        return select(profile)
+    }
+
+    /// 回到“让 Agent 自行选择”；不删除任何已有 profile 或凭据。
+    @discardableResult
+    func selectAgentChoice() -> Bool { select(nil) }
+
+    private func select(_ profile: String?) -> Bool {
+        guard !isBusy else { return false }
         if profile != selectedProfile {
             selectedProfile = profile
             profileState = nil
             failure = nil
-            defaults.set(profile, forKey: Self.selectionKey)
+            if let profile { defaults.set(profile, forKey: Self.selectionKey) } else { defaults.removeObject(forKey: Self.selectionKey) }
             onChange?()
         }
         return true
@@ -82,7 +93,9 @@ final class ConnectAccess {
     func reload() {
         guard !isBusy else { return }
         loaded = true
-        let profile = selectedProfile
+        let explicit = selectedProfile
+        // 未指定时只借用 default 列出已有 profile，不把它当作当前选择显示状态。
+        let profile = explicit ?? "default"
         perform(["preflight", "--profile", profile]) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -94,8 +107,8 @@ final class ConnectAccess {
                     self.failure = .output
                     return
                 }
-                self.profiles = Array(Set(report.profiles + ["default", profile])).sorted()
-                self.profileState = report.profile.state
+                self.profiles = Array(Set(report.profiles + [explicit].compactMap { $0 })).sorted()
+                self.profileState = explicit == nil ? nil : report.profile.state
             case .failure:
                 self.profileState = nil
             }
@@ -103,7 +116,7 @@ final class ConnectAccess {
     }
 
     func installationPrompt(completion: @escaping (Result<String, ConnectFailure>) -> Void) {
-        perform(["skill", "prompt", "--profile", selectedProfile]) { [weak self] result in
+        perform(["skill", "prompt"] + (selectedProfile.map { ["--profile", $0] } ?? [])) { [weak self] result in
             let text = result.flatMap { data -> Result<String, ConnectFailure> in
                 guard let text = String(data: data, encoding: .utf8), !text.contains("\0"),
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .failure(.output) }

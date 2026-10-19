@@ -271,6 +271,9 @@ describe.skipIf(process.platform === 'win32')('real CLI, IPC, runtime and browse
     expect(help.code).toBe(0);
     expect(help.stdout.startsWith(`Computer Use ${version} `)).toBe(true);
     expect(help.stdout).toContain('computer-use update download --out DIR');
+    expect(help.stdout).toContain('computer-use skill prompt [--profile NAME]');
+    expect(help.stdout).toContain('computer-use skill export [--profile NAME] [--out SKILL.md]');
+    expect(help.stdout).toContain('let the current agent choose its own profile');
     // 更新命令的用法错误在联网之前就报告。
     for (const args of [['update'], ['update', 'install'], ['update', 'download'], ['update', 'check', 'extra']]) {
       const misuse = await cli(args);

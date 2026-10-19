@@ -73,6 +73,10 @@ final class SettingsLayoutTests: XCTestCase {
         let profile = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSComboBox }.first)
         let preview = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTextView }.first)
         let buttons = Self.descendants(pane.view).compactMap { $0 as? NSButton }
+        XCTAssertEqual(profile.stringValue, "", "No saved choice: the agent chooses its own profile")
+        XCTAssertEqual(preview.string, tr(.connectProfileChooseToShow))
+        XCTAssertTrue(try XCTUnwrap(buttons.first { $0.title == tr(.connectCopyPrompt) }).isEnabled)
+        XCTAssertFalse(try XCTUnwrap(buttons.first { $0.title == tr(.connectCopyPair) }).isEnabled)
         profile.stringValue = "work-agent"
         pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: profile))
         XCTAssertEqual(access.selectedProfile, "work-agent")
