@@ -49,8 +49,10 @@ public enum L10nKey: String, CaseIterable {
     case statusService, statusAccessibility, statusScreenRecording, statusGranted, statusDenied, statusOpenSystemSettings
     case statusRequestPermissions, statusPermissionsHint, statusControl, permissionsTitle, permissionsBody
     // 客户端
-    case clientsName, clientsID, clientsApps, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
+    case clientsID, clientsAllApps, clientsBrowser, clientsForeground, clientsYes, clientsNo, clientsRevoke
     case clientsEmpty, clientsNotRunning, clientsHint, clientsRevokeTitle, clientsRevokeBody
+    case clientsSearchPlaceholder, clientsNoMatches, clientsAdvanced, clientsDesktopApps, clientsAppCount
+    case clientsBadgeRestricted, clientsBadgeBrowserOnly, clientsSummary, clientsDetailLine, clientsRestrictedNote
     case clientsGrantAllApps, clientsGrantAlready, clientsGrantTitle, clientsGrantBody, clientsGrantConfirm
     case clientsGrantPending, clientsGrantSucceeded, clientsGrantUnconfirmed, clientsGrantFailed, clientsGrantUnavailable, clientsGrantBrowserOnly
     // 接入
@@ -184,9 +186,7 @@ public enum L10n {
         .permissionsTitle: "系统权限",
         .permissionsBody: "请在系统设置中允许 Computer Use 使用辅助功能和屏幕录制。授权发生变化后，请完全退出并重新打开本 App，以刷新系统缓存。CLI doctor 检查权限归属；截图是否可用还需通过 observe 验证。",
 
-        .clientsName: "名称",
         .clientsID: "标识",
-        .clientsApps: "应用",
         .clientsAllApps: "所有应用",
         .clientsBrowser: "受控浏览器",
         .clientsForeground: "前台操作",
@@ -195,7 +195,17 @@ public enum L10n {
         .clientsRevoke: "撤销…",
         .clientsEmpty: "还没有已配对的客户端。在终端运行 computer-use pair 发起配对。",
         .clientsNotRunning: "服务未运行，暂时无法读取客户端列表。",
-        .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。旧配对可在此升级授权，原有凭据继续有效。",
+        .clientsHint: "“所有应用”包含之后打开或安装的应用及其窗口。已有桌面客户端可直接在对应卡片上允许所有应用；高级区显示当前范围，原有凭据继续有效。",
+        .clientsSearchPlaceholder: "搜索名称、标识或应用",
+        .clientsNoMatches: "没有匹配的客户端。",
+        .clientsAdvanced: "高级",
+        .clientsDesktopApps: "桌面应用",
+        .clientsAppCount: "%ld 个应用",
+        .clientsBadgeRestricted: "受限：%ld 个应用",
+        .clientsBadgeBrowserOnly: "仅受控浏览器",
+        .clientsSummary: "桌面：%@ · 浏览器：%@ · 前台：%@",
+        .clientsDetailLine: "%@：%@",
+        .clientsRestrictedNote: "限定应用范围在配对时用 --app 指定；此页升级为所有应用会保留原有凭据。",
         .clientsRevokeTitle: "撤销“%@”？",
         .clientsRevokeBody: "该客户端的凭据会立即失效，需要重新配对才能再次使用。",
         .clientsGrantAllApps: "允许所有应用…",
@@ -401,9 +411,7 @@ public enum L10n {
         .permissionsTitle: "System Permissions",
         .permissionsBody: "Allow Computer Use under Accessibility and Screen Recording in System Settings. After a change, quit and reopen this app to refresh the system cache. computer-use doctor checks which app holds the permissions; observe confirms that screenshots work.",
 
-        .clientsName: "Name",
         .clientsID: "ID",
-        .clientsApps: "Apps",
         .clientsAllApps: "All apps",
         .clientsBrowser: "Browser",
         .clientsForeground: "Foreground",
@@ -412,7 +420,17 @@ public enum L10n {
         .clientsRevoke: "Revoke…",
         .clientsEmpty: "No clients are paired yet. Run computer-use pair in Terminal to pair one.",
         .clientsNotRunning: "The service is not running, so the client list is unavailable.",
-        .clientsHint: "All apps includes apps opened or installed later and their windows. Upgrade an existing desktop pairing here while keeping its credentials.",
+        .clientsHint: "All apps includes apps opened or installed later and their windows. Upgrade an existing desktop client from its card; Advanced shows the current scope. Existing credentials keep working.",
+        .clientsSearchPlaceholder: "Search name, ID or app",
+        .clientsNoMatches: "No clients match.",
+        .clientsAdvanced: "Advanced",
+        .clientsDesktopApps: "Desktop apps",
+        .clientsAppCount: "%ld apps",
+        .clientsBadgeRestricted: "Restricted: %ld apps",
+        .clientsBadgeBrowserOnly: "Controlled browser only",
+        .clientsSummary: "Desktop: %@ · Browser: %@ · Foreground: %@",
+        .clientsDetailLine: "%@: %@",
+        .clientsRestrictedNote: "Restricted app scope is set at pairing with --app; upgrading to all apps here keeps the existing credential.",
         .clientsRevokeTitle: "Revoke “%@”?",
         .clientsRevokeBody: "Its credentials stop working immediately. It must pair again to reconnect.",
         .clientsGrantAllApps: "Allow all apps…",

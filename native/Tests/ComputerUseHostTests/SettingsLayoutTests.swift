@@ -112,8 +112,201 @@ final class SettingsLayoutTests: XCTestCase {
         }
     }
 
+    func testCollapsingAdvancedShrinksTheRow() throws {
+        let context = FakeContext.states()[1].1
+        let controller = SettingsWindowController(context: context)
+        _ = controller.window
+        controller.tabs.select(.clients)
+        controller.tabs.refreshAll()
+        controller.tabs.fitWindow(animated: false)
+        let pane = try XCTUnwrap(controller.tabs.tabView.selectedTabViewItem?.viewController as? ClientsPane)
+        pane.view.layoutSubtreeIfNeeded()
+        let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
+        let collapsedHeight = table.rect(ofRow: 1).height
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+        pane.view.layoutSubtreeIfNeeded()
+        let expandedHeight = table.rect(ofRow: 1).height
+        XCTAssertGreaterThan(expandedHeight, collapsedHeight, "Expanding Advanced must grow the card row")
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+        pane.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(table.rect(ofRow: 1).height, collapsedHeight, accuracy: 0.5,
+                       "Collapsing Advanced must shrink the row again")
+    }
+
+    func testLongClientScopesKeepRevokeInsideTheCardAndClickable() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            for (count, length) in [(8, 67), (9, 200)] {
+                for state in [ClientGrantState.idle, .unconfirmed("2")] {
+                    let context = FakeContext()
+                    context.clients = [ClientRecord(id: "2", name: "Long Scope Agent",
+                        appIds: Self.longAppIDs(count: count, length: length), browser: false, foreground: true)]
+                    context.clientGrantState = state
+                    var confirmations: [String] = []
+                    let pane = ClientsPane(context: context, confirmRevoke: { client in
+                        confirmations.append(client.id)
+                        return true
+                    })
+                    let (window, table) = try Self.hostClientPane(pane)
+                    defer { window.orderOut(nil) }
+                    let card = try XCTUnwrap(pane.cardView(for: "2"))
+                    try XCTUnwrap(Self.view(in: card, id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+                    let revoke = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+                    if count == 8, case .unconfirmed = state,
+                       let path = ProcessInfo.processInfo.environment["CU_SETTINGS_SNAPSHOTS"] {
+                        let directory = URL(fileURLWithPath: path, isDirectory: true)
+                        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                        let bitmap = try XCTUnwrap(card.bitmapImageRepForCachingDisplay(in: card.bounds))
+                        card.cacheDisplay(in: card.bounds, to: bitmap)
+                        try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                            .write(to: directory.appendingPathComponent("clients-long-scope-\(language.rawValue).png"))
+                    }
+                    XCTAssertTrue(context.revokeRequests.isEmpty, "Laying out a long scope must not change authorization")
+                    revoke.performClick(nil)
+                    XCTAssertEqual(confirmations, ["2"], "The reachable action must use the existing local confirmation")
+                    XCTAssertEqual(context.revokeRequests, ["2"], "The action must revoke the owning client")
+                }
+            }
+        }
+    }
+
+    func testLongClientScopeRestoresItsHeightAfterCollapsingAndExpanding() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext()
+            context.clients = [ClientRecord(id: "2", name: "Long Scope Agent",
+                appIds: Self.longAppIDs(count: 8, length: 67), browser: false, foreground: true)]
+            context.clientGrantState = .unconfirmed("2")
+            let pane = ClientsPane(context: context)
+            let (window, table) = try Self.hostClientPane(pane)
+            defer { window.orderOut(nil) }
+            let card = try XCTUnwrap(pane.cardView(for: "2"))
+            let toggle = try XCTUnwrap(Self.view(in: card, id: "clients-advanced-toggle-2") as? NSButton)
+            let collapsedHeight = table.rect(ofRow: 0).height
+            toggle.performClick(nil)
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            let expandedHeight = table.rect(ofRow: 0).height
+            XCTAssertGreaterThan(expandedHeight, collapsedHeight)
+
+            toggle.performClick(nil)
+            pane.view.layoutSubtreeIfNeeded()
+            table.layoutSubtreeIfNeeded()
+            XCTAssertEqual(table.rect(ofRow: 0).height, collapsedHeight, accuracy: 0.5)
+            XCTAssertTrue(try XCTUnwrap(Self.view(in: card, id: "clients-advanced-panel-2")).isHidden)
+
+            toggle.performClick(nil)
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            XCTAssertEqual(table.rect(ofRow: 0).height, expandedHeight, accuracy: 0.5,
+                           "Expanding again must restore the measured height, including visible feedback")
+        }
+    }
+
+    func testExpandedClientRowRemeasuresScopeAndFeedbackChangesForTheSameIdentity() throws {
+        for language in HostLanguage.allCases {
+            HostLanguage.current = language
+            let context = FakeContext()
+            context.clients = [ClientRecord(id: "2", name: "Scope Agent", appIds: ["com.apple.TextEdit"],
+                                            browser: false, foreground: true)]
+            let pane = ClientsPane(context: context)
+            let (window, table) = try Self.hostClientPane(pane)
+            defer { window.orderOut(nil) }
+            try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")),
+                                   id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            let shortHeight = table.rect(ofRow: 0).height
+
+            context.clients[0] = ClientRecord(id: "2", name: "Scope Agent",
+                appIds: Self.longAppIDs(count: 8, length: 67), browser: false, foreground: true)
+            pane.refresh()
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            let longHeight = table.rect(ofRow: 0).height
+            XCTAssertGreaterThan(longHeight, shortHeight, "Changed scope data must invalidate the same client's row height")
+
+            context.clientGrantState = .unconfirmed("2")
+            pane.refresh()
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            XCTAssertGreaterThan(table.rect(ofRow: 0).height, longHeight,
+                                 "Feedback becoming visible must grow an already expanded long card")
+
+            context.clientGrantState = .idle
+            pane.refresh()
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            XCTAssertEqual(table.rect(ofRow: 0).height, longHeight, accuracy: 0.5,
+                           "Removing feedback must release its extra space")
+
+            context.clients[0] = ClientRecord(id: "2", name: "Scope Agent", appIds: ["com.apple.TextEdit"],
+                                            browser: false, foreground: true)
+            pane.refresh()
+            _ = try Self.reachableRevoke(in: pane, table: table, clientID: "2")
+            XCTAssertEqual(table.rect(ofRow: 0).height, shortHeight, accuracy: 0.5,
+                           "Returning to a short scope must shrink the row without losing disclosure state")
+            XCTAssertEqual(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")),
+                                                id: "clients-advanced-toggle-2") as? NSButton).state, .on)
+        }
+    }
+
+    private static func longAppIDs(count: Int, length: Int) -> [String] {
+        (0..<count).map { index in
+            let prefix = "com.example."
+            let suffix = String(index)
+            return prefix + String(repeating: "a", count: length - prefix.count - suffix.count) + suffix
+        }
+    }
+
+    private static func hostClientPane(_ pane: ClientsPane) throws -> (NSWindow, NSTableView) {
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: Form.pageWidth, height: 640),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        pane.refresh()
+        window.setContentSize(pane.view.fittingSize)
+        window.orderFrontRegardless()
+        pane.view.layoutSubtreeIfNeeded()
+        let table = try XCTUnwrap(descendants(pane.view).compactMap { $0 as? NSTableView }.first)
+        table.layoutSubtreeIfNeeded()
+        return (window, table)
+    }
+
+    /// Exercise the table's actual card frame and hit testing after scrolling its destructive action into view.
+    @discardableResult
+    private static func reachableRevoke(in pane: ClientsPane, table: NSTableView, clientID: String,
+                                        file: StaticString = #filePath, line: UInt = #line) throws -> NSButton {
+        pane.view.layoutSubtreeIfNeeded()
+        let row = try XCTUnwrap(pane.displayedClientIDs.firstIndex(of: clientID), file: file, line: line)
+        table.scrollRowToVisible(row)
+        let card = try XCTUnwrap(pane.cardView(for: clientID), file: file, line: line)
+        // noteHeightOfRows updates the row rect before its view's animated frame. Wait for the
+        // real table layout to settle so the regression measures clipping rather than animation.
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            pane.view.layoutSubtreeIfNeeded()
+            table.layoutSubtreeIfNeeded()
+            card.layoutSubtreeIfNeeded()
+            pane.view.window?.displayIfNeeded()
+            if abs(card.bounds.height - table.frameOfCell(atColumn: 0, row: row).height) <= 0.5 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        XCTAssertEqual(card.bounds.height, table.frameOfCell(atColumn: 0, row: row).height, accuracy: 0.5,
+                       "The table must finish applying its row height before checking its actions", file: file, line: line)
+        let revoke = try XCTUnwrap(view(in: card, id: "clients-revoke-\(clientID)") as? NSButton, file: file, line: line)
+        revoke.scrollToVisible(revoke.bounds)
+        let frame = revoke.convert(revoke.bounds, to: card)
+        XCTAssertTrue(card.bounds.contains(frame), "Revoke \(frame) must fit entirely inside its card \(card.bounds)",
+                      file: file, line: line)
+        XCTAssertTrue(revoke.isEnabled, file: file, line: line)
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        let hit = try XCTUnwrap(card.hitTest(card.convert(center, to: card.superview)),
+                               "Revoke must remain reachable through the card's bounds", file: file, line: line)
+        XCTAssertTrue(hit === revoke || hit.isDescendant(of: revoke), "Hit testing the action must reach its button",
+                      file: file, line: line)
+        return revoke
+    }
+
     private static func descendants(_ view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap(descendants)
+    }
+
+    private static func view(in root: NSView, id: String) -> NSView? {
+        descendants(root).first { $0.identifier?.rawValue == id }
     }
 
     func testGrantConfirmationRequiresExplicitApprovalInBothLanguages() throws {
@@ -155,7 +348,7 @@ final class SettingsLayoutTests: XCTestCase {
         XCTAssertEqual(ordinary.buttons[0].keyEquivalent, "\r", "Other confirmation defaults are unchanged")
     }
 
-    func testGrantAllAppsButtonUsesLocalClickAndRemainsAvailableWhilePaused() throws {
+    func testClientCardsExposePrimaryActionWithoutSelectingARow() throws {
         for language in HostLanguage.allCases {
             HostLanguage.current = language
             let context = FakeContext.states()[1].1
@@ -163,63 +356,72 @@ final class SettingsLayoutTests: XCTestCase {
             let pane = ClientsPane(context: context)
             _ = pane.view
             pane.refresh()
-            let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
-            let grant = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
-                .first { $0.identifier?.rawValue == "clients-grant-all-apps" })
-            XCTAssertFalse(grant.isEnabled)
+
+            let card2 = try XCTUnwrap(pane.cardView(for: "2"))
+            let grant2 = try XCTUnwrap(Self.view(in: card2, id: "clients-grant-2") as? NSButton)
+            XCTAssertFalse(grant2.isHidden)
+            XCTAssertTrue(grant2.isEnabled)
+            XCTAssertEqual(grant2.title, tr(.clientsGrantAllApps))
+            XCTAssertTrue(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "1")), id: "clients-grant-1") as? NSButton).isHidden)
+            XCTAssertTrue(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "3")), id: "clients-grant-3") as? NSButton).isHidden)
+            XCTAssertEqual(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "1")), id: "clients-status-1") as? NSTextField).stringValue,
+                           tr(.clientsGrantAlready))
+            XCTAssertEqual(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "3")), id: "clients-status-3") as? NSTextField).stringValue,
+                           tr(.clientsGrantBrowserOnly))
+            let grant4 = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "4")), id: "clients-grant-4") as? NSButton)
+            XCTAssertTrue(grant4.isEnabled, "An all-app grant without foreground may still need an upgrade")
+
             XCTAssertTrue(context.grantRequests.isEmpty, "Showing or refreshing the page never authorizes clients")
-            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            XCTAssertEqual(grant.title, tr(.clientsGrantAlready))
-            XCTAssertFalse(grant.isEnabled)
-            table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
-            XCTAssertFalse(grant.isEnabled, "Browser-only access cannot expand through this action")
-            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-            XCTAssertTrue(grant.isEnabled)
+            grant2.performClick(nil)
+            XCTAssertEqual(context.grantRequests, ["2"])
+
             context.serviceState = .paused
             pane.refresh()
-            XCTAssertTrue(grant.isEnabled)
-            grant.performClick(nil)
-            XCTAssertEqual(context.grantRequests, ["2"])
-            XCTAssertEqual(context.resumeCount, 0, "Authorization management must not resume actions")
-            table.selectRowIndexes(IndexSet(integer: 3), byExtendingSelection: false)
-            XCTAssertTrue(grant.isEnabled, "An old all-app grant may still need foreground access")
+            XCTAssertTrue(grant2.isEnabled, "Authorization management remains available while paused")
+
             context.isRunning = false
             pane.refresh()
-            XCTAssertFalse(grant.isEnabled)
+            XCTAssertEqual(try XCTUnwrap(Self.view(in: pane.view, id: "clients-placeholder") as? NSTextField).stringValue,
+                           tr(.clientsNotRunning))
+            XCTAssertTrue(pane.displayedClientIDs.isEmpty)
         }
     }
 
-    func testClientGrantFeedbackWaitsForAckAndReportsTimeoutOrFailure() throws {
+    func testClientGrantFeedbackStaysWithOwningCardAndSurvivesRemoval() throws {
         let context = FakeContext.states()[1].1
+        context.clients.append(ClientRecord(id: "4", name: "Old all apps", allApps: true, foreground: false))
         let pane = ClientsPane(context: context)
         _ = pane.view
         pane.refresh()
-        let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
-        let grant = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "clients-grant-all-apps" })
-        let feedback = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "clients-grant-feedback" })
-        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        let grant2 = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-grant-2") as? NSButton)
+        let grant4 = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "4")), id: "clients-grant-4") as? NSButton)
+        XCTAssertTrue(grant2.isEnabled)
+
         var tracker = ClientGrantTracker()
         _ = tracker.begin(client: context.clients[1], generation: UUID())
         context.clientGrantState = tracker.state
         pane.refresh()
-        XCTAssertFalse(grant.isEnabled)
-        XCTAssertEqual(feedback.stringValue, tr(.clientsGrantPending))
+        let feedback2 = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-feedback-2") as? NSTextField)
+        XCTAssertEqual(feedback2.stringValue, tr(.clientsGrantPending))
+        XCTAssertFalse(feedback2.isHidden)
+        XCTAssertFalse(grant2.isEnabled)
+        XCTAssertFalse(grant4.isEnabled, "A pending request blocks every upgrade button")
+        XCTAssertTrue(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "1")), id: "clients-feedback-1") as? NSTextField).isHidden,
+                      "Another client's result must not appear on this card")
         for (state, key) in [(ClientGrantState.unconfirmed("2"), L10nKey.clientsGrantUnconfirmed),
                              (.failed("2", "unavailable"), .clientsGrantFailed),
                              (.succeeded("2"), .clientsGrantSucceeded)] {
             context.clientGrantState = state
             pane.refresh()
-            XCTAssertEqual(feedback.stringValue, tr(key))
+            XCTAssertEqual(feedback2.stringValue, tr(key))
         }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        XCTAssertTrue(feedback.isHidden, "Another client's successful grant must not appear on the selected client")
-        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         context.clientGrantState = .failed("2", "not_found")
-        context.clients.remove(at: 1)
+        context.clients.removeAll { $0.id == "2" }
         pane.refresh()
-        XCTAssertEqual(feedback.stringValue, tr(.clientsGrantUnavailable), "Failure stays visible when revocation removed the row")
+        let fallback = try XCTUnwrap(Self.view(in: pane.view, id: "clients-grant-feedback") as? NSTextField)
+        XCTAssertEqual(fallback.stringValue, tr(.clientsGrantUnavailable),
+                       "A result for a removed client remains visible on the page")
+        XCTAssertFalse(fallback.isHidden)
     }
 
     func testPairingMessageDistinguishesAllAppsFromExistingRestrictedScope() throws {
@@ -251,38 +453,110 @@ final class SettingsLayoutTests: XCTestCase {
         }
     }
 
-    func testClientIDColumnShowsTheShortIdentity() throws {
+    func testClientCardShowsShortIdentityAndAdvancedScope() throws {
         for language in HostLanguage.allCases {
             HostLanguage.current = language
+            let longID = "c1d2e3f4-0000-4000-8000-000000000001"
             let context = FakeContext.states()[1].1
-            context.clients[0] = ClientRecord(id: "c1d2e3f4-0000-4000-8000-000000000001", name: "Codex", appIds: [], allApps: true, browser: false, foreground: true)
+            context.clients[0] = ClientRecord(id: longID, name: "Codex", appIds: [], allApps: true, browser: false, foreground: true)
             let pane = ClientsPane(context: context)
             _ = pane.view
             pane.refresh()
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("id"))
-            let cell = try XCTUnwrap(pane.tableView(NSTableView(), viewFor: column, row: 0) as? NSTableCellView)
-            XCTAssertEqual(cell.textField?.stringValue, "c1d2e3f4")
-            XCTAssertEqual(cell.toolTip, "c1d2e3f4-0000-4000-8000-000000000001")
-            let table = try XCTUnwrap(Self.descendants(pane.view).compactMap { $0 as? NSTableView }.first)
-            XCTAssertEqual(table.tableColumns.map(\.identifier.rawValue), ["name", "id", "apps", "browser", "foreground"])
+            let longCard = try XCTUnwrap(pane.cardView(for: longID))
+            let short = try XCTUnwrap(Self.view(in: longCard, id: "clients-id-\(longID)") as? NSTextField)
+            XCTAssertEqual(short.stringValue, "c1d2e3f4")
+            XCTAssertEqual(short.toolTip, longID)
+            let scope = try XCTUnwrap(Self.view(in: longCard, id: "clients-scope-\(longID)") as? NSTextField)
+            XCTAssertTrue(scope.stringValue.contains(longID))
+            XCTAssertTrue(scope.stringValue.contains(tr(.clientsAllApps)))
+            let toggle = try XCTUnwrap(Self.view(in: longCard, id: "clients-advanced-toggle-\(longID)") as? NSButton)
+            let panel = try XCTUnwrap(Self.view(in: longCard, id: "clients-advanced-panel-\(longID)"))
+            XCTAssertTrue(panel.isHidden)
+            toggle.performClick(nil)
+            XCTAssertFalse(panel.isHidden)
+            XCTAssertTrue(scope.stringValue.contains(tr(.clientsDesktopApps)))
+
+            let restrictedBadge = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-badge-2") as? NSTextField)
+            XCTAssertEqual(restrictedBadge.stringValue, tr(.clientsBadgeRestricted, 2))
+            let restrictedScope = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-scope-2") as? NSTextField)
+            XCTAssertTrue(restrictedScope.stringValue.contains("com.apple.TextEdit"), restrictedScope.stringValue)
+            XCTAssertTrue(restrictedScope.stringValue.contains("com.apple.Notes"), restrictedScope.stringValue)
+            let browserBadge = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "3")), id: "clients-badge-3") as? NSTextField)
+            XCTAssertEqual(browserBadge.stringValue, tr(.clientsBadgeBrowserOnly))
         }
     }
 
-    func testClientScopeCellsShowAllAppsRestrictedAppsAndBrowserOnly() throws {
-        for language in HostLanguage.allCases {
-            HostLanguage.current = language
-            let pane = ClientsPane(context: FakeContext.states()[1].1)
-            _ = pane.view
-            pane.refresh()
-            let table = NSTableView()
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("apps"))
-            let expected = [tr(.clientsAllApps), "com.apple.TextEdit, com.apple.Notes", tr(.clientsNo)]
-            XCTAssertEqual(pane.numberOfRows(in: table), expected.count)
-            for (row, label) in expected.enumerated() {
-                let cell = try XCTUnwrap(pane.tableView(table, viewFor: column, row: row) as? NSTableCellView)
-                XCTAssertEqual(cell.textField?.stringValue, label)
-            }
+    func testClientSearchFiltersByNameShortIDAndAppID() throws {
+        let context = FakeContext.states()[1].1
+        let pane = ClientsPane(context: context)
+        _ = pane.view
+        pane.refresh()
+        let search = try XCTUnwrap(Self.view(in: pane.view, id: "clients-search") as? NSSearchField)
+        XCTAssertEqual(pane.displayedClientIDs.count, 3)
+        for (query, expected) in [("browser", ["3"]), ("com.apple.notes", ["2"]), ("not-a-client", [])] {
+            search.stringValue = query
+            pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+            XCTAssertEqual(pane.displayedClientIDs, expected, query)
         }
+        XCTAssertEqual(try XCTUnwrap(Self.view(in: pane.view, id: "clients-placeholder") as? NSTextField).stringValue,
+                       tr(.clientsNoMatches))
+        search.stringValue = ""
+        pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        XCTAssertEqual(pane.displayedClientIDs.count, 3)
+    }
+
+    func testAdvancedDisclosureSurvivesRefreshAndSearch() throws {
+        let context = FakeContext.states()[1].1
+        let pane = ClientsPane(context: context)
+        _ = pane.view
+        pane.refresh()
+        let toggle = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton)
+        let panel = try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-panel-2"))
+        toggle.performClick(nil)
+        XCTAssertFalse(panel.isHidden)
+        pane.refresh()
+        XCTAssertFalse(panel.isHidden, "Timer refresh must preserve an expanded card")
+
+        let search = try XCTUnwrap(Self.view(in: pane.view, id: "clients-search") as? NSSearchField)
+        search.stringValue = "codex"
+        pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        search.stringValue = ""
+        pane.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        XCTAssertFalse(try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-panel-2")).isHidden,
+                       "Filtering out and restoring a client preserves its expanded scope")
+    }
+
+    func testRevokeRequiresConfirmationAndCallsContext() throws {
+        let context = FakeContext.states()[1].1
+        var confirmed: ClientRecord?
+        let pane = ClientsPane(context: context, confirmRevoke: { client in confirmed = client; return true })
+        _ = pane.view
+        pane.refresh()
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(pane.cardView(for: "2")), id: "clients-revoke-2") as? NSButton).performClick(nil)
+        XCTAssertEqual(confirmed?.id, "2")
+        XCTAssertEqual(context.revokeRequests, ["2"])
+
+        let other = FakeContext.states()[1].1
+        var asked = false
+        let denying = ClientsPane(context: other, confirmRevoke: { _ in asked = true; return false })
+        _ = denying.view
+        denying.refresh()
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(denying.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+        try XCTUnwrap(Self.view(in: try XCTUnwrap(denying.cardView(for: "2")), id: "clients-revoke-2") as? NSButton).performClick(nil)
+        XCTAssertTrue(asked)
+        XCTAssertTrue(other.revokeRequests.isEmpty, "Dismissing the confirmation keeps the client")
+    }
+
+    func testOfflineServiceShowsPlaceholderAndNoActions() throws {
+        let context = FakeContext.states()[0].1
+        let pane = ClientsPane(context: context)
+        _ = pane.view
+        pane.refresh()
+        XCTAssertEqual(try XCTUnwrap(Self.view(in: pane.view, id: "clients-placeholder") as? NSTextField).stringValue,
+                       tr(.clientsNotRunning))
+        XCTAssertTrue(pane.displayedClientIDs.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(Self.view(in: pane.view, id: "clients-search") as? NSSearchField).isEnabled)
     }
 
     func testEveryPaneFitsThePageInBothLanguagesAndStates() throws {
@@ -347,7 +621,7 @@ final class SettingsLayoutTests: XCTestCase {
         }
     }
 
-    /// Render only fake clients and a non-modal confirmation; never send an authorization command.
+    /// Render client cards and the non-modal confirmation; never send an authorization command.
     func testClientGrantSnapshotsAndConfirmationLayout() throws {
         guard let path = ProcessInfo.processInfo.environment["CU_SETTINGS_SNAPSHOTS"] else {
             throw XCTSkip("Set CU_SETTINGS_SNAPSHOTS to render grant management")
@@ -368,8 +642,14 @@ final class SettingsLayoutTests: XCTestCase {
             controller.tabs.select(.clients)
             controller.tabs.refreshAll()
             let view = try XCTUnwrap(controller.tabs.tabView.selectedTabViewItem?.viewController?.view)
-            let table = try XCTUnwrap(Self.descendants(view).compactMap { $0 as? NSTableView }.first)
-            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            let clientsPane = try XCTUnwrap(controller.tabs.tabView.selectedTabViewItem?.viewController as? ClientsPane)
+            controller.tabs.fitWindow(animated: false)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            try Self.snapshot(view, to: directory.appendingPathComponent("clients-\(language.rawValue)-collapsed.png"))
+            try XCTUnwrap(Self.view(in: try XCTUnwrap(clientsPane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton).performClick(nil)
+            controller.tabs.refreshAll()
+            controller.tabs.fitWindow(animated: false)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             var tracker = ClientGrantTracker()
             _ = tracker.begin(client: context.clients[1], generation: UUID())
             let states: [(String, ClientGrantState)] = [("ready", .idle), ("pending", tracker.state),
@@ -384,8 +664,18 @@ final class SettingsLayoutTests: XCTestCase {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.1))
                 XCTAssertLessThanOrEqual(view.subviews.first!.fittingSize.width, Form.pageWidth - 56)
                 XCTAssertLessThan(view.fittingSize.height, 720)
-                try Self.snapshot(view, to: directory.appendingPathComponent("grant-\(language.rawValue)-\(name).png"))
+                try Self.snapshot(view, to: directory.appendingPathComponent("clients-\(language.rawValue)-\(name).png"))
             }
+            if let toggle = Self.view(in: try XCTUnwrap(clientsPane.cardView(for: "2")), id: "clients-advanced-toggle-2") as? NSButton,
+               toggle.state == .on {
+                toggle.performClick(nil)
+            }
+            context.clientGrantState = .idle
+            controller.tabs.refreshAll()
+            controller.tabs.fitWindow(animated: false)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            try Self.snapshot(view, to: directory.appendingPathComponent("clients-\(language.rawValue)-collapsed-after.png"))
+
             let alert = Alerts.confirmation(tr(.clientsGrantTitle, "Restricted Agent"), tr(.clientsGrantBody), confirm: tr(.clientsGrantConfirm), defaultCancel: true)
             alert.window.appearance = NSAppearance(named: .aqua)
             alert.layout()
@@ -399,7 +689,7 @@ final class SettingsLayoutTests: XCTestCase {
             let bitmap = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
             frame.cacheDisplay(in: frame.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                .write(to: directory.appendingPathComponent("grant-\(language.rawValue)-confirmation.png"))
+                .write(to: directory.appendingPathComponent("clients-\(language.rawValue)-confirmation.png"))
         }
     }
 
@@ -448,7 +738,8 @@ private final class FakeContext: HostContext {
     func resumeActions() { resumeCount += 1 }
     func emergencyStop() {}
     func restartServices() {}
-    func revokeClient(_ id: String) {}
+    var revokeRequests: [String] = []
+    func revokeClient(_ id: String) { revokeRequests.append(id) }
     var grantRequests: [String] = []
     func grantAllApps(_ id: String) { grantRequests.append(id) }
     func setHTTPEnabled(_ enabled: Bool) {}
