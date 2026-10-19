@@ -15,6 +15,9 @@ internal static class Program
     private static void Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--cli-fixture") { CliFixture(args[1]); return; }
+        // Test failures in WinForms event handlers must reach stderr rather
+        // than waiting indefinitely in the framework's error dialog.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         ApplicationConfiguration.Initialize();
         if (args.Length == 1 && args[0] == "--startup-state-checks")
         {
@@ -39,40 +42,76 @@ internal static class Program
             Console.WriteLine("PASS: no installation is registered for the current user");
             return;
         }
-        var screenshots = args.Length == 2 && args[0] == "--screenshots" ? args[1] : null;
-        CheckTranslations();
-        CheckHelpers();
-        CheckNativeHelpers();
-        CheckPackageCommand();
-        CheckStandardHandleInheritance();
-        CheckStartupState();
-        CheckStartupLifecycle();
-        CheckFaultRecovery();
+        string? screenshots = null;
+        int? expectedDpi = null;
+        var clientsOnly = false;
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (args[index] == "--screenshots" && index + 1 < args.Length) screenshots = args[++index];
+            else if (args[index] == "--clients-only") clientsOnly = true;
+            else if (args[index] == "--expected-dpi" && index + 1 < args.Length
+                && int.TryParse(args[++index], out var dpi) && dpi > 0) expectedDpi = dpi;
+            else throw new ArgumentException("Expected --screenshots DIRECTORY, --expected-dpi INTEGER and/or --clients-only.");
+        }
+        if (expectedDpi is { } requestedDpi)
+        {
+            using var probe = new Form();
+            probe.Show(); Pump();
+            Check(probe.DeviceDpi == requestedDpi,
+                $"real process DPI must be {requestedDpi}, actual {probe.DeviceDpi}; change Windows display scale and restart the harness");
+            Console.WriteLine($"PASS: real process DPI is {probe.DeviceDpi} ({probe.DeviceDpi * 100 / 96}% display scale)");
+        }
+        RunCheck(nameof(CheckTranslations), CheckTranslations);
+        RunCheck(nameof(CheckHelpers), CheckHelpers);
+        RunCheck(nameof(CheckNativeHelpers), CheckNativeHelpers);
+        RunCheck(nameof(CheckPackageCommand), CheckPackageCommand);
+        RunCheck(nameof(CheckStandardHandleInheritance), CheckStandardHandleInheritance);
+        if (!clientsOnly)
+        {
+            RunCheck(nameof(CheckStartupState), CheckStartupState);
+            RunCheck(nameof(CheckStartupLifecycle), CheckStartupLifecycle);
+            RunCheck(nameof(CheckFaultRecovery), CheckFaultRecovery);
+        }
+        else Console.WriteLine("TARGETED: --clients-only skips startup-state/startup-lifecycle/fault-recovery suites; it does not replace a full harness run");
         var data = Path.Combine(Path.GetTempPath(), "cu-host-tests-" + Guid.NewGuid().ToString("N"));
         try
         {
-            CheckSettingsStore(data);
+            RunCheck(nameof(CheckSettingsStore), () => CheckSettingsStore(data));
+            Console.WriteLine("CHECK: main UI fixture: host construction start");
             using var host = new HostApplication(showWindow: true, dataDirectory: data);
             Pump();
+            Console.WriteLine("CHECK: main UI fixture: host ready");
             try
             {
-                CheckAuthorizationLifecycle(host);
-                CheckPairingScopes(host);
-                CheckSettingsWindow(host);
-                CheckGrantAllApps(host);
-                CheckGrantRevocation(host);
-                CheckSettingsInteractions(host);
-                CheckSkillConnection(host);
-                CheckSettingsLayouts(host);
-                CheckUpdatePage(host);
-                if (screenshots is not null) Screenshots(host, screenshots);
+                RunCheck(nameof(CheckAuthorizationLifecycle), () => CheckAuthorizationLifecycle(host));
+                RunCheck(nameof(CheckPairingScopes), () => CheckPairingScopes(host));
+                RunCheck(nameof(CheckSettingsWindow), () => CheckSettingsWindow(host));
+                RunCheck(nameof(CheckClientCards), () => CheckClientCards(host));
+                RunCheck(nameof(CheckGrantAllApps), () => CheckGrantAllApps(host));
+                RunCheck(nameof(CheckGrantRevocation), () => CheckGrantRevocation(host));
+                RunCheck(nameof(CheckSettingsInteractions), () => CheckSettingsInteractions(host));
+                RunCheck(nameof(CheckSkillConnection), () => CheckSkillConnection(host));
+                RunCheck(nameof(CheckSettingsLayouts), () => CheckSettingsLayouts(host));
+                RunCheck(nameof(CheckUpdatePage), () => CheckUpdatePage(host));
+                if (screenshots is not null) RunCheck(nameof(Screenshots), () => Screenshots(host, screenshots, clientsOnly));
             }
-            finally { Invoke(host, "ExitAsync").GetAwaiter().GetResult(); }
+            finally
+            {
+                Console.WriteLine("CHECK: main UI fixture: host exit start");
+                Invoke(host, "ExitAsync").GetAwaiter().GetResult();
+                Console.WriteLine("CHECK: main UI fixture: host exit complete");
+            }
         }
         finally
         {
             try { Directory.Delete(data, recursive: true); } catch { }
         }
+    }
+
+    private static void RunCheck(string name, Action run)
+    {
+        Console.WriteLine($"CHECK: suite {name}: start");
+        run();
     }
 
     private static void CheckStandardHandleInheritance()
@@ -284,6 +323,8 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(Point point);
 
     private static void CheckStartupState()
     {
@@ -418,12 +459,15 @@ internal static class Program
     {
         foreach (var pause in new[] { true, false })
         {
+            var context = pause ? "pause" : "emergency-stop";
+            Console.WriteLine($"CHECK: startup lifecycle {context}: initial host start");
             var data = Path.Combine(Path.GetTempPath(), "cu-startup-lifecycle-" + Guid.NewGuid().ToString("N"));
             try
             {
                 using (var host = new HostApplication(showWindow: false, dataDirectory: data))
                 {
                     Pump();
+                    Console.WriteLine($"CHECK: startup lifecycle {context}: initial host ready");
                     var runtime = HostRuntime.Last!;
                     var store = new HostStartupStore(data);
                     Check(store.Read()!.State == "ready", "completed startup publishes ready");
@@ -436,8 +480,10 @@ internal static class Program
                     Check(HostStartup.BlockingCode(store.Read(), sameLiveProcess: false) == (pause ? "paused" : "stopped"),
                         "exit preserves the earlier user block");
                 }
+                Console.WriteLine($"CHECK: startup lifecycle {context}: initial host exit complete");
                 foreach (var showWindow in new[] { false, true })
                 {
+                    Console.WriteLine($"CHECK: startup lifecycle {context}: reopen showWindow={showWindow} start");
                     var starts = HostRuntime.StartCount;
                     using var reopened = new HostApplication(showWindow: showWindow, dataDirectory: data);
                     Pump();
@@ -451,7 +497,9 @@ internal static class Program
                     Check(ControlField<Button>(window, "_pause").Enabled == pause
                         && ControlField<Button>(window, "_restart").Enabled, "persisted block exposes the appropriate local recovery controls");
                     Invoke(reopened, "ExitAsync").GetAwaiter().GetResult();
+                    Console.WriteLine($"CHECK: startup lifecycle {context}: reopen showWindow={showWindow} complete");
                 }
+                Console.WriteLine($"CHECK: startup lifecycle {context}: local recovery start");
                 using (var recovered = new HostApplication(showWindow: false, dataDirectory: data))
                 {
                     Pump();
@@ -463,16 +511,19 @@ internal static class Program
                         "only the local Resume or Restart action clears a persisted user block");
                     Invoke(recovered, "ExitAsync").GetAwaiter().GetResult();
                 }
+                Console.WriteLine($"CHECK: startup lifecycle {context}: local recovery complete");
             }
             finally { Directory.Delete(data, recursive: true); }
         }
         var raceData = Path.Combine(Path.GetTempPath(), "cu-startup-race-" + Guid.NewGuid().ToString("N"));
+        Console.WriteLine("CHECK: startup lifecycle races: pending-start stop start");
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         HostRuntime.NextStart = gate.Task;
         try
         {
             using var host = new HostApplication(showWindow: false, dataDirectory: raceData);
             Pump();
+            Console.WriteLine("CHECK: startup lifecycle races: pending-start fixture ready");
             var runtime = HostRuntime.Last!;
             runtime.Emit(new { @event = "ready" });
             Pump();
@@ -491,6 +542,7 @@ internal static class Program
             Pump();
             Check(host.IsRunning && !host.IsPaused && new HostStartupStore(raceData).Read() is { State: "ready", AutoStartBlocked: false },
                 "local restart recovers and ignores an old runtime's ready event");
+            Console.WriteLine("CHECK: startup lifecycle races: pending-start stop complete; pending-resume stop start");
             host.TogglePauseAsync().GetAwaiter().GetResult();
             var controlGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             HostRuntime.NextControl = controlGate.Task;
@@ -501,6 +553,7 @@ internal static class Program
             Check(!host.IsRunning && host.ServiceStatus == L10n.T(Msg.StatusEmergencyStopped)
                 && new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
                 "a late Resume control completion cannot overwrite emergency stop or its visible state");
+            Console.WriteLine("CHECK: startup lifecycle races: pending-resume stop complete; pending-disposal stop start");
             host.RestartServicesAsync().GetAwaiter().GetResult();
             var disposeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             HostRuntime.NextDispose = disposeGate.Task;
@@ -516,9 +569,11 @@ internal static class Program
             Check(!host.IsRunning && HostRuntime.StartCount == starts
                 && new HostStartupStore(raceData).Read() is { State: "stopped", AutoStartBlocked: true },
                 "emergency stop during restart wins without starting a replacement");
+            Console.WriteLine("CHECK: startup lifecycle races: pending-disposal stop complete; exit start");
             Invoke(host, "ExitAsync").GetAwaiter().GetResult();
             Check(HostStartup.BlockingCode(new HostStartupStore(raceData).Read(), sameLiveProcess: false) == "stopped",
                 "emergency stop during restart remains blocked across exit");
+            Console.WriteLine("CHECK: startup lifecycle races: exit complete");
         }
         finally
         {
@@ -586,13 +641,24 @@ internal static class Program
             Check(!host.IsRunning && HostRuntime.StartCount == starts && store.Read() is { State: "stopped", AutoStartBlocked: true },
                 "emergency stop during retiring-worker wait cancels recovery and remains persisted");
 
+            // Recovery can return as soon as the user hold cancels it, before
+            // the separate fatal-event stop finishes its asynchronous disposal.
+            var stopped = System.Diagnostics.Stopwatch.StartNew();
+            while (host.IsBusy && stopped.Elapsed < TimeSpan.FromSeconds(10)) { Pump(); Thread.Sleep(1); }
+            Check(!host.IsBusy && Field(host, "_runtime") is null && Field(host, "_retiringRuntime") is null,
+                "emergency-stop fixture fully retires its worker before the next recovery scenario");
             host.RestartServicesAsync().GetAwaiter().GetResult();
+            Check(host.IsRunning && !host.IsBusy && HostRuntime.StartCount == starts + 1,
+                "failed-disposal fixture starts exactly one fresh runtime before injecting a teardown failure");
             starts = HostRuntime.StartCount;
             HostRuntime.NextDispose = Task.FromException(new IOException("worker did not exit"));
             HostRuntime.Last!.Emit(new { @event = "fatal", message = "uncertain teardown" });
             Pump();
             Check(Field(host, "_retiringRuntime") is not null && !host.IsRunning,
-                "failed disposal retains the old runtime rather than declaring its processes gone");
+                "failed disposal retains the old runtime rather than declaring its processes gone; "
+                + $"retiringRuntimeNull={Field(host, "_retiringRuntime") is null}, runtimeNull={Field(host, "_runtime") is null}, "
+                + $"IsRunning={host.IsRunning}, IsBusy={host.IsBusy}, GrantRevision={host.GrantRevision}, "
+                + $"NextDispose={HostRuntime.NextDispose?.Status.ToString() ?? "null"}");
             HostRuntime.NextDispose = Task.FromException(new IOException("worker still alive"));
             Invoke(host, "RecoverFaultAsync").GetAwaiter().GetResult();
             Check(HostRuntime.StartCount == starts && Field(host, "_retiringRuntime") is not null,
@@ -788,8 +854,7 @@ internal static class Program
         }
         window.ShowPage(SettingsPage.Clients);
         Pump();
-        var revoke = ControlField<Button>(window, "_revoke");
-        Check(!revoke.Enabled, "revoke is disabled without a selected client");
+        Check(!Descendants(window.ClientPane).OfType<ListView>().Any(), "client authorization does not depend on selecting a list row");
         var allAppsClient = new { id = "c", name = "All apps", appIds = Array.Empty<string>(), allApps = true, browser = false, foreground = true };
         var clients = new object[]
         {
@@ -799,34 +864,26 @@ internal static class Program
             new { id = "d", name = "Browser", appIds = Array.Empty<string>(), allApps = false, browser = true, foreground = false },
         };
         Event(host, new { @event = "clients", clients });
-        var items = window.ClientList.Items.Cast<ListViewItem>().ToArray();
-        Check(items.Length == 4 && window.ClientList.Columns.Count == 5, "client list shows every paired client with its ID and the four scope columns");
-        Check(items.Select(item => item.SubItems[1].Text).SequenceEqual(new[] { "a", "b", "c", "d" }),
-            "the ID column shows the same short ID the agent sees");
-        Check(items[0].SubItems[2].Text == @"c:\apps\fixture&tool.exe" && items[0].SubItems[4].Text == L10n.T(Msg.ClientsYes),
-            "client list shows the authorized paths without the internal prefix");
-        Check(items[1].SubItems[2].Text == L10n.T(Msg.ClientsNo), "older runtimes without grant fields still list the client");
+        var pane = window.ClientPane;
+        Check(pane.DisplayedClientIds.SequenceEqual(new[] { "a", "b", "c", "d" }),
+            "client cards show every paired client with stable identity");
+        Check(pane.CardFor("a")!.IdLabel.Text.Contains("a"), "cards expose the same short ID the agent sees");
+        pane.CardFor("a")!.AdvancedButton.PerformClick(); Pump();
+        Check(pane.CardFor("a")!.ScopeLabel.Text.Contains(@"c:\apps\fixture&tool.exe")
+            && !pane.CardFor("a")!.ScopeLabel.Text.Contains("win32:") && !pane.CardFor("a")!.ScopeLabel.UseMnemonic,
+            "advanced application paths show ampersands literally without internal prefixes");
+        Check(pane.CardFor("b") is not null, "older runtimes without grant fields still list the client");
         Check(host.Clients.Select(client => client.AllApps).SequenceEqual(new[] { false, false, true, false }),
             "only an explicit allApps grant is parsed as all desktop apps");
-        Check(items[2].SubItems[2].Text == L10n.T(Msg.ClientsAllApps) && items[2].SubItems[3].Text == L10n.T(Msg.ClientsNo),
-            "client list shows all desktop apps without granting browser access");
-        Check(items[3].SubItems[2].Text == L10n.T(Msg.ClientsNo) && items[3].SubItems[3].Text == L10n.T(Msg.ClientsYes),
-            "browser-only clients still have no desktop apps");
-        items[0].Selected = true;
-        Pump();
-        var scope = ControlField<Label>(window, "_clientScope");
-        Check(scope.Text == @"c:\apps\fixture&tool.exe" && !scope.UseMnemonic,
-            "selected application paths display ampersands literally rather than as shortcut markers");
-        items[2].Selected = true;
-        Pump();
-        Check(revoke.Enabled, "selecting one client enables revocation");
+        Check(pane.CardFor("c")!.StatusLabel.Text == L10n.T(Msg.ClientsGranted)
+            && !pane.CardFor("c")!.GrantButton.Visible, "complete grant is status text rather than a disabled primary action");
+        Check(!pane.CardFor("d")!.GrantButton.Visible, "browser-only cards cannot expand into desktop clients");
         clients[2] = new { id = "c", name = "All apps", appIds = Array.Empty<string>(), allApps = false, browser = false, foreground = true };
         Event(host, new { @event = "clients", clients });
-        Check(window.ClientList.Items[2].SubItems[2].Text == L10n.T(Msg.ClientsNo), "scope-only changes refresh the client list");
-        Check(window.ClientList.SelectedItems.Count == 1 && (string?)window.ClientList.SelectedItems[0].Tag == "c" && revoke.Enabled,
-            "scope refresh preserves the selected client identity");
+        pane.CardFor("c")!.AdvancedButton.PerformClick(); Pump();
+        Check(!pane.CardFor("c")!.ScopeLabel.Text.Contains(L10n.T(Msg.ClientsAllApps)), "scope-only changes refresh the matching client card");
         Event(host, new { @event = "clients", clients = clients.Where((_, index) => index != 2).ToArray() });
-        Check(window.ClientList.SelectedItems.Count == 0 && !revoke.Enabled, "removing the selected client disables revocation");
+        Check(pane.CardFor("c") is null, "removing a client removes its action controls");
         clients[2] = allAppsClient;
         Event(host, new { @event = "clients", clients });
         Event(host, new { @event = "status", message = "Local MCP: http://127.0.0.1:47631/mcp" });
@@ -859,30 +916,20 @@ internal static class Program
         });
         window.ShowPage(SettingsPage.Clients);
         Pump();
-        var button = ControlField<Button>(window, "_grantAllApps");
-        void Select(int index)
-        {
-            foreach (ListViewItem item in window.ClientList.Items) item.Selected = false;
-            window.ClientList.Items[index].Selected = true;
-            window.RefreshAll();
-            Pump();
-        }
-        Select(2);
-        Check(!button.Enabled, "browser-only clients cannot be expanded into desktop clients");
-        Select(3);
-        Check(!button.Enabled && button.Text == L10n.T(Msg.ClientsGranted), "already complete grants show their status without an action");
-        Select(1);
-        Check(button.Enabled, "all-app clients missing foreground permission can upgrade");
-        Select(0);
+        ClientCard Card(string clientId) => window.ClientPane.CardFor(clientId)!;
+        Check(!Card("grant-browser").GrantButton.Visible, "browser-only clients cannot be expanded into desktop clients");
+        Check(!Card("grant-complete").GrantButton.Visible && Card("grant-complete").StatusLabel.Text == L10n.T(Msg.ClientsGranted),
+            "already complete grants show their status without an action");
+        Check(Card("grant-foreground").GrantButton.Enabled, "all-app clients missing foreground permission can upgrade");
         var before = HostRuntime.Commands.Count;
-        button.PerformClick(); Pump();
+        Card("grant-scoped").GrantButton.PerformClick(); Pump();
         Check(confirmations == 1 && HostRuntime.Commands.Count == before, "cancelling local confirmation does not send an upgrade command");
         confirmed = true;
-        button.PerformClick(); Pump(); window.RefreshAll();
+        Card("grant-scoped").GrantButton.PerformClick(); Pump(); window.RefreshAll();
         var id = HostRuntime.RequestIds.Last()!;
         Check(confirmations == 2 && Guid.TryParse(id, out _) && HostRuntime.Commands.Last() == "grant_all_apps:grant-scoped",
             "confirmation sends one correlated internal command with a fresh request UUID");
-        Check(host.GrantState("grant-scoped") == ClientGrantState.Pending && !button.Enabled,
+        Check(host.GrantState("grant-scoped") == ClientGrantState.Pending && !Card("grant-scoped").GrantButton.Enabled,
             "pipe write is not success and duplicate upgrade is disabled while awaiting persistence");
         host.GrantAllAppsAsync("grant-scoped", host.GrantRevision).GetAwaiter().GetResult();
         Check(HostRuntime.Commands.Count == before + 1, "pending request is not submitted twice");
@@ -892,8 +939,8 @@ internal static class Program
         Event(host, Ack(Guid.NewGuid().ToString(), true));
         Check(host.GrantState("grant-scoped") == ClientGrantState.Pending, "unrelated acknowledgement cannot complete the current request");
         Event(host, Ack(id, false)); window.RefreshAll();
-        Check(host.GrantState("grant-scoped") == ClientGrantState.SaveFailed && button.Enabled
-            && ControlField<Label>(window, "_grantFeedback").Text == L10n.T(Msg.ClientsGrantSaveFailed),
+        Check(host.GrantState("grant-scoped") == ClientGrantState.SaveFailed && Card("grant-scoped").GrantButton.Enabled
+            && Card("grant-scoped").FeedbackLabel.Text == L10n.T(Msg.ClientsGrantSaveFailed),
             "persist failure is visible without leaking worker error details or changing scope");
 
         host.TogglePauseAsync().GetAwaiter().GetResult();
@@ -902,7 +949,8 @@ internal static class Program
         clients[0] = new { id = "grant-scoped", name = "Scoped fixture", appIds = Array.Empty<string>(), allApps = true, browser = true, foreground = true };
         Event(host, Ack(id, true)); window.RefreshAll();
         Check(host.GrantState("grant-scoped") == ClientGrantState.Succeeded && host.IsPaused
-            && host.Clients[0].Browser && !button.Enabled && button.Text == L10n.T(Msg.ClientsGranted),
+            && host.Clients[0].Browser && !Card("grant-scoped").GrantButton.Visible
+            && Card("grant-scoped").StatusLabel.Text == L10n.T(Msg.ClientsGranted),
             "persisted acknowledgement updates the UI while preserving pause and browser permission");
         host.TogglePauseAsync().GetAwaiter().GetResult();
 
@@ -940,10 +988,234 @@ internal static class Program
         Check(host.GrantState("grant-foreground") == ClientGrantState.Missing, "revoked or missing client has a distinct bounded failure state");
         host.GrantAllAppsAsync("grant-foreground", host.GrantRevision).GetAwaiter().GetResult();
         host.EmergencyStopAsync().GetAwaiter().GetResult(); window.RefreshAll();
-        Check(host.GrantState("grant-foreground") == ClientGrantState.Idle && !button.Enabled,
+        Check(host.GrantState("grant-foreground") == ClientGrantState.Idle && window.ClientPane.DisplayedClientIds.Count == 0,
             "emergency stop clears pending grants and disables offline authorization");
         host.RestartServicesAsync().GetAwaiter().GetResult(); Pump();
         Console.WriteLine("PASS: local grant upgrade confirmation, persistence ACK, errors, timeout, pause and lifecycle isolation");
+    }
+
+    /// <summary>Real controls with mutable snapshots; no runtime, credentials or desktop input driver.</summary>
+    private sealed class ClientCardHost(ISettingsHost source, UpdateService? updates = null) : ISettingsHost
+    {
+        internal readonly Dictionary<string, ClientGrantState> States = [];
+        internal readonly List<(string Id, long Revision)> Grants = [];
+        internal readonly List<string> Revocations = [];
+        public IReadOnlyList<ClientInfo> Clients { get; set; } = [];
+        public long GrantRevision { get; set; }
+        public bool IsRunning { get; set; } = true;
+        public bool IsPaused { get; set; }
+        public bool IsBusy => false;
+        public string ServiceStatus => L10n.T(IsRunning ? Msg.StatusReady : Msg.StatusEmergencyStopped);
+        public string? PipeName => IsRunning ? "isolated-card-test" : null;
+        public bool HttpEnabled => false;
+        public string? HttpStatus => null;
+        public string PackageRoot => source.PackageRoot;
+        public UpdateService Updates => updates ?? source.Updates;
+        public ClientGrantState GrantState(string id) => States.GetValueOrDefault(id);
+        public Task GrantAllAppsAsync(string id, long revision)
+        {
+            Grants.Add((id, revision)); States[id] = ClientGrantState.Pending;
+            return Task.CompletedTask;
+        }
+        public Task RevokeAsync(string id)
+        {
+            Revocations.Add(id); Clients = Clients.Where(client => client.Id != id).ToArray(); States.Remove(id);
+            return Task.CompletedTask;
+        }
+        public Task TogglePauseAsync() { IsPaused = !IsPaused; return Task.CompletedTask; }
+        public Task EmergencyStopAsync() { IsRunning = false; GrantRevision++; return Task.CompletedTask; }
+        public Task RestartServicesAsync() { IsRunning = true; IsPaused = false; GrantRevision++; return Task.CompletedTask; }
+        public Task SetHttpAsync(bool enabled) => Task.CompletedTask;
+    }
+
+    private static void CheckClientCards(HostApplication source)
+    {
+        const string scopedId = "a1b2c3d4-0000-4000-8000-000000000001";
+        const string secondId = "e5f6a7b8-0000-4000-8000-000000000002";
+        var originalLanguage = L10n.Chinese;
+        var originalPaths = new[] { @"win32:c:\研发 & tools\桌面 程序.exe" };
+        var longPaths = Enumerable.Range(1, 9).Select(index =>
+            @"win32:c:\Program Files\研发 & tools\" + new string('a', 160) + $@"\Application {index}.exe").ToArray();
+        ClientInfo Scoped(IReadOnlyList<string> paths) => new(scopedId, "研发 Agent & Desktop", paths, false, true, false);
+        try
+        {
+            foreach (var chinese in new[] { false, true })
+            foreach (var minimum in new[] { false, true })
+            {
+                var context = $"{(chinese ? "zh" : "en")}/{(minimum ? "minimum" : "default")}";
+                Console.WriteLine($"CHECK: client cards {context}: scenario start");
+                L10n.Chinese = chinese;
+                var host = new ClientCardHost(source)
+                {
+                    IsPaused = true,
+                    Clients = [Scoped(originalPaths), new(secondId, "Secondary Desktop", [@"win32:c:\second.exe"], false, false, true),
+                        new("card-complete", "Complete", [], true, false, true),
+                        new("card-browser", "Browser only", [], false, true, false),
+                        new("card-foreground", "Legacy foreground", [], true, false, false)]
+                };
+                var allowGrant = false;
+                var allowRevoke = false;
+                var grantConfirmations = 0;
+                var revokeConfirmations = 0;
+                using var window = new SettingsForm(host, confirmGrant: (title, body) =>
+                {
+                    grantConfirmations++;
+                    Check(title.Contains("研发 Agent & Desktop") && body == L10n.T(Msg.ClientsGrantBody),
+                        "card upgrade confirmation identifies the clicked client and full scope");
+                    return allowGrant;
+                }, confirmRevoke: (title, body) =>
+                {
+                    revokeConfirmations++;
+                    Check(title.Contains("研发 Agent & Desktop") && body == L10n.T(Msg.ClientsRevokeBody),
+                        "card revoke confirmation identifies the clicked client");
+                    return allowRevoke;
+                });
+                if (minimum) window.Size = window.MinimumSize;
+                window.ShowPage(SettingsPage.Clients); Pump();
+                Console.WriteLine($"CHECK: client cards {context}: window ready ({window.DeviceDpi}dpi)");
+                var pane = window.ClientPane;
+                ClientCard Card(string id = scopedId) => pane.CardFor(id) ?? throw new Exception($"missing test card {id}");
+                Check(Card().GrantButton.Visible && Card().GrantButton.Enabled,
+                    "restricted desktop client has a direct upgrade without selecting anything");
+                Check(!Card("card-complete").GrantButton.Visible
+                    && Card("card-complete").StatusLabel.Text == L10n.T(Msg.ClientsGranted),
+                    "complete desktop permission is status text");
+                Check(!Card("card-browser").GrantButton.Visible && Card("card-foreground").GrantButton.Enabled,
+                    "browser-only stays isolated while old all-app clients can add foreground permission");
+                Check(Card().IdLabel.Text.Contains(scopedId[..8]) && !Card().Expanded,
+                    "client identity is visible and advanced starts collapsed");
+                Card().GrantButton.PerformClick(); Pump();
+                Check(grantConfirmations == 1 && host.Grants.Count == 0, "cancelled card confirmation sends no grant");
+                allowGrant = true;
+                Card().GrantButton.PerformClick(); Pump(); window.RefreshAll();
+                Check(grantConfirmations == 2 && host.Grants.Single() == (scopedId, host.GrantRevision),
+                    "card primary action targets its own stable client ID and captured service revision");
+                Check(host.IsPaused, "a card upgrade can be submitted while paused without resuming execution");
+                Check(Card().FeedbackLabel.Visible && Card().FeedbackLabel.Text == L10n.T(Msg.ClientsGrantPending)
+                    && !Card(secondId).GrantButton.Enabled, "pending feedback stays on owner and blocks every other upgrade");
+                pane.SearchField.Text = "Secondary"; Pump();
+                Check(pane.DisplayedClientIds.SequenceEqual(new[] { secondId }) && !Card(secondId).GrantButton.Enabled
+                    && !Card(secondId).FeedbackLabel.Visible && !pane.FallbackFeedback.Visible,
+                    "search cannot bypass a hidden pending request or move its feedback to another client");
+                var currentClients = host.Clients;
+                host.Clients = host.Clients.Where(client => client.Id != scopedId).ToArray(); window.RefreshAll(); Pump();
+                Check(!Card(secondId).GrantButton.Enabled && !pane.FallbackFeedback.Visible,
+                    "a temporarily absent pending owner still blocks upgrades until its outcome is known");
+                host.Clients = currentClients; window.RefreshAll(); Pump();
+                pane.SearchField.Text = ""; Pump();
+                host.States[scopedId] = ClientGrantState.SaveFailed; window.RefreshAll(); Pump();
+                Check(Card().FeedbackLabel.Text == L10n.T(Msg.ClientsGrantSaveFailed)
+                    && Card(secondId).GrantButton.Enabled && !Card(secondId).FeedbackLabel.Visible,
+                    "persist failure is visible only on its owner and releases the global pending block");
+                Console.WriteLine($"CHECK: client cards {context}: grant and pending feedback checked");
+
+                Card().AdvancedButton.PerformClick(); Pump();
+                var shortHeight = Card().Height;
+                Check(Card().Expanded && Card().ScopeLabel.Text.Contains(@"c:\研发 & tools\桌面 程序.exe")
+                    && !Card().ScopeLabel.UseMnemonic, "advanced scope renders Unicode, spaces and ampersands literally");
+                foreach (var query in new[] { "研发 agent", scopedId, scopedId[..8], "研发 & tools" })
+                {
+                    pane.SearchField.Text = query; Pump();
+                    Check(pane.DisplayedClientIds.SequenceEqual(new[] { scopedId }) && Card().Expanded,
+                        $"search matches client name/full ID/short ID/application path: {query}");
+                }
+                pane.SearchField.Text = "no-such-client"; Pump();
+                Check(pane.DisplayedClientIds.Count == 0 && !pane.FallbackFeedback.Visible,
+                    "filtering out an existing client does not create orphan feedback");
+                pane.SearchField.Text = ""; window.RefreshAll(); Pump();
+                Check(Card().Expanded, "advanced disclosure survives refresh and filtering");
+                Console.WriteLine($"CHECK: client cards {context}: search and disclosure checked");
+
+                // A hidden page reports Visible=false for every descendant; disclosure state must not be inferred from it.
+                window.ShowPage(SettingsPage.Status);
+                host.Clients = host.Clients.Select(client => client.Id == scopedId ? Scoped(longPaths) : client).ToArray();
+                host.States[scopedId] = ClientGrantState.Unconfirmed;
+                window.RefreshAll(); Pump();
+                window.ShowPage(SettingsPage.Clients); Pump();
+                Check(Card().Expanded && Card().ScopeLabel.Text.Contains("Application 1.exe") && Card().Height > shortHeight
+                    && Card().FeedbackLabel.Text == L10n.T(Msg.ClientsGrantUnconfirmed),
+                    "same-client scope and long result refresh recomputes its wrapped content height");
+                Console.WriteLine($"CHECK: client cards {context}: long scope refreshed, height={Card().Height}");
+                CheckHorizontalLayout(window, $"client-cards/{(chinese ? "zh" : "en")}/{(minimum ? "minimum" : "default")}/{window.DeviceDpi}dpi");
+                Console.WriteLine($"CHECK: client cards {context}: first scroll/hit-test start");
+                CheckRevokeReachable(window, Card());
+                Console.WriteLine($"CHECK: client cards {context}: first scroll/hit-test passed");
+                var expandedHeight = Card().Height;
+                Card().AdvancedButton.PerformClick(); Pump();
+                Check(!Card().Expanded && Card().Height < expandedHeight, "collapsing a long card releases its measured height");
+                Card().AdvancedButton.PerformClick(); Pump();
+                Check(Card().Expanded && Math.Abs(Card().Height - expandedHeight) <= 2,
+                    "re-expanding a long card restores its measured height");
+                Console.WriteLine($"CHECK: client cards {context}: repeated scroll/hit-test start");
+                CheckRevokeReachable(window, Card());
+                Console.WriteLine($"CHECK: client cards {context}: repeated scroll/hit-test passed");
+
+                Card().RevokeButton.PerformClick(); Pump(); window.RefreshAll();
+                Check(revokeConfirmations == 1 && host.Revocations.Count == 0 && pane.CardFor(scopedId) is not null,
+                    "cancelled revoke keeps the same client and permissions");
+                allowRevoke = true;
+                Card().RevokeButton.PerformClick(); Pump(); window.RefreshAll();
+                Check(revokeConfirmations == 2 && host.Revocations.SequenceEqual(new[] { scopedId })
+                    && pane.CardFor(scopedId) is null && !pane.FallbackFeedback.Visible,
+                    "reachable card revoke acts on its own client ID and clears feedback");
+                host.Clients = new[] { Scoped(originalPaths) }.Concat(host.Clients).ToArray(); window.RefreshAll(); Pump();
+                Check(!Card().Expanded, "removed client disclosure does not survive removal and reappearance");
+                host.States[scopedId] = ClientGrantState.Missing; window.RefreshAll(); Pump();
+                host.Clients = host.Clients.Where(client => client.Id != scopedId).ToArray(); window.RefreshAll(); Pump();
+                Check(pane.FallbackFeedback.Visible && pane.FallbackFeedback.Text.Contains("研发 Agent & Desktop")
+                    && pane.FallbackFeedback.Text.Contains(scopedId[..8])
+                    && pane.FallbackFeedback.Text.Contains(L10n.T(Msg.ClientsGrantMissing)),
+                    "a genuinely missing client keeps bounded feedback with its name and short identity");
+                host.GrantRevision++; host.States.Clear(); window.RefreshAll(); Pump();
+                Check(!pane.FallbackFeedback.Visible, "new service revision clears previous-instance orphan feedback");
+                host.IsRunning = false; window.RefreshAll(); Pump();
+                Check(pane.DisplayedClientIds.Count == 0, "offline service exposes no actionable stale cards");
+                Console.WriteLine($"CHECK: client cards {context}: scenario complete");
+            }
+            Console.WriteLine("CHECK: client cards: stale-confirmation scenario start");
+            CheckStaleCardConfirmations(source);
+        }
+        finally { L10n.Chinese = originalLanguage; }
+        Console.WriteLine("PASS: bilingual client cards, direct upgrade, search, per-client feedback, dynamic layout and reachable revocation at real process DPI");
+    }
+
+    private static void CheckStaleCardConfirmations(ISettingsHost source)
+    {
+        const string id = "stale-card-confirmation";
+        var host = new ClientCardHost(source)
+        {
+            Clients = [new(id, "Stale confirmation fixture", [@"win32:c:\fixture.exe"], false, false, true)]
+        };
+        using var window = new SettingsForm(host,
+            confirmGrant: (_, _) => { host.GrantRevision++; return true; },
+            confirmRevoke: (_, _) => { host.GrantRevision++; return true; });
+        window.ShowPage(SettingsPage.Clients); Pump();
+        window.ClientPane.CardFor(id)!.GrantButton.PerformClick(); Pump();
+        Check(host.GrantRevision == 1 && host.Grants.Count == 0,
+            "card grant confirmation from a retired service revision cannot submit an action");
+        window.ClientPane.CardFor(id)!.AdvancedButton.PerformClick(); Pump();
+        window.ClientPane.CardFor(id)!.RevokeButton.PerformClick(); Pump();
+        Check(host.GrantRevision == 2 && host.Revocations.Count == 0 && host.Clients.Single().Id == id,
+            "card revoke confirmation from a retired service revision cannot remove the client");
+    }
+
+    private static void CheckRevokeReachable(SettingsForm window, ClientCard card)
+    {
+        var revoke = card.RevokeButton;
+        Check(card.ClientRectangle.Contains(card.RectangleToClient(revoke.RectangleToScreen(revoke.ClientRectangle))),
+            "complete revoke button remains inside its dynamically measured card");
+        ScrollIntoView(window, revoke);
+        Check(FullyWithinWindow(window, revoke), "scrolling brings the complete revoke button into the window");
+        var center = revoke.PointToScreen(new Point(revoke.Width / 2, revoke.Height / 2));
+        Check(WindowFromPoint(center) == revoke.Handle,
+            "native window hit test reaches the visible revoke button rather than a clipping parent or adjacent card");
+    }
+
+    private static void ScrollIntoView(SettingsForm window, Control control)
+    {
+        window.Activate();
+        ControlField<Panel>(window, "_content").ScrollControlIntoView(control);
+        Pump();
     }
 
     private static void CheckGrantRevocation(HostApplication host)
@@ -963,20 +1235,20 @@ internal static class Program
         using var window = new SettingsForm(host, confirmGrant: (_, _) => true);
         window.ShowPage(SettingsPage.Clients);
         Pump();
-        var button = ControlField<Button>(window, "_grantAllApps");
-        var feedback = ControlField<Label>(window, "_grantFeedback");
         void Begin(string id)
         {
-            foreach (ListViewItem item in window.ClientList.Items) item.Selected = (string?)item.Tag == id;
             window.RefreshAll();
-            button.PerformClick(); Pump();
+            var pane = window.ClientPane;
+            var grant = pane.CardFor(id)!.GrantButton;
+            ScrollIntoView(window, grant);
+            grant.PerformClick(); Pump();
             Check(host.GrantState(id) == ClientGrantState.Pending, "revoke fixture starts a confirmed pending upgrade");
         }
         void CheckRemoved(string id)
         {
             window.RefreshAll(); Pump();
             Check(host.Clients.All(client => client.Id != id) && host.GrantState(id) == ClientGrantState.Idle
-                && !feedback.Visible && !button.Enabled,
+                && window.ClientPane.CardFor(id) is null && !window.ClientPane.FallbackFeedback.Visible,
                 "revocation removes the client and clears pending or successful upgrade feedback");
         }
 
@@ -984,7 +1256,8 @@ internal static class Program
         var successId = HostRuntime.RequestIds.Last()!;
         clients[0] = Client("revoke-success", complete: true);
         Event(host, Ack("revoke-success", successId)); window.RefreshAll();
-        Check(feedback.Visible && feedback.Text == L10n.T(Msg.ClientsGrantSucceeded),
+        Check(window.ClientPane.CardFor("revoke-success")!.FeedbackLabel.Visible
+            && window.ClientPane.CardFor("revoke-success")!.FeedbackLabel.Text == L10n.T(Msg.ClientsGrantSucceeded),
             "completed upgrade displays success before revocation");
         host.TogglePauseAsync().GetAwaiter().GetResult();
         host.RevokeAsync("revoke-success").GetAwaiter().GetResult();
@@ -1070,8 +1343,8 @@ internal static class Program
         window.ShowPage(SettingsPage.Status);
         Check(!pause.Enabled && !stop.Enabled && restart.Enabled, "stopped controls offer Restart without Pause or Stop");
         window.ShowPage(SettingsPage.Clients);
-        Check(window.ClientList.Items.Count == 0 && !ControlField<Button>(window, "_revoke").Enabled,
-            "stopped services cannot revoke a stale selected client");
+        Check(window.ClientPane.DisplayedClientIds.Count == 0,
+            "stopped services cannot revoke stale client cards");
         window.ShowPage(SettingsPage.Status);
         restart.PerformClick();
         Pump();
@@ -1345,47 +1618,52 @@ internal static class Program
     private static void CheckUpdatePage(HostApplication host)
     {
         const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
-        var window = (SettingsForm)Field(host, "_window")!;
-        var updates = host.Updates;
-        var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
-        var original = installed.GetValue(updates);
-        bool Shown(string name) => ((Control)typeof(SettingsForm).GetField(name, members)!.GetValue(window)!).Visible;
-        void Show(UpdatePhase phase)
-        {
-            typeof(UpdateService).GetProperty("Phase", members)!.SetValue(updates, phase);
-            window.RefreshAll();
-            Pump();
-        }
-        var check = InstallerCheck();
-        typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, check);
-        window.ShowPage(SettingsPage.Updates);
-        Pump();
+        var data = Path.Combine(Path.GetTempPath(), "cu-update-page-" + Guid.NewGuid().ToString("N"));
         try
         {
+            var settings = new HostSettingsStore(data);
+            settings.Update(value => value.AutomaticUpdateChecks = false);
+            // The long-running host has live automatic-check timers. Use a
+            // private service that is never started, so no completion can
+            // overwrite the synthetic Phase/Check while the UI is pumping.
+            using var updates = new UpdateService(host.PackageRoot, settings, installed: false);
+            using var window = new SettingsForm(new ClientCardHost(host, updates));
+            var installed = typeof(UpdateService).GetField("<Installed>k__BackingField", members)!;
+            bool Shown(string name) => ((Control)typeof(SettingsForm).GetField(name, members)!.GetValue(window)!).Visible;
+            string Flags() => $"Phase={updates.Phase}, Installed={updates.Installed}, CheckAvailable={updates.Check?.Available}, "
+                + $"HasAsset={updates.Check?.Asset is not null}, HasInstaller={updates.Check?.Installer is not null}, "
+                + $"HasPackage={updates.Package is not null}, Page={window.SelectedPage}, WindowVisible={window.Visible}, "
+                + $"download={Shown("_download")}, manualHint={Shown("_manualHint")}, installerHint={Shown("_installerHint")}, "
+                + $"runInstaller={Shown("_runInstaller")}, reveal={Shown("_reveal")}";
+            void Show(UpdatePhase phase)
+            {
+                typeof(UpdateService).GetProperty("Phase", members)!.SetValue(updates, phase);
+                window.RefreshAll();
+                Pump();
+            }
+            var check = InstallerCheck();
+            typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, check);
+            window.ShowPage(SettingsPage.Updates);
+            Pump();
             installed.SetValue(updates, false);
             Check(updates.Package == check.Asset, "portable copies download the ZIP");
             Show(UpdatePhase.Available);
-            Check(Shown("_download") && Shown("_manualHint") && !Shown("_installerHint") && !Shown("_runInstaller"), "portable copy explains the manual replacement");
+            Check(Shown("_download") && Shown("_manualHint") && !Shown("_installerHint") && !Shown("_runInstaller"), "portable copy explains the manual replacement; " + Flags());
             Show(UpdatePhase.Downloaded);
-            Check(Shown("_reveal") && Shown("_manualHint") && !Shown("_runInstaller"), "downloaded ZIP is shown in File Explorer");
+            Check(Shown("_reveal") && Shown("_manualHint") && !Shown("_runInstaller"), "downloaded ZIP is shown in File Explorer; " + Flags());
 
             installed.SetValue(updates, true);
             Check(updates.Package == check.Installer, "installed copies download the installer");
             Show(UpdatePhase.Available);
-            Check(Shown("_download") && Shown("_installerHint") && !Shown("_manualHint") && !Shown("_runInstaller"), "installed copy explains the setup wizard");
+            Check(Shown("_download") && Shown("_installerHint") && !Shown("_manualHint") && !Shown("_runInstaller"), "installed copy explains the setup wizard; " + Flags());
             Show(UpdatePhase.Downloaded);
-            Check(Shown("_runInstaller") && Shown("_reveal") && Shown("_installerHint") && !Shown("_manualHint"), "downloaded installer can be run");
+            Check(Shown("_runInstaller") && Shown("_reveal") && Shown("_installerHint") && !Shown("_manualHint"), "downloaded installer can be run; " + Flags());
 
             typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, check with { Installer = null });
             Show(UpdatePhase.Available);
-            Check(updates.Package is null && !Shown("_download") && !Shown("_installerHint"), "a release without an installer is not offered to installed copies");
+            Check(updates.Package is null && !Shown("_download") && !Shown("_installerHint"), "a release without an installer is not offered to installed copies; " + Flags());
         }
-        finally
-        {
-            installed.SetValue(updates, original);
-            typeof(UpdateService).GetProperty("Check", members)!.SetValue(updates, null);
-            Show(UpdatePhase.Idle);
-        }
+        finally { Directory.Delete(data, recursive: true); }
         Console.WriteLine("PASS: Windows update page");
     }
 
@@ -1482,7 +1760,7 @@ internal static class Program
     }
 
     /// <summary>用运行时替身的就绪状态渲染两种语言的设置与授权窗口，不沿用生命周期测试的错误状态。</summary>
-    private static void Screenshots(HostApplication host, string directory)
+    private static void Screenshots(HostApplication host, string directory, bool clientsOnly = false)
     {
         Directory.CreateDirectory(directory);
         const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -1524,8 +1802,9 @@ internal static class Program
                 });
                 installed.SetValue(host.Updates, false);
                 phase.SetValue(host.Updates, UpdatePhase.Available);
-                using (var window = new SettingsForm(host))
+                if (!clientsOnly)
                 {
+                    using var window = new SettingsForm(host);
                     foreach (var page in Enum.GetValues<SettingsPage>())
                     {
                         window.ShowPage(page);
@@ -1542,7 +1821,47 @@ internal static class Program
                         Save(window, $"{prefix}-{(int)page + 1}-{page}-narrow");
                     }
                 }
-                foreach (var allApps in new[] { true, false })
+                foreach (var minimum in new[] { false, true })
+                {
+                    const string id = "screen-card-0000-4000-8000-000000000001";
+                    var cardHost = new ClientCardHost(host)
+                    {
+                        Clients = [new(id, "研发 Agent & Desktop", Enumerable.Range(1, 9).Select(index =>
+                            @"win32:c:\Program Files\研发 & tools\" + new string('a', 160) + $@"\Application {index}.exe").ToArray(), false, true, false),
+                            new("screen-card-other", "Other desktop client", [@"win32:c:\Other App\application.exe"], false, false, true),
+                            new("screen-card-complete", "Complete desktop client", [], true, false, true),
+                            new("screen-card-browser", "Browser-only client", [], false, true, false)]
+                    };
+                    using var window = new SettingsForm(cardHost);
+                    if (minimum) window.Size = window.MinimumSize;
+                    window.ShowPage(SettingsPage.Clients);
+                    var size = minimum ? "minimum" : "default";
+                    var pane = window.ClientPane;
+                    Save(window, $"{prefix}-clients-cards-{size}-ready");
+                    pane.CardFor(id)!.AdvancedButton.PerformClick(); Pump();
+                    Save(window, $"{prefix}-clients-cards-{size}-long-scope");
+                    foreach (var state in new[] { ClientGrantState.Pending, ClientGrantState.SaveFailed, ClientGrantState.Unconfirmed })
+                    {
+                        cardHost.States[id] = state; window.RefreshAll(); Pump();
+                        ControlField<Panel>(window, "_content").AutoScrollPosition = Point.Empty;
+                        Save(window, $"{prefix}-clients-cards-{size}-{state.ToString().ToLowerInvariant()}");
+                    }
+                    ScrollIntoView(window, pane.CardFor(id)!.RevokeButton);
+                    Save(window, $"{prefix}-clients-cards-{size}-long-scope-revoke");
+                    pane.SearchField.Text = "Other desktop"; Pump();
+                    Save(window, $"{prefix}-clients-cards-{size}-search");
+                    pane.SearchField.Text = ""; Pump();
+                    cardHost.Clients = cardHost.Clients.Select(client => client.Id == id ? client with
+                    { AppIds = Array.Empty<string>(), AllApps = true, Foreground = true } : client).ToArray();
+                    cardHost.States[id] = ClientGrantState.Succeeded; window.RefreshAll(); Pump();
+                    ControlField<Panel>(window, "_content").AutoScrollPosition = Point.Empty;
+                    Save(window, $"{prefix}-clients-cards-{size}-succeeded");
+                    cardHost.States[id] = ClientGrantState.Missing; window.RefreshAll(); Pump();
+                    cardHost.Clients = cardHost.Clients.Where(client => client.Id != id).ToArray(); window.RefreshAll(); Pump();
+                    ScrollIntoView(window, pane.FallbackFeedback);
+                    Save(window, $"{prefix}-clients-cards-{size}-missing-client");
+                }
+                if (!clientsOnly) foreach (var allApps in new[] { true, false })
                 {
                     Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
                     var id = $"screenshot-{prefix}-{allApps}";
@@ -1567,7 +1886,7 @@ internal static class Program
             phase.SetValue(host.Updates, originalPhase);
             Event(host, new { @event = "status", message = L10n.T(Msg.StatusReady) });
         }
-        Console.WriteLine($"Saved bilingual settings and pairing screenshots to {directory}");
+        Console.WriteLine($"Saved bilingual {(clientsOnly ? "client-card" : "settings, client-card and pairing")} screenshots to {directory}");
     }
 
     private static void Pump() { Application.DoEvents(); Application.DoEvents(); }

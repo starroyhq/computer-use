@@ -12,6 +12,7 @@
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostApplication.cs" Link="HostApplication.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/ApprovalDialog.cs" Link="ApprovalDialog.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/SettingsForm.cs" Link="SettingsForm.cs" />
+    <Compile Include="../../../windows/ComputerUse.WindowsHost/ClientsPane.cs" Link="ClientsPane.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/UiStyle.cs" Link="UiStyle.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/L10n.cs" Link="L10n.cs" />
     <Compile Include="../../../windows/ComputerUse.WindowsHost/HostSettings.cs" Link="HostSettings.cs" />

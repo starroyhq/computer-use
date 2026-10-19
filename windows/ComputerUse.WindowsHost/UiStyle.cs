@@ -45,7 +45,7 @@ internal static class UiStyle
 }
 
 /// <summary>A vertically sized stack that wraps text and action rows to its available width.</summary>
-internal sealed class VerticalStack : TableLayoutPanel
+internal class VerticalStack : TableLayoutPanel
 {
     internal VerticalStack()
     {

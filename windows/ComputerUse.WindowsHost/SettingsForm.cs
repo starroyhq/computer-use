@@ -44,10 +44,9 @@ internal sealed class SettingsForm : Form
     private readonly Dictionary<SettingsPage, Button> _navigation = new();
     private readonly string[] _pageTitles = new[] { Msg.PaneGeneral, Msg.PaneStatus, Msg.PaneClients, Msg.PaneConnect, Msg.PaneUpdates, Msg.PaneAbout }.Select(L10n.T).ToArray();
     private bool _refreshing;
-    private string _shownClients = "";
     private readonly IAgentCommand _agentCommand;
     private readonly Func<string, bool> _copySetupPromptText;
-    private readonly Func<string, string, bool> _confirmGrant;
+    private readonly ClientsPane _clientPane;
     private CancellationTokenSource? _promptCancellation;
     private bool _promptCancelledByUser;
     private CancellationTokenSource? _profileCancellation;
@@ -74,17 +73,6 @@ internal sealed class SettingsForm : Form
     private readonly Button _pause = MakeButton(Msg.TrayPause, ButtonTone.Primary);
     private readonly Button _stop = MakeButton(Msg.TrayEmergencyStop, ButtonTone.Danger);
     private readonly Button _restart = MakeButton(Msg.TrayRestart);
-    private readonly ListView _clients = new()
-    {
-        View = View.Details, FullRowSelect = true, MultiSelect = false, HideSelection = false, ShowItemToolTips = true,
-        HeaderStyle = ColumnHeaderStyle.Nonclickable, Height = 220, BorderStyle = BorderStyle.None, Margin = new Padding(0, 4, 0, 16)
-    };
-    private readonly Button _revoke = MakeButton(Msg.ClientsRevoke, ButtonTone.Danger);
-    private readonly Button _grantAllApps = MakeButton(Msg.ClientsGrantAllApps);
-    private readonly Label _grantFeedback = MakeFeedback();
-    private string? _grantClientId;
-    private readonly Label _clientsNote = MakeNote();
-    private readonly Label _clientScope = MakeNote();
     private readonly CheckBox _http = MakeCheckBox(Msg.ConnectHttpToggle);
     private readonly Label _httpAddress = MakeValue();
     private readonly Button _copyAddress = MakeButton(Msg.ConnectCopyAddress);
@@ -120,13 +108,15 @@ internal sealed class SettingsForm : Form
     private readonly Label _aboutVersion = MakeNote();
 
     internal SettingsForm(ISettingsHost host, IAgentCommand? agentCommand = null, Func<string, bool>? copySetupPrompt = null,
-        Func<string, string, bool>? confirmGrant = null)
+        Func<string, string, bool>? confirmGrant = null, Func<string, string, bool>? confirmRevoke = null)
     {
         _host = host;
         _agentCommand = agentCommand ?? new AgentCommand(PackageCommand.ForPackage(host.PackageRoot));
         _copySetupPromptText = copySetupPrompt ?? CopyText;
-        _confirmGrant = confirmGrant ?? ((title, body) => MessageBox.Show(this, body, title,
-            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK);
+        bool Confirm(string title, string body) => MessageBox.Show(this, body, title,
+            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK;
+        _clientPane = new ClientsPane(host, confirmGrant ?? Confirm, confirmRevoke ?? Confirm,
+            () => ShowPage(SettingsPage.Connect));
         SuspendLayout();
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -140,7 +130,7 @@ internal sealed class SettingsForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         _pages[(int)SettingsPage.General] = Page(Msg.PaneGeneral, Msg.GeneralDescription, BuildGeneral());
         _pages[(int)SettingsPage.Status] = Page(Msg.PaneStatus, Msg.StatusDescription, BuildStatus());
-        _pages[(int)SettingsPage.Clients] = Page(Msg.PaneClients, Msg.ClientsDescription, BuildClients());
+        _pages[(int)SettingsPage.Clients] = Page(Msg.PaneClients, Msg.ClientsDescription, _clientPane);
         _pages[(int)SettingsPage.Connect] = Page(Msg.PaneConnect, Msg.ConnectDescription, BuildConnect());
         _pages[(int)SettingsPage.Updates] = Page(Msg.PaneUpdates, Msg.UpdatesDescription, BuildUpdates());
         _pages[(int)SettingsPage.About] = Page(Msg.PaneAbout, Msg.AboutDescription, BuildAbout());
@@ -159,7 +149,7 @@ internal sealed class SettingsForm : Form
 
     internal SettingsPage SelectedPage { get; private set; }
     internal IReadOnlyList<string> PageTitles => _pageTitles;
-    internal ListView ClientList => _clients;
+    internal ClientsPane ClientPane => _clientPane;
 
     internal void ShowPage(SettingsPage? page = null)
     {
@@ -327,58 +317,6 @@ internal sealed class SettingsForm : Form
             Card(_serviceTitle, MakeNote().With(Msg.StatusBackground), Flow(_pause, _restart), MakeNote().With(Msg.StatusHint)),
             Card(_pairedCount, MakeNote().With(Msg.StatusPairing), Flow(connect)),
             Disclosure(Msg.StatusDiagnostics, Card(SectionTitle(Msg.StatusLatestEvent), _service, SectionTitle(Msg.StatusPipe), _pipe)));
-    }
-
-    private Control BuildClients()
-    {
-        // 标识列是客户端标识的前 8 位，与 Agent 在 preflight/doctor 里看到的 shortId 相同，用来区分同名客户端。
-        foreach (var (title, share) in new[] { (Msg.ClientsName, 0.20), (Msg.ClientsId, 0.15), (Msg.ClientsApps, 0.29), (Msg.ClientsBrowser, 0.17), (Msg.ClientsForeground, 0.19) })
-            _clients.Columns.Add(new ColumnHeader { Text = L10n.T(title), Tag = share });
-        _clients.HandleCreated += (_, _) => FitColumns();
-        _clients.Resize += (_, _) => FitColumns();
-        _clients.ForeColor = UiStyle.Text;
-        _clients.BackColor = UiStyle.Surface;
-        _clients.AccessibleName = L10n.T(Msg.PaneClients);
-        _clients.SelectedIndexChanged += (_, _) => RefreshClientSelection();
-        _revoke.Click += async (_, _) => await RevokeSelectedAsync();
-        _grantAllApps.Click += async (_, _) => await GrantSelectedAsync();
-        var connect = MakeButton(Msg.ConnectAddClient, ButtonTone.Primary);
-        connect.Click += (_, _) => ShowPage(SettingsPage.Connect);
-        return Card(Flow(connect, _grantAllApps, _revoke), _clientsNote, _clients, _clientScope, _grantFeedback, MakeNote().With(Msg.ClientsHint));
-    }
-
-    private void FitColumns()
-    {
-        var width = _clients.ClientSize.Width - SystemInformation.VerticalScrollBarWidth;
-        if (width <= 0) return;
-        foreach (ColumnHeader column in _clients.Columns) column.Width = (int)(width * (double)column.Tag!);
-    }
-
-    private void RefreshClientSelection()
-    {
-        _revoke.Enabled = _host.IsRunning && _clients.SelectedItems.Count == 1;
-        var id = _clients.SelectedItems.Count == 1 ? _clients.SelectedItems[0].Tag as string : null;
-        var client = id is null ? null : _host.Clients.FirstOrDefault(value => value.Id == id);
-        var state = (id ?? _grantClientId) is { } grantId ? _host.GrantState(grantId) : ClientGrantState.Idle;
-        var complete = client is { AllApps: true, Foreground: true };
-        _grantAllApps.Text = L10n.T(state == ClientGrantState.Pending ? Msg.ClientsGrantPending
-            : complete ? Msg.ClientsGranted : Msg.ClientsGrantAllApps);
-        _grantAllApps.AccessibleName = _grantAllApps.Text;
-        _grantAllApps.Enabled = _host.IsRunning && !_host.IsBusy && client is not null
-            && (client.AllApps || client.AppIds.Count > 0) && !complete && state != ClientGrantState.Pending;
-        _grantFeedback.Text = state switch
-        {
-            ClientGrantState.Pending => L10n.T(Msg.ClientsGrantPending),
-            ClientGrantState.Succeeded => L10n.T(Msg.ClientsGrantSucceeded),
-            ClientGrantState.Failed => L10n.T(Msg.ClientsGrantFailed),
-            ClientGrantState.Missing => L10n.T(Msg.ClientsGrantMissing),
-            ClientGrantState.SaveFailed => L10n.T(Msg.ClientsGrantSaveFailed),
-            ClientGrantState.Unconfirmed => L10n.T(Msg.ClientsGrantUnconfirmed),
-            _ => ""
-        };
-        _grantFeedback.Visible = _grantFeedback.Text.Length > 0;
-        _clientScope.Text = client is null ? "" : client.AllApps ? L10n.T(Msg.ApprovalAllAppsDetail) : string.Join("\n", client.AppIds.Select(DisplayAppId));
-        _clientScope.Visible = _clientScope.Text.Length > 0;
     }
 
     private Control BuildConnect()
@@ -557,7 +495,7 @@ internal sealed class SettingsForm : Form
         {
             RefreshGeneral();
             RefreshStatus();
-            RefreshClients();
+            _clientPane.Refresh();
             RefreshConnect();
             RefreshUpdates();
             _aboutVersion.Text = L10n.F(Msg.AboutVersion, _host.Updates.Version ?? L10n.T(Msg.UpdatesUnknownVersion));
@@ -596,38 +534,6 @@ internal sealed class SettingsForm : Form
         _stop.Enabled = _host.IsRunning || _host.IsBusy;
         _restart.Enabled = !_host.IsBusy;
     }
-
-    private void RefreshClients()
-    {
-        IReadOnlyList<ClientInfo> clients = _host.IsRunning ? _host.Clients : Array.Empty<ClientInfo>();
-        var signature = string.Join("\n", clients.Select(client =>
-            $"{client.Id}\t{client.Name}\t{string.Join(";", client.AppIds)}\t{client.AllApps}\t{client.Browser}\t{client.Foreground}"));
-        if (signature != _shownClients)
-        {
-            var selected = _clients.SelectedItems.Count == 1 ? _clients.SelectedItems[0].Tag as string : null;
-            _clients.BeginUpdate();
-            _clients.Items.Clear();
-            foreach (var client in clients)
-            {
-                var apps = client.AllApps ? L10n.T(Msg.ClientsAllApps)
-                    : client.AppIds.Count == 0 ? L10n.T(Msg.ClientsNo) : string.Join("; ", client.AppIds.Select(DisplayAppId));
-                var item = new ListViewItem(new[] { client.Name, HostApplication.ShortId(client.Id), apps, Mark(client.Browser), Mark(client.Foreground) })
-                {
-                    Tag = client.Id, ToolTipText = apps
-                };
-                _clients.Items.Add(item);
-                if (client.Id == selected) item.Selected = true;
-            }
-            _clients.EndUpdate();
-            _shownClients = signature;
-        }
-        _clientsNote.Text = !_host.IsRunning ? L10n.T(Msg.ClientsNotRunning) : clients.Count == 0 ? L10n.T(Msg.ClientsEmpty) : "";
-        _clientsNote.Visible = _clientsNote.Text.Length > 0;
-        _clients.Visible = clients.Count > 0;
-        RefreshClientSelection();
-    }
-
-    private static string Mark(bool allowed) => L10n.T(allowed ? Msg.ClientsYes : Msg.ClientsNo);
 
     /// <summary>运行时的 Windows 应用标识是 win32: 加小写的 exe 路径；列表里只显示路径。</summary>
     internal static string DisplayAppId(string appId) => appId.StartsWith("win32:", StringComparison.Ordinal) ? appId["win32:".Length..] : appId;
@@ -733,27 +639,6 @@ internal sealed class SettingsForm : Form
         Regex.Replace(line, @"^#{1,6}\s+", "").Replace("**", "")));
 
     // MARK: 操作
-
-    private async Task RevokeSelectedAsync()
-    {
-        if (_clients.SelectedItems.Count != 1 || _clients.SelectedItems[0].Tag is not string id) return;
-        var name = _clients.SelectedItems[0].Text;
-        var answer = MessageBox.Show(this, L10n.T(Msg.ClientsRevokeBody), L10n.F(Msg.ClientsRevokeTitle, name),
-            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-        if (answer == DialogResult.OK) await _host.RevokeAsync(id);
-    }
-
-    private async Task GrantSelectedAsync()
-    {
-        if (!_grantAllApps.Enabled || _clients.SelectedItems.Count != 1 || _clients.SelectedItems[0].Tag is not string id) return;
-        var name = _clients.SelectedItems[0].Text;
-        var revision = _host.GrantRevision;
-        if (_confirmGrant(L10n.F(Msg.ClientsGrantTitle, name), L10n.T(Msg.ClientsGrantBody)))
-        {
-            _grantClientId = id;
-            await _host.GrantAllAppsAsync(id, revision);
-        }
-    }
 
     internal static string CliCommand(string root) =>
         $"& {PowerShellLiteral(Path.Combine(root, "bin", "node.exe"))} {PowerShellLiteral(Path.Combine(root, "runtime", "cli.js"))}";
