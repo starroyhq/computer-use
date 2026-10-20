@@ -10,7 +10,7 @@ The isolated browser has a separate boundary: the current Playwright backend's [
 
 ## Install and uninstall
 
-Download `computer-use-0.10.0-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.10.0](https://github.com/starroyhq/computer-use/releases/tag/v0.10.0). For a portable copy, download `computer-use-0.10.0-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
+Download `computer-use-0.10.1-windows-<arm64|x64>-setup.exe` for your system architecture from [Release v0.10.1](https://github.com/starroyhq/computer-use/releases/tag/v0.10.1). For a portable copy, download `computer-use-0.10.1-windows-<arm64|x64>.zip`, extract the entire package and launch `ComputerUse.WindowsHost.exe` from the extracted folder. Do not copy only the EXE. Each installer and ZIP has a `.sha256` checksum; each platform also has JSON metadata.
 
 Installers are available starting with v0.6.0; v0.5.0 and earlier provide only portable packages. Installation over an existing local ARM64 build has been tested. The complete flow from downloading a real release to completing an installer upgrade, native x64 installation and SmartScreen behavior remain unverified; see the [validation record](validation-results.md#windows-安装版全应用授权与后台控制验收2026-10-10) (Chinese).
 
