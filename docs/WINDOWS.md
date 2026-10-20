@@ -80,7 +80,7 @@ node scripts/package-windows.mjs --arch x64 --verify-only
 & '.\artifacts\Computer Use Windows x64\ComputerUse.WindowsHost.exe'
 ```
 
-省略 `--arch` 时默认使用当前 Node 的架构。打包脚本从官方来源下载对应架构的固定 Node 24.21.0 与 Cua Driver 0.28.2 包，同时核对官方清单和固定 SHA-256；在隔离目录按锁文件安装该架构的生产依赖。它检查托盘程序、Node、驱动与原生 SDK 的架构，实际加载 SDK，并保留 Node、Cua 与项目的许可文件。包内 CLI 为 `bin\node.exe runtime\cli.js`，无需全局 Node。退出托盘会停止服务和输入；便携包运行时不要覆盖。x64 构建和静态校验通过后，还需在 x64 桌面验证配对、截图与输入，才能视作 x64 验收。
+省略 `--arch` 时默认使用当前 Node 的架构。打包脚本从官方来源下载对应架构的固定 Node 24.21.0 与 Cua Driver 0.37.0 包，同时核对官方清单和固定 SHA-256；在隔离目录按锁文件安装该架构的生产依赖。它检查托盘程序、Node、驱动与原生 SDK 的架构，实际加载 SDK，并保留 Node、Cua 与项目的许可文件。包内 CLI 为 `bin\node.exe runtime\cli.js`，无需全局 Node。退出托盘会停止服务和输入；便携包运行时不要覆盖。x64 构建和静态校验通过后，还需在 x64 桌面验证配对、截图与输入，才能视作 x64 验收。
 
 安装程序由上面校验过的便携目录生成，需要 [Inno Setup](https://jrsoftware.org/isinfo.php) 7.0.2 或更高版本：简体中文从这个版本起才是官方语言，Inno Setup 6 默认不带。脚本在 Program Files 与当前用户的程序目录下依次查找 `Inno Setup 7` 与 `Inno Setup 6` 中带简体中文的 `ISCC.exe`，也可用环境变量 `INNO_SETUP_COMPILER` 指定：
 

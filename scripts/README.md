@@ -7,7 +7,7 @@
 固定组件：
 
 - [Node.js 24.21.0 官方校验文件](https://nodejs.org/dist/v24.21.0/SHASUMS256.txt)，arm64 包 SHA-256：`bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057`。
-- [Cua Driver 0.28.2 官方校验文件](https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.2/checksums.txt)，universal 裸二进制包 SHA-256：`386db225a3080714a0f9f935525e61efaf46709587ef8b94dd2df81aeb2f6daa`。
+- [Cua Driver 0.37.0 官方校验文件](https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.37.0/checksums.txt)，universal 裸二进制包 SHA-256：`7d491f67f54be5f3b380ffd85c64b242eaefd05dad6df78012cde227c95aee2a`。
 
 `node scripts/fetch-runtime.mjs` 仅下载至 `.cache/runtime-downloads`，同时比对官方清单与脚本内固定哈希；已有缓存仍重新计算哈希。不会执行远程安装脚本或安装至系统目录。
 
@@ -30,7 +30,7 @@ node scripts/package-app.mjs --verify-only
 
 在 Windows 11 上准备 .NET 10 SDK、Node 24+ 与 pnpm 10，运行 `node scripts/package-windows.mjs --arch arm64` 或 `--arch x64`。ARM64 主机也可交叉打包 x64；x64 主机只构建 x64。省略 `--arch` 时使用当前 Node 架构；`--verify-only` 可重验所选架构的包。产物分别为 `artifacts/Computer Use Windows ARM64/` 和 `artifacts/Computer Use Windows x64/`，归属标记独立，互不覆盖。脚本不会触碰 macOS App。
 
-固定组件来自官方校验文件：ARM64 使用 Node.js 24.21.0 `node-v24.21.0-win-arm64.zip`（SHA-256 `8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921`）及 Cua Driver 0.28.2 `cua-driver-rs-0.28.2-windows-arm64-binary.zip`（`578b88ff2dd56f06eb7e984d73aaf5e76f59c6fde9542c967d6a30d00213c680`）；x64 使用 `node-v24.21.0-win-x64.zip`（`158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541`）及 `cua-driver-rs-0.28.2-windows-x86_64-binary.zip`（`1f4bfceeab64cb7f56be7aad774c3dc2d2910d1427e4be1d79939c706e8029ba`）。缓存包每次重算哈希，生产依赖在隔离目录由锁文件安装，Windows 托盘按所选 RID 自包含发布。产物保留 Node、Cua、.NET 与项目许可证；验证检查关键 PE 架构、Node 与驱动版本、CLI 帮助及 Cua 原生 SDK 实际加载，不自动操作桌面。ARM64 已完成桌面验证，x64 仍需在 Win11 x64 上实测；具体启动和 Mac SSH/MCP 接入见 [Windows 说明](../docs/WINDOWS.md)。
+固定组件来自官方校验文件：ARM64 使用 Node.js 24.21.0 `node-v24.21.0-win-arm64.zip`（SHA-256 `8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921`）及 Cua Driver 0.37.0 `cua-driver-rs-0.37.0-windows-arm64-binary.zip`（`0fce682b251775e25fd76bf29ff856f7f5ab5aae5759d6b76a40f8312a194a5a`）；x64 使用 `node-v24.21.0-win-x64.zip`（`158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541`）及 `cua-driver-rs-0.37.0-windows-x86_64-binary.zip`（`40481b55073f1225b0010235b30217bd640ef1f323e982aec0a5f6131d3e4a99`）。缓存包每次重算哈希，生产依赖在隔离目录由锁文件安装，Windows 托盘按所选 RID 自包含发布。产物保留 Node、Cua、.NET 与项目许可证；验证检查关键 PE 架构、Node 与驱动版本、CLI 帮助及 Cua 原生 SDK 实际加载，不自动操作桌面。ARM64 已完成桌面验证，x64 仍需在 Win11 x64 上实测；具体启动和 Mac SSH/MCP 接入见 [Windows 说明](../docs/WINDOWS.md)。
 
 ## 安装包：macOS DMG 与 Windows 安装程序
 

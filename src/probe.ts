@@ -25,7 +25,7 @@ const client = new IpcClient(values.socket ?? socketPath);
 const call = (method: string, params: unknown) => client.call(credential.token, method, params);
 const FIXTURE_SECRET = 'fixture-secret-8431';
 const report: { driver: string; iterations: unknown[]; completed: boolean; error?: unknown } = {
-  driver: '0.28.2',
+  driver: '0.37.0',
   iterations: [],
   completed: false,
 };

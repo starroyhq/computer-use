@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { access } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -33,7 +34,10 @@ export type CuaConnection = Pick<
 >;
 type State = { snapshot: WindowStateOutput; session: string; consumed: boolean };
 type AppList = Awaited<ReturnType<CuaConnection['listApps']>>['apps'];
-const VERSION = '0.28.2';
+const VERSION = '0.37.0';
+// 本 App 自身（菜单栏应用）。驱动 0.37.0 的 list_apps 开始把运行中的菜单栏应用列为 running，
+// 本 App 的设置和批准窗口不能因此成为桌面目标。
+const HOST_BUNDLE_ID = 'com.starroy.computeruse';
 // The SDK's implicit transport session expires after five minutes of inactivity.
 const CONNECTION_IDLE_MS = 4 * 60_000;
 // 应用列表一秒内的重复校验复用同一份结果。回退到 list_apps 时它要 2 到 3.5 秒，不该连付两次。
@@ -67,6 +71,8 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
 // macOS 上用 get_accessibility_tree 取运行中的应用，约 50 毫秒。list_apps 还要扫描全部已安装应用，
 // 这台机器上每次 2 到 3.5 秒，而归属校验在每次观察和每个动作前都要做。
 // 实测（驱动 0.28.2）两者的运行中应用，包括被隐藏的，pid 与 Bundle ID 完全一致。
+// 驱动 0.37.0 的应用列表改由进程表推出：Info.plist 未声明 LSUIElement/LSBackgroundOnly 的应用包进程都算，
+// 所以 LaunchServices 记为 pid -1 的 Xcode Device Hub 也在列；list_apps 另外还列出运行中的菜单栏应用。
 // 工具报错、返回结构不符或传输异常时返回 undefined，调用方回到 list_apps，只是更慢。
 async function runningApps(client: CuaConnection): Promise<AppList | undefined> {
   try {
@@ -109,6 +115,10 @@ function failure(code: unknown, mutation = false, settled = false): CuError {
     invalid_arguments: 'invalid_request',
     // 以下均为驱动在派发前的明确拒绝（驱动文案："refused" / "Refusing to dispatch"），输入未发出。
     same_pid_keyboard_ambiguity: 'background_unavailable',
+    // 驱动 0.37.0：后台点击网页 <select> 会把浏览器窗口提到前面，驱动拒绝打开（effect: refused）。
+    select_menu_would_raise_window: 'background_unavailable',
+    // 驱动 0.35.4：浏览器焦点在地址栏时拒绝发出粘贴快捷键（delivered: false）。
+    paste_target_is_browser_chrome: 'invalid_request',
     off_space_or_ax_unresolved: 'background_unavailable',
     minimized_or_hidden_window: 'background_unavailable',
     px_capture_unavailable: 'stale_snapshot',
@@ -125,6 +135,10 @@ function failure(code: unknown, mutation = false, settled = false): CuError {
     px_capture_unavailable: ' No provable pixel frame was available; observe again before a coordinate action.',
     menu_path_unavailable:
       ' The menu path was not found, is ambiguous or is disabled, or the window has no accessible menu; nothing was sent. Use the exact names shown in the menus.',
+    select_menu_would_raise_window:
+      ' A web drop-down cannot be opened in the background; nothing was sent. Choose the option with setValue on the element instead.',
+    paste_target_is_browser_chrome:
+      " The browser's address bar has focus, so nothing was pasted. Click the page field first, then paste again.",
   };
   const mapped = typeof code === 'string' ? known[code] : undefined;
   const driverCode = typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : undefined;
@@ -396,8 +410,22 @@ function observedElements(elements: WindowElement[], pixels?: { window: Bounds; 
 }
 
 // Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
-// （开启、关闭两种设置下均实测反向），派发前需交换方向。
+// （开启、关闭两种设置下均实测反向），派发前需交换方向。0.37.0 的滚轮路径未改（源码中的方向符号相同）。
 const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
+
+// 驱动 0.35.2 起，Electron 窗口的后台滚动不再发滚轮事件，改走辅助功能，按请求的方向显示更多内容：方向不能交换。
+// 判定方法与驱动相同：可执行文件所在应用包的 Frameworks 里有 Electron Framework。读不到时按普通窗口处理。
+async function electronProcess(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { timeout: 5_000, maxBuffer: 64 * 1024 });
+    const executable = stdout.trim();
+    if (!executable.startsWith('/')) return false;
+    await access(join(dirname(dirname(executable)), 'Frameworks', 'Electron Framework.framework'));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function point(point: Point, observation: PixelObservation): Point {
   if (
@@ -499,6 +527,7 @@ export class CuaBackend implements Backend {
     private readonly processPaths: (pids: number[]) => Promise<Map<number, string>> = pids => windowsProcessPaths(socketPath, pids),
     // 同包宿主提供的剪贴板会话和用户输入空闲时间；没有时粘贴不可用，前台动作不做让行检查。
     private readonly native: NativeHelper | undefined = undefined,
+    private readonly isElectron: (pid: number) => Promise<boolean> = electronProcess,
   ) {}
 
   private async client(): Promise<CuaConnection> {
@@ -639,8 +668,9 @@ export class CuaBackend implements Backend {
   }
 
   private async listRunning(client: CuaConnection): Promise<AppList> {
-    const running = this.platform === 'darwin' ? await runningApps(client) : undefined;
-    return running ?? (await client.listApps({}, readOptions())).apps;
+    if (this.platform !== 'darwin') return (await client.listApps({}, readOptions())).apps;
+    const running = (await runningApps(client)) ?? (await client.listApps({}, readOptions())).apps;
+    return running.filter(app => app.bundleId !== HOST_BUNDLE_ID);
   }
 
   private async apps(): Promise<AppList> {
@@ -687,6 +717,9 @@ export class CuaBackend implements Backend {
           : (await client.listWindows({ pid: app.pid, onScreenOnly: false }, readOptions())).windows;
         for (const window of windows) {
           if (window.pid !== undefined && window.pid !== app.pid) continue;
+          // 驱动 0.36.0 起，按 pid 查询的 list_windows 返回该进程所有层的窗口（菜单、浮层、状态栏项等）；
+          // 不带 pid 时仍只有第 0 层。目标只列第 0 层的普通窗口，两种授权方式一致。
+          if (window.layer !== undefined && window.layer !== 0) continue;
           const windowId = Number(window.windowId);
           if (!Number.isSafeInteger(windowId) || windowId <= 0) continue;
           const offScreen = window.isOnScreen
@@ -1104,8 +1137,9 @@ export class CuaBackend implements Backend {
           throw new CuError('invalid_request', 'Scroll amount must be 1 to 50.');
         const pixels = pixelObservation();
         tool = 'scroll';
+        const wheel = this.platform === 'darwin' && !(mode === 'background' && (await this.isElectron(pid)));
         Object.assign(args, point(action.point ?? { x: pixels.imageWidth / 2, y: pixels.imageHeight / 2 }, pixels), {
-          direction: this.platform === 'darwin' ? reversed[action.direction] : action.direction,
+          direction: wheel ? reversed[action.direction] : action.direction,
           by: action.unit,
           amount: action.amount,
         });
@@ -1116,7 +1150,7 @@ export class CuaBackend implements Backend {
         if (!Number.isInteger(action.durationMs) || action.durationMs < 0 || action.durationMs > 10_000)
           throw new CuError('invalid_request', 'Drag duration must be 0 to 10000 milliseconds.');
         if (mode === 'background' && this.platform === 'darwin')
-          throw new CuError('background_unavailable', 'Cua Driver 0.28.2 cannot deliver background drags on macOS.');
+          throw new CuError('background_unavailable', 'Background drags are not supported on macOS; use a foreground session.');
         const pixels = pixelObservation();
         const from = point(action.path[0]!, pixels);
         const to = point(action.path[1]!, pixels);

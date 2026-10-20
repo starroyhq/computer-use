@@ -29,7 +29,7 @@ function fixture() {
   };
   const client = {
     metadata: vi.fn<CuaConnection['metadata']>(async () => ({
-      driverVersion: '0.28.2',
+      driverVersion: '0.37.0',
       contractVersion: '0.8.0',
       toolsListSchemaVersion: '1',
       capabilityVersion: '1',
@@ -68,7 +68,8 @@ function fixture() {
     },
   };
   const connector = vi.fn(async () => routed);
-  return { client, connection: routed, backend: new CuaBackend('/test/driver.sock', connector, 'darwin'), state, connector };
+  const backend = new CuaBackend('/test/driver.sock', connector, 'darwin', undefined, undefined, async () => false);
+  return { client, connection: routed, backend, state, connector };
 }
 
 function textFixture(role = 'AXTextField') {
@@ -130,6 +131,38 @@ describe('Cua socket adapter', () => {
     expect(client.listWindows).toHaveBeenCalledTimes(1);
     expect(client.listWindows.mock.calls[0]?.[0]).toMatchObject({ pid: 42 });
     expect(client.callTool).not.toHaveBeenCalled();
+  });
+
+  it('lists only layer-0 windows when the driver reports every layer for a pid', async () => {
+    const { client, backend } = fixture();
+    client.listWindows.mockResolvedValue({
+      windows: [
+        { windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds, isOnScreen: true, layer: 0 },
+        { windowId: 20n, pid: 42, appName: 'Fixture', title: 'Menu', bounds, isOnScreen: true, layer: 101 },
+        { windowId: 21n, pid: 42, appName: 'Fixture', title: 'Status item', bounds, isOnScreen: true, layer: 25 },
+      ],
+    });
+    expect(await backend.targets({ appIds: ['test.fixture'], browser: false })).toEqual([target]);
+  });
+
+  it('never lists or observes the Computer Use app itself, even when the driver lists it as running', async () => {
+    const { client, backend } = fixture();
+    const own: Target = { ...target, id: 'desktop:7:30', appId: 'com.starroy.computeruse', pid: 7, windowId: 30 };
+    client.listApps.mockResolvedValue({
+      apps: [
+        { pid: 42, name: 'Fixture', running: true, active: false, bundleId: 'test.fixture' },
+        { pid: 7, name: 'Computer Use', running: true, active: false, bundleId: 'com.starroy.computeruse' },
+      ],
+    });
+    client.listWindows.mockResolvedValue({
+      windows: [
+        { windowId: 19n, pid: 42, appName: 'Fixture', title: 'Fixture', bounds, isOnScreen: true },
+        { windowId: 30n, pid: 7, appName: 'Computer Use', title: 'Settings', bounds, isOnScreen: true },
+      ],
+    });
+    expect(await backend.targets({ appIds: [], allApps: true, browser: false })).toEqual([target]);
+    expect(await backend.targets({ appIds: ['com.starroy.computeruse'], browser: false })).toEqual([]);
+    await expect(backend.observe(own)).rejects.toMatchObject({ code: 'not_found' });
   });
 
   it('discovers every identified running app for an all-app grant while still checking window ownership', async () => {
@@ -437,6 +470,18 @@ describe('Cua socket adapter', () => {
     expect(client.callTool).toHaveBeenCalledTimes(2);
   });
 
+  it('treats the newer driver refusals for web drop-downs and the browser address bar as definite', async () => {
+    const { client, backend } = fixture();
+    client.callTool.mockResolvedValueOnce({ ...success(), isError: true, errorCode: 'select_menu_would_raise_window' });
+    await expect(
+      backend.act(await backend.observe(target), { type: 'click', elementId: 's1:1' }, 'background', new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'background_unavailable', message: expect.stringContaining('setValue') });
+    client.callTool.mockResolvedValueOnce({ ...success(), isError: true, errorCode: 'paste_target_is_browser_chrome' });
+    await expect(
+      backend.act(await backend.observe(target), { type: 'key', keys: ['cmd', 'v'] }, 'foreground', new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'invalid_request', message: expect.stringContaining('address bar') });
+  });
+
   it('routes typing and hotkeys through the explicit window and delivery mode', async () => {
     const { client, backend } = fixture();
     await backend.act(
@@ -601,6 +646,22 @@ describe('Cua socket adapter', () => {
       new AbortController().signal,
     );
     expect(JSON.parse(other.callTool.mock.calls.at(-1)![1]).direction).toBe('down');
+  });
+
+  it('keeps the requested direction for background scrolls in Electron windows, which the driver scrolls through accessibility', async () => {
+    const { connector, client } = fixture();
+    const isElectron = vi.fn(async (pid: number) => pid === 42);
+    const backend = new CuaBackend('/test/driver.sock', connector, 'darwin', undefined, undefined, isElectron);
+    for (const mode of ['background', 'foreground'] as const)
+      await backend.act(
+        await backend.observe(target),
+        { type: 'scroll', direction: 'down', amount: 1, unit: 'line' },
+        mode,
+        new AbortController().signal,
+      );
+    // 前台仍走滚轮事件，方向照旧交换。
+    expect(client.callTool.mock.calls.map(([, args]) => JSON.parse(args).direction)).toEqual(['down', 'up']);
+    expect(isElectron).toHaveBeenCalledWith(42);
   });
 
   it('rejects unsupported paths, background drags, and out of image points before dispatch', async () => {

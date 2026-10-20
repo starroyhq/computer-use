@@ -16,11 +16,11 @@ export const RUNTIMES = Object.freeze({
     sha256: 'bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057',
   },
   cua: {
-    version: '0.28.2',
-    filename: 'cua-driver-rs-0.28.2-darwin-universal-binary.tar.gz',
-    baseUrl: 'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.2',
+    version: '0.37.0',
+    filename: 'cua-driver-rs-0.37.0-darwin-universal-binary.tar.gz',
+    baseUrl: 'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.37.0',
     checksumFile: 'checksums.txt',
-    sha256: '386db225a3080714a0f9f935525e61efaf46709587ef8b94dd2df81aeb2f6daa',
+    sha256: '7d491f67f54be5f3b380ffd85c64b242eaefd05dad6df78012cde227c95aee2a',
   },
 });
 
@@ -72,8 +72,8 @@ export async function fetchRuntimes() {
     console.log(`Verified ${name} ${runtime.version} SHA-256.`);
     result[name] = archive;
   }
-  const license = join(cache, 'cua-0.28.2-LICENSE.md');
-  if (!(await exists(license))) await download('https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.28.2/LICENSE.md', license);
+  const license = join(cache, 'cua-0.37.0-LICENSE.md');
+  if (!(await exists(license))) await download('https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.37.0/LICENSE.md', license);
   if ((await sha256(license)) !== 'c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9')
     throw new Error('Cua license checksum mismatch.');
   result.cuaLicense = license;
