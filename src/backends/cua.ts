@@ -34,7 +34,7 @@ export type CuaConnection = Pick<
 >;
 type State = { snapshot: WindowStateOutput; session: string; consumed: boolean };
 type AppList = Awaited<ReturnType<CuaConnection['listApps']>>['apps'];
-const VERSION = '0.37.0';
+const VERSION = '0.38.0';
 // 本 App 自身（菜单栏应用）。驱动 0.37.0 的 list_apps 开始把运行中的菜单栏应用列为 running，
 // 本 App 的设置和批准窗口不能因此成为桌面目标。
 const HOST_BUNDLE_ID = 'com.starroy.computeruse';
@@ -59,6 +59,8 @@ const USER_QUIET_MS = 1_000;
 const PASTE_RESTORE_DELAY_MS = 800;
 const NO_PASTE_MENU =
   'This app has no Paste menu command a background session can use; nothing was sent. Use a foreground session, or type the text.';
+const FOREGROUND_REFUSED =
+  'Windows could not bring the target window to the front, or another window covers where the action starts; nothing was sent. Observe again, make sure the target window is visible and not covered, then retry.';
 const READBACK_WARNING: ExecutionWarning = {
   code: 'readback_mismatch',
   message:
@@ -161,7 +163,14 @@ function checkResult(result: ToolResult): void;
 function checkResult(result: ToolResult, mutation: true): BackendExecution;
 function checkResult(result: ToolResult, mutation = false): BackendExecution | undefined {
   // 工具结果已经返回：即使效果不明，也没有仍在进行的输入。
-  if (result.isError) throw failure(result.errorCode, mutation, true);
+  if (result.isError) {
+    // 驱动 0.38.0 起（trycua/cua#5616），Windows 前台拖拽在目标窗口没能激活、或起点被别的窗口挡住时，
+    // 在按下按键之前拒绝（effect: refused），什么都没有发出。macOS 前台点击也报 foreground_unavailable，
+    // 但不带 effect: refused，可能在派发途中失败，仍按结果不明处理。
+    if (mutation && result.errorCode === 'foreground_unavailable' && structured(result)?.effect === 'refused')
+      throw new CuError('unavailable', FOREGROUND_REFUSED);
+    throw failure(result.errorCode, mutation, true);
+  }
   // UniFFI's ActionEffect enum: Confirmed=0; Partial=1; Unverifiable=2;
   // SuspectedNoop=3; Refused=4. A successful transport is not an effect proof.
   if (mutation) {
@@ -410,7 +419,7 @@ function observedElements(elements: WindowElement[], pixels?: { window: Bounds; 
 }
 
 // Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
-// （开启、关闭两种设置下均实测反向），派发前需交换方向。0.37.0 的滚轮路径未改（源码中的方向符号相同）。
+// （开启、关闭两种设置下均实测反向），派发前需交换方向。0.37.0、0.38.0 的滚轮路径未改（源码中的方向符号相同）。
 const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
 
 // 驱动 0.35.2 起，Electron 窗口的后台滚动不再发滚轮事件，改走辅助功能，按请求的方向显示更多内容：方向不能交换。
@@ -888,12 +897,25 @@ export class CuaBackend implements Backend {
   }
 
   // 一次输入调用的结果。网页输入框会自行清空，驱动按读回判定“未送达”并不可信：记为已执行、效果未确认。
+  // 驱动 0.38.0 起（trycua/cua#5560），网页输入框的读回一直没有变化时不再报 type_text_incomplete（送达 0 个），
+  // 改为成功结果、effect: unverifiable、不带 delivered_chars，后台与前台逐键路径相同，同样附带这条提示，
+  // 提醒 Agent 先看截图、不要重输。后台逐键路径读到部分送达时仍报 type_text_incomplete，处理照旧。
   private typeOutcome(result: ToolResult, web: boolean): BackendExecution {
     const refusal = budgetRefusal(result);
     if (refusal) throw refusal;
-    if (result.isError && result.errorCode === 'type_text_incomplete' && web && structured(result)?.path === 'key_events')
+    const details = structured(result);
+    if (result.isError && result.errorCode === 'type_text_incomplete' && web && details?.path === 'key_events')
       return { effect: 'unconfirmed', warning: READBACK_WARNING };
-    return checkResult(result, true);
+    const execution = checkResult(result, true);
+    if (
+      web &&
+      execution.effect === 'unconfirmed' &&
+      details?.effect === 'unverifiable' &&
+      details.delivered_chars === undefined &&
+      (details.path === 'key_events' || details.path === 'key_events_fg')
+    )
+      return { ...execution, warning: READBACK_WARNING };
+    return execution;
   }
 
   // 前台长文本分段输入：每段之间检查剩余时间和用户是否开始操作；停下时报告已完整送达的字符数。

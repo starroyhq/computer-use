@@ -29,7 +29,7 @@ function fixture() {
   };
   const client = {
     metadata: vi.fn<CuaConnection['metadata']>(async () => ({
-      driverVersion: '0.37.0',
+      driverVersion: '0.38.0',
       contractVersion: '0.8.0',
       toolsListSchemaVersion: '1',
       capabilityVersion: '1',
@@ -703,6 +703,42 @@ describe('Cua socket adapter', () => {
       code: 'invalid_request',
     });
     expect(client.callTool).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused Windows foreground drag as a definite failure, other foreground failures as unknown', async () => {
+    const { client } = fixture();
+    const backend = new CuaBackend(
+      'C:\\Computer Use\\cua-driver.exe',
+      async () => client,
+      'win32',
+      async () => new Map([[42, 'C:\\Fixtures\\Fixture.exe']]),
+    );
+    const windowsTarget: Target = { ...target, appId: 'win32:c:\\fixtures\\fixture.exe' };
+    const drag = {
+      type: 'drag' as const,
+      path: [
+        { x: 1, y: 2 },
+        { x: 99, y: 88 },
+      ],
+      durationMs: 500,
+    };
+    const unavailable = (fields: Record<string, unknown>): ToolResult => ({
+      ...success(),
+      isError: true,
+      errorCode: 'foreground_unavailable',
+      structuredJson: JSON.stringify({ code: 'foreground_unavailable', ...fields }),
+    });
+    // 驱动 0.38.0：目标没能激活或起点被别的窗口挡住，按下按键之前拒绝。
+    client.callTool.mockResolvedValueOnce(unavailable({ effect: 'refused', pid: 42, window_id: 19 }));
+    await expect(backend.act(await backend.observe(windowsTarget), drag, 'foreground', new AbortController().signal)).rejects.toMatchObject(
+      { code: 'unavailable', message: expect.stringContaining('nothing was sent') },
+    );
+    // 同一代码不带 effect: refused 时（macOS 前台点击）可能在派发途中失败，仍是结果不明。
+    client.callTool.mockResolvedValueOnce(unavailable({}));
+    await expect(backend.act(await backend.observe(windowsTarget), drag, 'foreground', new AbortController().signal)).rejects.toMatchObject(
+      { code: 'unknown_outcome', settled: true },
+    );
+    expect(client.callTool.mock.calls.map(([tool]) => tool)).toEqual(['drag', 'drag']);
   });
 
   it.each([1, 2, 3] as const)('returns completed but unconfirmed effect %s without interrupting the backend', async effect => {
@@ -1752,6 +1788,45 @@ describe('Cua socket adapter', () => {
         warning: { code: 'readback_mismatch', message: expect.stringContaining('do not type it again') },
       });
       expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ text: 'ls -la', element_token: 's1:1' });
+    });
+
+    // 驱动 0.38.0：网页输入框的读回一直没有变化时，返回成功结果、effect: unverifiable、不带 delivered_chars。
+    const unverifiable = (path: string, fields: Record<string, unknown> = {}): ToolResult => ({
+      ...success(),
+      action: { effect: 2, route: 0 },
+      structuredJson: JSON.stringify({ path, characters: 6, requested_chars: 6, verified: false, effect: 'unverifiable', ...fields }),
+    });
+
+    it('keeps the read-back warning when the driver reports an unchanged web input as unverifiable', async () => {
+      for (const [mode, path] of [
+        ['background', 'key_events'],
+        ['foreground', 'key_events_fg'],
+      ] as const) {
+        const { client, backend } = web();
+        client.callTool.mockResolvedValueOnce(unverifiable(path));
+        await expect(backend.act(await backend.observe(target), type(), mode, signal())).resolves.toEqual({
+          effect: 'unconfirmed',
+          warning: { code: 'readback_mismatch', message: expect.stringContaining('do not type it again') },
+        });
+        expect(JSON.parse(client.callTool.mock.calls[0]![1])).toMatchObject({ text: 'ls -la', delivery_mode: mode });
+      }
+    });
+
+    it('adds no read-back warning to other unverifiable typing results', async () => {
+      for (const [inWebContent, result] of [
+        // 原生输入框。
+        [false, unverifiable('key_events')],
+        // 读回看到了全部文字，只是网页内容的读回不作为证据。
+        [true, unverifiable('key_events', { delivered_chars: 6 })],
+        // 辅助功能写入路径。
+        [true, unverifiable('accessibility')],
+      ] as const) {
+        const { client, backend } = web(inWebContent);
+        client.callTool.mockResolvedValueOnce(result);
+        await expect(backend.act(await backend.observe(target), type(), 'background', signal())).resolves.toEqual({
+          effect: 'unconfirmed',
+        });
+      }
     });
 
     it('keeps other incomplete results unknown, but marks them settled because the driver call returned', async () => {

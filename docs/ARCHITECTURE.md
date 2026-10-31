@@ -32,7 +32,7 @@ v0.7.0 shares one generated, standalone `skills/computer-use/SKILL.md` between A
 
 ## Stable interface, replaceable adapters
 
-`src/contracts.ts` defines backend observations and execution operations. `src/schema.ts` is the shared validation and tool-schema source. `src/runtime.ts` performs authorization, session ownership, leases, stale-snapshot rejection, deduplication and result recording. Cua 0.37.0 and Playwright 1.63.0 are behind independent adapters.
+`src/contracts.ts` defines backend observations and execution operations. `src/schema.ts` is the shared validation and tool-schema source. `src/runtime.ts` performs authorization, session ownership, leases, stale-snapshot rejection, deduplication and result recording. Cua 0.38.0 and Playwright 1.63.0 are behind independent adapters.
 
 Capabilities describe the implemented subset. The Cua driver supports straight drags and line/page scrolling, so the public interface exposes those units instead of pretending it supports arbitrary paths or pixel-precise scrolling. Driver `action.effect` uncertainty is not converted into success.
 

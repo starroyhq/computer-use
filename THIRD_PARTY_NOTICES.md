@@ -4,7 +4,7 @@ This project's original source and documentation are licensed under MIT. Depende
 
 | Component | Pinned version | License / source |
 |---|---|---|
-| Cua Driver and native SDK | 0.37.0 | MIT, [upstream license](https://github.com/trycua/cua/blob/cua-driver-rs-v0.37.0/LICENSE.md) |
+| Cua Driver and native SDK | 0.38.0 | MIT, [upstream license](https://github.com/trycua/cua/blob/cua-driver-rs-v0.38.0/LICENSE.md) |
 | MCP TypeScript server/node | server 2.3.1, node 2.1.1 | Apache-2.0 for new contributions; earlier contributions not yet relicensed remain MIT. Each package ships its own LICENSE, [upstream](https://github.com/modelcontextprotocol/typescript-sdk). The client package is only a test dependency and is not shipped |
 | Playwright | 1.63.0 | Apache-2.0, [upstream](https://github.com/microsoft/playwright) |
 | Zod | 4.6.5 | MIT, [upstream](https://github.com/colinhacks/zod) |

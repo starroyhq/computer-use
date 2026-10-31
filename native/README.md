@@ -11,7 +11,7 @@ App 需要以下资源，缺失时显示错误并停止启动执行层：
 
 ```text
 Contents/Resources/
-  bin/cua-driver       # 固定版本 0.37.0
+  bin/cua-driver       # 固定版本 0.38.0
   bin/node
   bin/computer-use     # CLI 包装脚本
   runtime/host.js      # 编译后的统一运行时
