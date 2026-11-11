@@ -11,19 +11,26 @@ if (process.platform !== 'darwin') throw new Error('Icon conversion requires mac
 const assets = fileURLToPath(new URL('../assets/', import.meta.url));
 const source = join(assets, 'app-icon.png');
 const stage = await mkdtemp(join(tmpdir(), 'computer-use-icons-'));
+const macSource = join(stage, 'macos-app-icon.png');
 try {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1024, height: 1024 }, deviceScaleFactor: 1 });
     await page.goto(pathToFileURL(join(assets, 'app-icon.svg')).href);
     await page.screenshot({ path: source, omitBackground: true });
-    // The menu-bar glyph shares the app's exact contour, with no tile and a white fill.
-    const cursorPath = await page.locator('svg > path').getAttribute('d');
-    if (!cursorPath) throw new Error('The app SVG must contain a cursor path.');
+    // Match the visible Dock footprint by giving the macOS artwork extra transparent padding.
+    await page.evaluate(() => {
+      document.documentElement.style.transformOrigin = 'center';
+      document.documentElement.style.transform = 'scale(0.9375)';
+    });
+    await page.screenshot({ path: macSource, omitBackground: true });
+    // The menu-bar template uses the app's contour in black on a transparent background.
+    const cursorPath = await page.locator('svg > path#cursor').getAttribute('d');
+    if (!cursorPath) throw new Error('The app SVG must contain a top-level #cursor path.');
     const menuSvg = join(assets, 'menu-bar-icon.svg');
     await writeFile(
       menuSvg,
-      `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="256 256 512 512">\n  <title>Computer Use menu bar</title>\n  <path d="${cursorPath}" fill="#FFF"/>\n</svg>\n`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="256 256 512 512">\n  <title>Computer Use menu bar</title>\n  <path d="${cursorPath}" fill="#000"/>\n</svg>\n`,
     );
     const menuPage = await browser.newPage({ viewport: { width: 18, height: 18 }, deviceScaleFactor: 2 });
     await menuPage.goto(pathToFileURL(menuSvg).href);
@@ -33,11 +40,11 @@ try {
   }
   const iconset = join(stage, 'app-icon.iconset');
   await mkdir(iconset);
-  const resize = (size, output) =>
-    execFileSync('/usr/bin/sips', ['-z', String(size), String(size), source, '--out', output], { stdio: 'ignore' });
+  const resize = (input, size, output) =>
+    execFileSync('/usr/bin/sips', ['-z', String(size), String(size), input, '--out', output], { stdio: 'ignore' });
   for (const size of [16, 32, 128, 256, 512]) {
-    resize(size, join(iconset, `icon_${size}x${size}.png`));
-    resize(size * 2, join(iconset, `icon_${size}x${size}@2x.png`));
+    resize(macSource, size, join(iconset, `icon_${size}x${size}.png`));
+    resize(macSource, size * 2, join(iconset, `icon_${size}x${size}@2x.png`));
   }
   execFileSync('/usr/bin/iconutil', ['-c', 'icns', iconset, '-o', join(assets, 'app-icon.icns')]);
 
@@ -50,7 +57,7 @@ try {
   let offset = header.length;
   for (const [index, size] of sizes.entries()) {
     const output = join(stage, `${size}.png`);
-    resize(size, output);
+    resize(source, size, output);
     const frame = await readFile(output);
     const entry = 6 + index * 16;
     header[entry] = header[entry + 1] = size === 256 ? 0 : size;
@@ -62,7 +69,7 @@ try {
     offset += frame.length;
   }
   await writeFile(join(assets, 'app-icon.ico'), Buffer.concat([header, ...frames]));
-  console.log('Generated app PNG/ICNS/ICO and white menu-bar SVG/PNG from assets/app-icon.svg.');
+  console.log('Generated app PNG/ICNS/ICO and menu-bar template SVG/PNG from assets/app-icon.svg.');
 } finally {
   await rm(stage, { recursive: true, force: true });
 }

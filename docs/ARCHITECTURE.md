@@ -64,7 +64,7 @@ IPC and CLI image files are private to the current OS user. MCP returns images a
 
 The App includes a fixed Node runtime, a fixed embedded driver and production dependencies. It does not require globally installed Node/Rust. Debug builds use ad-hoc signing; Developer ID signing, notarization and a clean-user test are separate release gates. HTTP is disabled on each App launch and binds only loopback when explicitly enabled.
 
-v0.6.1 packages a warm-white and dark-charcoal cursor icon for macOS App and Windows EXE, tray, windows and installer, plus a white cursor body for the macOS menu bar. These are display resources, not a signing or authorization mechanism. Windows packages remain unsigned and subject to SmartScreen / Smart App Control reputation and system policy; macOS Developer ID does not apply to Windows.
+The macOS App and Windows EXE, normal tray icon, windows and installer share the application artwork. The macOS menu bar uses its rounded cursor contour as a template, tinted by the system. These are display resources, not a signing or authorization mechanism. Windows packages remain unsigned and subject to SmartScreen / Smart App Control reputation and system policy; macOS Developer ID does not apply to Windows.
 
 ## Host settings and updates
 

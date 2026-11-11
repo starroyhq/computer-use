@@ -75,8 +75,8 @@ final class HostApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, Ho
     private lazy var statusCursorImage: NSImage? = {
         guard let image = NSImage(contentsOf: paths.resources.appendingPathComponent("menu-bar-icon.png")) else { return nil }
         image.size = NSSize(width: 18, height: 18)
-        // Keep the requested white glyph rather than letting template tinting change its color.
-        image.isTemplate = false
+        // Let AppKit tint the cursor for the current menu bar appearance.
+        image.isTemplate = true
         return image
     }()
 

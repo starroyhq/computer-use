@@ -1,5 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <title>Computer Use</title>
-  <rect x="64" y="64" width="896" height="896" rx="224" fill="#F2EFE8"/>
-  <path d="M351.5 330.4 Q338 276 384.8 306.8 L719.9 527.6 Q760 554 713.7 566.7 L597 598.6 Q570 606 551.2 626.7 L484.3 700.5 Q452 736 440.5 689.4Z" fill="#292826"/>
+  <defs>
+    <clipPath id="plate-clip"><rect x="64" y="64" width="896" height="896" rx="224"/></clipPath>
+    <linearGradient id="plate" x1=".13" y1="0" x2=".81" y2="1"><stop offset="0" stop-color="#DCE8FC"/><stop offset="0.55" stop-color="#B9D0ED"/><stop offset="1" stop-color="#9ACCCC"/></linearGradient>
+    <radialGradient id="haze-left" cx=".06" cy=".88" r=".76"><stop stop-color="#A994EC" stop-opacity="0.46"/><stop offset="1" stop-color="#A994EC" stop-opacity="0"/></radialGradient>
+    <radialGradient id="haze-right" cx=".95" cy=".22" r=".71"><stop stop-color="#EEFFF9" stop-opacity="0.83"/><stop offset="1" stop-color="#EEFFF9" stop-opacity="0"/></radialGradient>
+    <linearGradient id="ribbon" gradientUnits="userSpaceOnUse" x1="87" y1="914" x2="928" y2="158"><stop offset="0" stop-color="#9875EB"/><stop offset="0.35" stop-color="#6894F1"/><stop offset="0.72" stop-color="#4CD6CE"/><stop offset="1" stop-color="#B9FFEB"/></linearGradient>
+    <linearGradient id="rim" x1=".12" y1="0" x2=".87" y2="1"><stop stop-color="#E9F5FF" stop-opacity=".32"/><stop offset=".55" stop-color="#D6DBFC" stop-opacity=".04"/><stop offset="1" stop-color="#48DFE0" stop-opacity=".24"/></linearGradient>
+    <linearGradient id="pointer" x1=".08" y1="0" x2=".87" y2="1"><stop stop-color="#D5FCFF"/><stop offset=".50" stop-color="#A5E2EB"/><stop offset="1" stop-color="#71B3D4"/></linearGradient>
+    <linearGradient id="pointer-rim" x1=".09" y1="0" x2=".89" y2="1"><stop stop-color="#FFF"/><stop offset=".58" stop-color="#F2F6FF"/><stop offset="1" stop-color="#C8D5ED"/></linearGradient>
+    <filter id="wide-glow" x="-.3" y="-.5" width="1.6" height="2" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="60"/></filter>
+    <filter id="soft-ribbon" x="-.15" y="-.2" width="1.3" height="1.4" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="27"/></filter>
+    <filter id="pointer-shadow" x="-.32" y="-.25" width="1.7" height="1.7" color-interpolation-filters="sRGB"><feDropShadow dx="8" dy="23" stdDeviation="19" flood-color="#304D79" flood-opacity=".36"/></filter>
+  </defs>
+  <g clip-path="url(#plate-clip)">
+    <rect x="64" y="64" width="896" height="896" fill="url(#plate)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#haze-left)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#haze-right)"/>
+    <path d="M-85 828 C142 922 272 810 389 704 C492 610 597 635 680 500 C777 342 833 192 1104 120 L1104 237 C902 234 855 360 756 525 C644 710 548 686 455 786 C310 936 135 1021 -85 947 Z" fill="url(#ribbon)" opacity=".82" filter="url(#wide-glow)"/>
+    <path d="M-85 828 C142 922 272 810 389 704 C492 610 597 635 680 500 C777 342 833 192 1104 120 L1104 237 C902 234 855 360 756 525 C644 710 548 686 455 786 C310 936 135 1021 -85 947 Z" fill="url(#ribbon)" opacity=".76" filter="url(#soft-ribbon)"/>
+    <rect x="69" y="69" width="886" height="886" rx="219" fill="none" stroke="url(#rim)" stroke-width="6"/>
+  </g>
+  <!-- Cursor contour adapted from Cua Driver 0.38.0; see CUA-CURSOR-LICENSE.txt. -->
+  <path id="cursor" d="M411.5 326 C373 315 340 342.5 345.5 386.5 C345.5 386.5 461 700 461 700 C477.5 744 510.5 744 532.5 705.5 C532.5 705.5 582 595.5 582 595.5 C593 573.5 609.5 557 631.5 546 C631.5 546 703 507.5 703 507.5 C741.5 485.5 736 452.5 697.5 436 C697.5 436 411.5 326 411.5 326 Z" fill="url(#pointer)" stroke="url(#pointer-rim)" stroke-width="32" stroke-linejoin="round" paint-order="stroke" filter="url(#pointer-shadow)"/>
 </svg>
