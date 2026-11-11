@@ -21,8 +21,8 @@ const TARGETS = {
     marker: 'computer-use-windows-arm64-package-v1',
     node: { filename: 'node-v24.21.0-win-arm64.zip', sha256: '8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921' },
     cua: {
-      filename: 'cua-driver-rs-0.38.0-windows-arm64-binary.zip',
-      sha256: 'd25c8ebfffb34e4c095ea170baf47b87c35dc0d1116f42e46b39df2bcbff8700',
+      filename: 'cua-driver-rs-0.47.8-windows-arm64-binary.zip',
+      sha256: 'c600678090baca6d141cc7d58e10d2882cf226298fb6e2b3b6f71dba853557eb',
     },
   },
   x64: {
@@ -33,15 +33,15 @@ const TARGETS = {
     marker: 'computer-use-windows-x64-package-v1',
     node: { filename: 'node-v24.21.0-win-x64.zip', sha256: '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541' },
     cua: {
-      filename: 'cua-driver-rs-0.38.0-windows-x86_64-binary.zip',
-      sha256: '5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5',
+      filename: 'cua-driver-rs-0.47.8-windows-x86_64-binary.zip',
+      sha256: '19d9ffb1844b33a9a7ee5fbe9a3fac56be6740a0c947fd55eb08ee4b3f1f3866',
     },
   },
 };
 const NODE_COMMON = { version: '24.21.0', baseUrl: 'https://nodejs.org/dist/v24.21.0', checksumFile: 'SHASUMS256.txt' };
 const CUA_COMMON = {
-  version: '0.38.0',
-  baseUrl: 'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.38.0',
+  version: '0.47.8',
+  baseUrl: 'https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.47.8',
   checksumFile: 'checksums.txt',
 };
 const CUA_LICENSE_SHA256 = 'c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9';
@@ -340,9 +340,9 @@ async function build(target) {
       if (!(await exists(join(dotnetRoot, name)))) throw new Error(`The self-contained .NET license is missing from ${dotnetRoot}.`);
       await cp(join(dotnetRoot, name), join(licenses, target));
     }
-    const cuaLicense = join(cache, 'cua-0.38.0-LICENSE.md');
+    const cuaLicense = join(cache, 'cua-0.47.8-LICENSE.md');
     if (!(await exists(cuaLicense)))
-      await download('https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.38.0/LICENSE.md', cuaLicense);
+      await download('https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.47.8/LICENSE.md', cuaLicense);
     if ((await sha256(cuaLicense)) !== CUA_LICENSE_SHA256) throw new Error('Cua license checksum mismatch.');
     await cp(cuaLicense, join(licenses, 'CUA-LICENSE'));
     for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) await cp(join(ROOT, name), join(licenses, name));

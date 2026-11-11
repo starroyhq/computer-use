@@ -29,7 +29,7 @@ function fixture() {
   };
   const client = {
     metadata: vi.fn<CuaConnection['metadata']>(async () => ({
-      driverVersion: '0.38.0',
+      driverVersion: '0.47.8',
       contractVersion: '0.8.0',
       toolsListSchemaVersion: '1',
       capabilityVersion: '1',
@@ -741,6 +741,27 @@ describe('Cua socket adapter', () => {
     expect(client.callTool.mock.calls.map(([tool]) => tool)).toEqual(['drag', 'drag']);
   });
 
+  it('distinguishes a newly disabled macOS control from an uncertain typing failure', async () => {
+    const { backend, client } = textFixture();
+    const action = { type: 'type' as const, text: 'example', elementId: 's1:1' };
+    const signal = new AbortController().signal;
+    const disabled = { ...success(), isError: true, errorCode: 'element_disabled' };
+    client.callTool.mockResolvedValueOnce({
+      ...disabled,
+      structuredJson: JSON.stringify({ code: 'element_disabled', effect: 'refused', pid: 42, window_id: 19, action: 'type_text' }),
+    });
+    await expect(backend.act(await backend.observe(target), action, 'background', signal)).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: expect.stringContaining('nothing was sent'),
+    });
+    client.callTool.mockResolvedValueOnce(disabled);
+    await expect(backend.act(await backend.observe(target), action, 'background', signal)).rejects.toMatchObject({
+      code: 'unknown_outcome',
+      settled: true,
+    });
+    expect(client.callTool.mock.calls.map(([tool]) => tool)).toEqual(['type_text', 'type_text']);
+  });
+
   it.each([1, 2, 3] as const)('returns completed but unconfirmed effect %s without interrupting the backend', async effect => {
     const { client, backend } = fixture();
     client.callTool.mockResolvedValue({ ...success(), action: { effect, route: 1 } });
@@ -798,7 +819,7 @@ describe('Cua socket adapter', () => {
     expect(JSON.parse(client.callTool.mock.calls[1]![1])).toEqual({ prompt: false });
     const incompatible = fixture();
     incompatible.client.metadata.mockResolvedValue({
-      driverVersion: '0.29.0',
+      driverVersion: '0.38.0',
       contractVersion: '0.8.0',
       toolsListSchemaVersion: '1',
       capabilityVersion: '1',

@@ -997,7 +997,7 @@ export class Runtime implements RpcService {
           methods: descriptions,
           desktop: {
             driver: 'cua-driver',
-            version: '0.38.0',
+            version: '0.47.8',
             coordinateSpace: 'snapshot-image-pixels',
             drag: 'two-endpoint straight gesture',
             scroll: 'direction + line/page units',

@@ -34,7 +34,7 @@ export type CuaConnection = Pick<
 >;
 type State = { snapshot: WindowStateOutput; session: string; consumed: boolean };
 type AppList = Awaited<ReturnType<CuaConnection['listApps']>>['apps'];
-const VERSION = '0.38.0';
+const VERSION = '0.47.8';
 // 本 App 自身（菜单栏应用）。驱动 0.37.0 的 list_apps 开始把运行中的菜单栏应用列为 running，
 // 本 App 的设置和批准窗口不能因此成为桌面目标。
 const HOST_BUNDLE_ID = 'com.starroy.computeruse';
@@ -169,6 +169,9 @@ function checkResult(result: ToolResult, mutation = false): BackendExecution | u
     // 但不带 effect: refused，可能在派发途中失败，仍按结果不明处理。
     if (mutation && result.errorCode === 'foreground_unavailable' && structured(result)?.effect === 'refused')
       throw new CuError('unavailable', FOREGROUND_REFUSED);
+    // 驱动 0.47.8 在派发前重新检查 AXEnabled；只把明确拒绝视为未发送输入。
+    if (mutation && result.errorCode === 'element_disabled' && structured(result)?.effect === 'refused')
+      throw new CuError('invalid_request', 'The desktop control is disabled; nothing was sent. Observe the window again before retrying.');
     throw failure(result.errorCode, mutation, true);
   }
   // UniFFI's ActionEffect enum: Confirmed=0; Partial=1; Unverifiable=2;
@@ -419,7 +422,7 @@ function observedElements(elements: WindowElement[], pixels?: { window: Bounds; 
 }
 
 // Cua Driver 0.28.2 的 macOS 坐标滚轮路径方向与请求相反，且与系统"自然滚动"设置无关
-// （开启、关闭两种设置下均实测反向），派发前需交换方向。0.37.0、0.38.0 的滚轮路径未改（源码中的方向符号相同）。
+// （开启、关闭两种设置下均实测反向），派发前需交换方向。0.47.8 的滚轮路径仍使用相同的方向符号。
 const reversed = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
 
 // 驱动 0.35.2 起，Electron 窗口的后台滚动不再发滚轮事件，改走辅助功能，按请求的方向显示更多内容：方向不能交换。
