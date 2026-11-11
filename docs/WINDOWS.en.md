@@ -32,9 +32,9 @@ Either way, runtime components are bundled; build tools are not required to run 
 
 ## Connect an agent with an installation prompt
 
-In v0.7.0, the app's Connect page presents **Copy setup prompt** by default. Copy the installation prompt and paste it into your agent so it can install the Skill and complete the connection. The app only generates and copies the prompt; it does not install the Skill or write client configuration. Generating the prompt neither pairs a client nor starts the service. You still approve system permissions and initial client authorization locally, and existing profiles do not need pairing again.
+On the app's Connect page, choose **Copy setup prompt** and paste the prompt into your agent so it can install the Skill and connect. You approve system permissions and the first pairing locally. Your agent can reuse a valid profile it already owns.
 
-**Advanced connection** is collapsed by default. Expand it to select an existing profile or enter a new name, copy pairing commands and stdio MCP configuration, or enable local HTTP MCP. The default profile is `default`; the installation prompt, pairing command and MCP configuration share the selected name, and copied content contains no pairing credentials. From the package folder, `bin\node.exe runtime\cli.js skill prompt --profile default` prints the same installation prompt.
+Expand **Advanced connection** to choose a profile, copy pairing commands and stdio MCP configuration, or enable local HTTP MCP. If you leave the profile blank, the agent chooses and records its own. If you specify a name, the installation prompt, pairing command and MCP configuration use it. Copied content contains no pairing credentials. From the package folder, `bin\node.exe runtime\cli.js skill prompt` also prints the setup prompt.
 
 ## On-demand startup and pause protection
 
@@ -70,7 +70,7 @@ Windows Host / UI, process and transport isolation checks passed for this change
 
 ## Build and start from source
 
-To build on Windows x64 or ARM64, install .NET 10 SDK and Node 24+ for the host architecture, plus pnpm 10, then obtain the source as described in the [README](../README.en.md). From the repository root in PowerShell:
+To build on Windows x64 or ARM64, install .NET 10 SDK and Node 24+ for the host architecture, plus pnpm 10, then follow the [development guide](../scripts/README.md) to obtain the source. From the repository root in PowerShell:
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -127,7 +127,7 @@ Open an ordinary, non-elevated test application, then run:
 & .\bin\node.exe .\runtime\cli.js config codex --profile codex
 ```
 
-Add the output to the Windows user's `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. Reload client configuration and try the [read-only task in the README](../README.en.md#connect-an-agent-and-observe). The configuration contains no credentials and requires neither HTTP nor SSH. Real model validation with Windows-local Codex is pending; earlier cross-machine tests used Mac Codex. Other clients can use `config stdio` for generic JSON configuration.
+Add the output to the Windows user's `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. Reload client configuration and try the [read-only task in the README](../README.en.md#get-started-in-three-steps). The configuration contains no credentials and requires neither HTTP nor SSH. Real model validation with Windows-local Codex is pending; earlier cross-machine tests used Mac Codex. Other clients can use `config stdio` for generic JSON configuration.
 
 For fixture-only acceptance, create a separate profile with `pair --profile fixture --name 'Fixture Agent' --app 'C:\path\to\ComputerUseFixture.exe'`, replacing the placeholder with the real full path. Use `fixture` consistently in later commands and agent configuration; repeat `--app` to allow several specific applications. Isolated browser access is separate; see [Pairing scope](USAGE.md#配对范围--pairing-scope).
 

@@ -1,4 +1,8 @@
-# README screenshots
+# README images
+
+`window-reading-demo.webp` shows a read-only example with the v1.0.0 app icon. The left panel uses the test window captured by Computer Use during the [macOS fault recovery validation](../validation-fault-recovery-20261012.md), with an outline added around the text field. The conversation on the right illustrates how an agent can report the text from that window.
+
+## Connect page screenshots
 
 These images show the native Connect pages used by the v0.7.0 onboarding flow. They are unmodified captures, not mockups.
 

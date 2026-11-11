@@ -2,21 +2,21 @@
 
 [中文首页](../README.md) · [English home](../README.en.md) · [Windows 中文](WINDOWS.md) · [Windows English](WINDOWS.en.md)
 
-先按首页安装 App，在“接入”页复制提示词交给 Agent，再完成本机授权与配对；普通使用无需源码构建。App 默认 profile 为 `default`。本页 CLI 示例使用已配对的 `codex` profile；运行时统一替换为你实际使用的 profile，并将占位 ID 替换为命令返回的值。Windows 在便携包目录中将 `computer-use` 换为 `& .\bin\node.exe .\runtime\cli.js`。
+先按首页安装 App，在“接入”页复制提示词交给 Agent，再完成本机授权与配对。普通使用无需源码构建。本页手动 CLI 示例多使用已配对的 `codex` profile。请统一替换为你实际使用的名称，并将占位 ID 替换为命令返回的值。Windows 在便携包目录中将 `computer-use` 换为 `& .\bin\node.exe .\runtime\cli.js`。
 
-Install the App, copy the setup prompt from Connect to your Agent, and complete local permissions and pairing as described in the README. No source build is needed for normal use. The App defaults to the `default` profile; CLI examples on this page use an existing `codex` profile. Consistently substitute your actual profile and replace placeholder IDs with returned values. On Windows, run from the portable package directory and replace `computer-use` with `& .\bin\node.exe .\runtime\cli.js`.
+Install the App, copy the setup prompt from Connect to your Agent, and complete local permissions and pairing as described in the README. The prebuilt App includes its runtime. Most manual CLI examples on this page use an existing `codex` profile. Substitute your actual profile and replace placeholder IDs with returned values. On Windows, run from the portable package directory and replace `computer-use` with `& .\bin\node.exe .\runtime\cli.js`.
 
 ## App ↔ Skill 双向接入 / Bidirectional onboarding
 
-v0.7.0 的 App 在“接入”页提供“复制安装提示词”。将提示词粘贴给你使用的 Agent，由它获取完整 Skill，按自身支持的方式安装并完成连接验证。用户无需手动保存脚本或选择技能目录。默认 profile 为 `default`；profile 选择、手动配对、MCP 配置和 HTTP 开关放在默认收起的“高级接入”。提示词附带本机路径提示，不含凭据；已有 Skill 自定义内容、profile 和授权范围应保留。
+在 App 的“接入”页复制安装提示词并粘贴给 Agent。它按自身支持的方式安装完整 Skill 并检查连接。自 v0.10.1 起，未指定 profile 时由 Agent 自行选择并记录一个稳定的名称。只复用属于该 Agent 的已有 profile，或使用用户明确指定的名称。profile 选择、手动配对、MCP 配置和 HTTP 开关在“高级接入”中。提示词只含本机路径提示等接入信息，不含凭据。已有 Skill 自定义内容和授权范围保留。
 
-v0.7.0 lets you copy an installation prompt from Connect. Paste it into your Agent; the Agent retrieves the complete Skill, installs it using its own supported mechanism, and verifies the connection. Users do not need to save scripts or choose a Skill directory. The default profile is `default`; profile selection, manual pairing, MCP configuration and HTTP controls are under the collapsed Advanced connection section. The prompt includes non-secret local path hints and preserves existing customizations and grants.
+Copy the installation prompt from Connect and paste it into your Agent. It installs the complete Skill using its supported method and verifies the connection. Since v0.10.1, the Agent chooses and records a stable profile name when you leave the profile blank. It reuses a profile it already owns or uses one you explicitly select. Profile selection, manual pairing, MCP configuration and HTTP controls are under Advanced connection. The prompt includes local path hints and contains no credentials. Existing Skill customizations and grants are preserved.
 
 ```sh
-computer-use preflight --profile default
+computer-use preflight --profile my-agent
 computer-use instructions
-computer-use skill prompt --profile default
-computer-use skill export --profile default --out SKILL.md
+computer-use skill prompt
+computer-use skill export --profile my-agent --out SKILL.md
 ```
 
 这些命令无需配对、不启动 Host。`preflight` 直接输出 JSON（不带 `--json`），区分 missing、invalid、unverified、valid 和 unauthorized；离线凭据只标记 unverified。Host 在线且验证所选凭据后，支持该字段的新版本还返回 `profile.authorization`（`allApps`、`appIds`、`browser`、`foreground`）；离线、旧服务未提供或字段无效时省略，表示范围未知。`instructions` 返回当前版本说明。`skill prompt` 返回供 Agent 执行安装的提示词；`skill export` 是 Agent 获取完整 Markdown 的底层接口，不带 `--out` 时输出到 stdout，写文件拒绝覆盖。App 不直接写入任何 Agent 的技能目录。

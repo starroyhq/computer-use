@@ -32,9 +32,9 @@ Set-Location "$env:LOCALAPPDATA\Programs\Computer Use"
 
 ## 复制安装提示词接入 Agent
 
-v0.7.0 的 App“接入”页默认提供“复制安装提示词”。点击后把提示词粘贴给你的 Agent，由它安装 Skill 并完成连接。App 只生成并复制提示词，不替 Agent 安装 Skill 或写入客户端配置；生成提示词不发起配对、不启动服务。系统权限和首次客户端授权仍须由你在本机批准，已有 profile 不必重复配对。
+在 App 的“接入”页点击“复制安装提示词”，粘贴给你的 Agent，由它安装 Skill 并完成连接。系统权限和首次客户端授权仍须由你在本机批准。已有授权且属于当前 Agent 的 profile 可以复用。
 
-“高级接入”默认收起；展开后可选择已有 profile 或输入新名称、复制配对命令与 stdio MCP 配置，以及启用本机 HTTP MCP。默认 profile 为 `default`，安装提示词、配对命令与 MCP 配置共用所选名称，复制内容不包含配对凭据。在包目录中也可用 `bin\node.exe runtime\cli.js skill prompt --profile default` 输出同样的安装提示词。
+展开“高级接入”可指定已有或新建的 profile、复制配对命令和 stdio MCP 配置，并启用本机 HTTP MCP。留空时由 Agent 自行选择并记录 profile。指定名称后，安装提示词、配对命令和 MCP 配置使用该名称。复制的内容不含配对凭据。在包目录中运行 `bin\node.exe runtime\cli.js skill prompt` 也可输出安装提示词。
 
 ## 按需启动与暂停保护
 
@@ -127,7 +127,7 @@ Set-Location '.\artifacts\Computer Use Windows x64' # 安装版或预构建 ZIP�
 & .\bin\node.exe .\runtime\cli.js config codex --profile codex
 ```
 
-将输出添加到 Windows 用户的 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`，重新加载客户端配置后按[首页的只读任务](../README.md#接入-agent-与首次观察)验证。配置不含凭据，不需要启用 HTTP 或 SSH。本机 Windows Codex 的真实模型验证仍待完成；已有跨机器实测使用 Mac Codex。其他客户端可将 `config codex` 换为 `config stdio` 获取通用 JSON。
+将输出添加到 Windows 用户的 `~/.codex/config.toml` 或受信任项目的 `.codex/config.toml`，重新加载客户端配置后按[首页的只读任务](../README.md#三步上手)验证。配置不含凭据，不需要启用 HTTP 或 SSH。本机 Windows Codex 的真实模型验证仍待完成；已有跨机器实测使用 Mac Codex。其他客户端可将 `config codex` 换为 `config stdio` 获取通用 JSON。
 
 需要只授权 Fixture 的验收 profile 时，另用 `pair --profile fixture --name 'Fixture Agent' --app 'C:\path\to\ComputerUseFixture.exe'`，把占位路径替换为真实完整路径。后续命令和 Agent 配置统一使用 `fixture`；可重复 `--app` 限定多个应用。独立浏览器单独授权，详见[配对范围](USAGE.md#配对范围--pairing-scope)。
 

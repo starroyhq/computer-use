@@ -1,4 +1,42 @@
-# macOS 开发 App 打包
+# 本地开发与打包 / Development and packaging
+
+## 本地开发 / Local development
+
+准备 Git、Node.js 24+ 和 pnpm 10，获取源码并运行检查。 / With Git, Node.js 24+ and pnpm 10 installed, get the source and run the checks.
+
+```sh
+git clone https://github.com/starroyhq/computer-use.git
+cd computer-use
+pnpm install --frozen-lockfile
+pnpm check
+```
+
+浏览器集成测试需要匹配的 Chromium。先运行 `pnpm exec playwright install chromium`，再运行 `pnpm check`。跳过的测试不计为通过。 / For browser integration tests, install matching Chromium with `pnpm exec playwright install chromium` before `pnpm check`. Skipped tests do not count as passes.
+
+### macOS
+
+在 Apple Silicon Mac（macOS 14+）上准备 Xcode 和 Swift 工具链。 / Use an Apple Silicon Mac with macOS 14+ and the Xcode and Swift toolchain.
+
+```sh
+pnpm native:test
+pnpm package:app
+open 'artifacts/Computer Use.app'
+```
+
+替换开发 App 前先退出运行中的实例。签名或应用标识变化后，系统可能要求重新授权。 / Quit the running development App before replacing it. A change in signature or app identifier can require new system permissions.
+
+### Windows
+
+在 Windows 11 上准备 .NET 10 SDK，在 PowerShell 中构建并打开完整便携包。 / With the .NET 10 SDK on Windows 11, build and open the complete portable package in PowerShell.
+
+```powershell
+node scripts/package-windows.mjs --arch x64
+& '.\artifacts\Computer Use Windows x64\ComputerUse.WindowsHost.exe'
+```
+
+ARM64 改用 `--arch arm64` 和 `Computer Use Windows ARM64` 目录。 / For ARM64, use `--arch arm64` and the `Computer Use Windows ARM64` directory.
+
+## macOS 开发 App 打包
 
 两端打包均要求仓库根目录存在 `LICENSE`、`NOTICE` 和 `THIRD_PARTY_NOTICES.md`，并将其复制到包内 `licenses` 目录；缺失时构建失败。分发源码或二进制时保留适用的项目及第三方许可声明。
 
